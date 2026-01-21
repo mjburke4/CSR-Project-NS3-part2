@@ -1,14 +1,15 @@
-This folder contains a mechanical split of csr-mac-core-demo (17).cc into separate include files.
+CSR ns-3 Module
 
-Files:
-- csr-common.h: shared includes, constants/enums, CSV helpers, CsrHeader, forward decls.
-- csr-mac-core.h: CsrMacCore class (header-only, includes csr-common.h).
-- csr-phy-model.h: CsrPhyModel + CsrRxDecision (header-only).
-- csr-net-device.h: CsrNetDevice glue (header-only).
-- csr-hop-layer.h: CsrHopLayer (header-only).
-- csr-nwk-layer.h: CsrNetLayer (header-only).
-- csr-mac-demo-split.cc: scratch-style main that includes the above and runs the scenario.
+Structure:
+- model/           Header files for the CSR module (placed in src/csr/model/)
+- CMakeLists.txt   ns-3 module build configuration (placed in src/csr/)
+- csr-mac-demo-split.cc   Demo simulation (placed in scratch/)
 
-Notes:
-- This is header-only for speed and to avoid linker issues while you migrate into a proper ns-3 module.
-- Next step is to convert these headers into .cc/.h pairs (move method bodies into .cc) and add src/csr/CMakeLists.txt.
+Setup:
+1. Copy model/ and CMakeLists.txt to ns-3-dev/src/csr/
+2. Copy csr-mac-demo-split.cc to ns-3-dev/scratch/
+3. Configure: ./ns3 configure --disable-examples
+4. Build: ./ns3 build csr-mac-demo-split
+5. Run: ./ns3 run csr-mac-demo-split
+
+The demo includes headers via "ns3/csr-*.h" which resolves to the module.

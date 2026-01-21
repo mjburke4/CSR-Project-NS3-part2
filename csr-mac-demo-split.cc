@@ -1,9 +1,9 @@
-#include "csr-common.h"
-#include "csr-mac-core.h"
-#include "csr-phy-model.h"
-#include "csr-net-device.h"
-#include "csr-hop-layer.h"
-#include "csr-nwk-layer.h"
+#include "ns3/csr-common.h"
+#include "ns3/csr-mac-core.h"
+#include "ns3/csr-phy-model.h"
+#include "ns3/csr-net-device.h"
+#include "ns3/csr-hop-layer.h"
+#include "ns3/csr-nwk-layer.h"
 
 // main()
 // ------------------------------------------------------------
