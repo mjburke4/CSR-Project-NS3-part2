@@ -178,10 +178,18 @@ main (int argc, char *argv[])
   dev1->GetMac ().StartSlotTick (Seconds (1.0));
   dev2->GetMac ().StartSlotTick (Seconds (1.0));
 
+  net0->StartDiscovery (Seconds (10.0), Seconds (30.0));
+  net1->StartDiscovery (Seconds (10.0), Seconds (30.0));
+  net2->StartDiscovery (Seconds (10.0), Seconds (30.0));
+
   // OPNET-style bounded discovery window
-  dev0->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
+  /*dev0->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
   dev1->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
-  dev2->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
+  dev2->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));*/
+
+  /*dev0->GetNwk ().StartDiscovery (Seconds (10.0), Seconds (30.0));
+  dev1->GetNwk ().StartDiscovery (Seconds (10.0), Seconds (30.0));
+  dev2->GetNwk ().StartDiscovery (Seconds (10.0), Seconds (30.0));*/
 
   // Print neighbor tables shortly after discovery ends (~40s)
   Simulator::Schedule (Seconds (40.5),

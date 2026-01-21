@@ -198,6 +198,38 @@ private:
   std::map<uint16_t, RxSeqState>                m_rxStateBySrc;
 };
 
+void
+CsrHopLayer::SendHello ()
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  // HELLO is a control broadcast, no payload needed
+  Ptr<Packet> p = Create<Packet> ();
+
+  // Build MAC header directly (don’t use SendData which forces CSR_PKT_DATA)
+  static uint16_t helloSeq = 0;
+  uint16_t seq = ++helloSeq;
+
+  CsrHeader h;
+  h.SetSrc (m_nodeId);
+  h.SetDst (CSR_BROADCAST_ID);
+  h.SetSeq (seq);
+  h.SetDscp (7);
+  h.SetAckable (false);
+  h.SetIsAck (false);
+  h.SetIsDack (false);
+  h.SetType (CSR_PKT_HELLO);
+  h.SetDestType (CSR_DEST_BROADCAST);
+
+  // OPNET start_discovery uses min_speed for hello
+  h.SetSpeedKey (8);
+
+  p->AddHeader (h);
+
+  // Enqueue like any other TX frame
+  m_mac->EnqueueTxFrame (p, CSR_BROADCAST_ID, /*dscp*/7, /*ackable*/false);
+}
+
 /*void
 CsrHopLayer::PrintNeighbors () const
 {

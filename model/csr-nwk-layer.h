@@ -21,6 +21,9 @@ public:
     m_nodeId = id;
   }
 
+  void StartDiscovery (Time startDelay, Time duration);
+  bool IsDiscoveryActive () const { return m_discoveryActive; }
+
   void DumpNsdp (std::ostream& os) const
   {
     for (auto const& kv : m_nsdp)
@@ -312,6 +315,14 @@ private:
   std::vector<RouteEntry>               m_routes;
 
   std::map<std::pair<uint16_t,uint16_t>, NsdpEntry> m_nsdp;
+
+  bool    m_discoveryActive { false };
+  EventId m_discoveryStartEvent;
+  EventId m_discoveryStopEvent;
+
+  void DiscoveryStart ();
+  void DiscoveryStop ();
+
 };
 
 
@@ -325,6 +336,39 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
   std::cout << "  [APP] Node received payload from " << src
             << " (size=" << payload->GetSize () << " B)"
             << std::endl;
+}
+
+void
+CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
+{
+  if (m_discoveryStartEvent.IsRunning ()) { Simulator::Cancel (m_discoveryStartEvent); }
+  if (m_discoveryStopEvent.IsRunning ())  { Simulator::Cancel (m_discoveryStopEvent);  }
+
+  m_discoveryActive = false;
+
+  m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
+  m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
+}
+
+void
+CsrNetLayer::DiscoveryStart ()
+{
+  m_discoveryActive = true;
+
+  // OPNET start_discovery() immediately emits br_Hello
+  if (m_hop != nullptr)
+    {
+      // small jitter is optional; OPNET doesn’t necessarily jitter, but helps collisions
+      Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+      double jitter = rng->GetValue (0.05, 0.20);
+      Simulator::Schedule (Seconds (jitter), &CsrHopLayer::SendHello, m_hop);
+    }
+}
+
+void
+CsrNetLayer::DiscoveryStop ()
+{
+  m_discoveryActive = false;
 }
 
 // ------------------------------------------------------------
