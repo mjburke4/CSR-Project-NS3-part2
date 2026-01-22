@@ -341,8 +341,8 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
 void
 CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 {
-  if (m_discoveryStartEvent.IsRunning ()) { Simulator::Cancel (m_discoveryStartEvent); }
-  if (m_discoveryStopEvent.IsRunning ())  { Simulator::Cancel (m_discoveryStopEvent);  }
+  if (m_discoveryStartEvent.IsPending ()) { Simulator::Cancel (m_discoveryStartEvent); }
+  if (m_discoveryStopEvent.IsPending ())  { Simulator::Cancel (m_discoveryStopEvent);  }
 
   m_discoveryActive = false;
 

@@ -46,6 +46,9 @@ public:
   // Called by MAC when frame arrives off-air
   void ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb);
 
+  // Send HELLO broadcast for discovery
+  void SendHello ();
+
   void PrintNeighbors () const;
 
 private:
