@@ -260,10 +260,16 @@ private:
       uint16_t hopDest;
       if (!LookupNextHop (e.nwkDst, hopDest))
         {
-          NS_LOG_INFO ("CsrNetLayer[" << m_nodeId << "]: no route to nwkDst="
-                                      << e.nwkDst << "; dropping packet.");
-          m_nwkQueue.pop_front ();
-          continue;
+          // OPNET-like behavior: if we have data but no route/next hop,
+          // trigger on-demand discovery and keep the packet queued.
+          EnsureDiscoveryForTx ();
+
+          std::cout << "[NWK " << m_nodeId << "] No route to nwkDst="
+                    << e.nwkDst << " -> on-demand discovery; holding packet"
+                    << std::endl;
+
+          // Do NOT pop; stop draining for now and try again later
+          break;
         }
 
         // --- NEW: NSDP-based flow gating (per-flow policy) ---
@@ -288,8 +294,8 @@ private:
       // Hop can accept another frame → remove from queue and send
       m_nwkQueue.pop_front ();
       m_hop->SendData (hopDest, e.dscp, e.payload, e.ack);
-    }
 
+    }
   }
 
   bool LookupNextHop (uint16_t nwkDst, uint16_t &nextHopOut)
@@ -322,6 +328,7 @@ private:
 
   void DiscoveryStart ();
   void DiscoveryStop ();
+  void EnsureDiscoveryForTx ();
 
 };
 
@@ -348,6 +355,15 @@ CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 
   m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
   m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
+}
+
+void CsrNetLayer::EnsureDiscoveryForTx ()
+{
+  if (!m_discoveryActive)
+    {
+      std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery" << std::endl;
+      StartDiscovery (Seconds (0.0), Seconds (30.0));
+    }
 }
 
 void
