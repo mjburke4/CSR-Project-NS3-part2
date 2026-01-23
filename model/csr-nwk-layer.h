@@ -1,10 +1,19 @@
 #pragma once
 #include "csr-common.h"
+#include "csr-hello-header.h"
+
 
 class CsrNetLayer : public Object
 {
 public:
-  static TypeId GetTypeId (void)
+  
+  enum class DiscoveryState { IDLE, SCHEDULED, ACTIVE, COOLDOWN };
+
+  DiscoveryState m_discState { DiscoveryState::IDLE };
+  EventId m_discoveryStartEvent, m_discoveryStopEvent, m_discoveryCooldownEvent;
+  Time m_discoveryCooldown { Seconds(5) }; // tune later
+
+static TypeId GetTypeId (void)
   {
     static TypeId tid = TypeId ("ns3::CsrNetLayer")
       .SetParent<Object> ()
@@ -323,12 +332,19 @@ private:
   std::map<std::pair<uint16_t,uint16_t>, NsdpEntry> m_nsdp;
 
   bool    m_discoveryActive { false };
-  EventId m_discoveryStartEvent;
-  EventId m_discoveryStopEvent;
+
+  uint32_t GetNeighborCount () const;
+
+  uint8_t m_minSpeedKey { 8 };  // temporary default; map to your actual rate table later
 
   void DiscoveryStart ();
   void DiscoveryStop ();
+  void DiscoveryCooldownOver ();
+  void SendHelloBroadcast ();
   void EnsureDiscoveryForTx ();
+  private:
+  void TryDrainQueueAfterDiscovery ();
+
 
 };
 
@@ -345,7 +361,7 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
             << std::endl;
 }
 
-void
+/*void
 CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 {
   if (m_discoveryStartEvent.IsPending ()) { Simulator::Cancel (m_discoveryStartEvent); }
@@ -355,18 +371,66 @@ CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 
   m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
   m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
+}*/
+
+void CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
+{
+  if (m_discoveryStartEvent.IsPending ()) Simulator::Cancel (m_discoveryStartEvent);
+  if (m_discoveryStopEvent.IsPending  ()) Simulator::Cancel (m_discoveryStopEvent);
+
+  // If we're already scheduled/active/cooldown, don't restart (OPNET-like gating)
+  if (m_discState == DiscoveryState::SCHEDULED ||
+      m_discState == DiscoveryState::ACTIVE ||
+      m_discState == DiscoveryState::COOLDOWN)
+    {
+      return;
+    }
+
+  // IMPORTANT: mark as scheduled immediately (prevents duplicate triggers)
+  m_discState = DiscoveryState::SCHEDULED;
+
+  m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
+  m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
 }
 
-void CsrNetLayer::EnsureDiscoveryForTx ()
+/*void CsrNetLayer::EnsureDiscoveryForTx ()
 {
   if (!m_discoveryActive)
     {
       std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery" << std::endl;
       StartDiscovery (Seconds (0.0), Seconds (30.0));
     }
+}*/
+
+/*void CsrNetLayer::EnsureDiscoveryForTx ()
+{
+  if (m_discoveryActive)
+    {
+      return;
+    }
+
+  // Set state first so repeated callers in same time slice won't retrigger
+  m_discoveryActive = true;
+  m_discoveryInitiatedBy = DISCOVERY_REASON_NO_ROUTE;   // optional but very OPNET-ish
+  m_discoveryAttempts++;                                // optional counter (OPNET vibe)
+
+  std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
+
+  StartDiscovery (Seconds (0.0), Seconds (30.0));
+}*/
+
+void CsrNetLayer::EnsureDiscoveryForTx ()
+{
+  if (m_discState != DiscoveryState::IDLE)
+    {
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
+  StartDiscovery (Seconds (0.0), Seconds (30.0));
 }
 
-void
+/*void
 CsrNetLayer::DiscoveryStart ()
 {
   m_discoveryActive = true;
@@ -379,12 +443,110 @@ CsrNetLayer::DiscoveryStart ()
       double jitter = rng->GetValue (0.05, 0.20);
       Simulator::Schedule (Seconds (jitter), &CsrHopLayer::SendHello, m_hop);
     }
+}*/
+
+void CsrNetLayer::DiscoveryStart ()
+{
+  m_discState = DiscoveryState::ACTIVE;
+
+  // OPNET start_discovery(): schedule stop already done outside (you did that), now send HELLO
+  SendHelloBroadcast();   // NWK->HOP HELLO, with OPNET-ish fields
 }
 
-void
+/*void
 CsrNetLayer::DiscoveryStop ()
 {
   m_discoveryActive = false;
+}*/
+
+void CsrNetLayer::DiscoveryStop ()
+{
+  m_discState = DiscoveryState::COOLDOWN;
+
+  // OPNET clear_discovery(): finalize + notify + stop discovery behavior
+  // (your minimal version can just switch off + trigger queue drain attempt)
+  Simulator::Schedule (m_discoveryCooldown, &CsrNetLayer::DiscoveryCooldownOver, this);
+
+  TryDrainQueueAfterDiscovery(); // re-run CheckNwkQueue or schedule it
+}
+
+void
+CsrNetLayer::TryDrainQueueAfterDiscovery ()
+{
+  // OPNET-equivalent of re-entering the NWK process after discovery
+  CheckNwkQueue ();
+}
+
+void
+CsrNetLayer::SendHelloBroadcast ()
+{
+  if (!m_hop) return;
+
+  Ptr<Packet> p = Create<Packet> ();
+
+  static uint16_t helloSeq = 0;
+
+  CsrHelloHeader hh;
+  hh.SetNodeId (m_nodeId);
+  hh.SetHelloSeq (++helloSeq);
+
+  // Keep it simple: speedKey is what you actually use in CSR headers anyway
+  hh.SetSpeedKey (m_minSpeedKey);   // define m_minSpeedKey or hardcode 8 temporarily
+
+  // Integer scaled dBm*10, placeholder until you compute it properly
+  hh.SetRxPowerDbmX10 (-900);        // -90.0 dBm
+
+  // OPNET-ish “active” proxy: neighbor count (or 0 for now)
+  hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
+
+  p->AddHeader (hh);
+
+  m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
+}
+
+uint32_t
+CsrNetLayer::GetNeighborCount () const
+{
+  return 0;
+}
+
+/*void
+CsrNetLayer::SendHelloBroadcast ()
+{
+  if (!m_hop) return;
+
+  // Build HELLO payload with CsrHelloHeader
+  Ptr<Packet> p = Create<Packet> ();
+
+  CsrHelloHeader hh;
+  hh.SetNodeId (m_nodeId);
+  hh.SetSource (m_nodeId);
+  hh.SetDestination (CSR_BROADCAST_ID);
+  hh.SetDestType (CSR_DEST_BROADCAST);
+
+  // Default values - can be configured later
+  hh.SetTxPower (30.0);      // max TX power dBm
+  hh.SetSpeed (8.0);         // min speed key
+  hh.SetRxPower (-90.0);     // RX threshold
+  hh.SetCapability (0);
+  hh.SetActive (0);
+
+  p->AddHeader (hh);
+
+  m_hop->SendHello (p);
+}*/
+
+void
+CsrNetLayer::DiscoveryCooldownOver ()
+{
+  // OPNET-equivalent: discovery is fully complete and can be triggered again
+  m_discState = DiscoveryState::IDLE;
+
+  // Clear legacy flag if you still have it
+  m_discoveryActive = false;
+
+  // Optional but safe: try to forward anything that may now succeed
+  CheckNwkQueue ();
 }
 
 // ------------------------------------------------------------

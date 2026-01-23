@@ -47,7 +47,10 @@ public:
   void ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb);
 
   // Send HELLO broadcast for discovery
-  void SendHello ();
+  //void SendHello ();
+  // instead of void SendHello();
+  void SendHello (Ptr<Packet> helloPayload);
+
 
   void PrintNeighbors () const;
 
@@ -182,6 +185,15 @@ private:
   uint16_t                                      m_nodeId;
   Callback<void, Ptr<Packet>, uint16_t>         m_rxFromHopCb;
 
+  // HELLO broadcast config (OPNET-style)
+  double   m_maxPower     { 30.0 };    // max TX power dBm
+  double   m_minSpeed     { 8.0 };     // min speed key
+  double   m_rxS0Base     { -100.0 };  // RX_S0_BASE_LEVEL dBm
+  double   m_linkMargin   { 10.0 };    // link margin dB
+  uint8_t  m_capability   { 0 };       // capability flags
+  uint16_t m_activeNodes  { 0 };       // active node count
+  CsrHopLayer* m_hop      { nullptr }; // self-reference for SendHelloBroadcast
+
   std::map<uint16_t, uint16_t>                  m_lastSentSeqByDest;
   std::list<ResendEntry>                        m_resendQueue;
   EventId                                       m_resendEvent;
@@ -201,15 +213,11 @@ private:
   std::map<uint16_t, RxSeqState>                m_rxStateBySrc;
 };
 
-void
-CsrHopLayer::SendHello ()
+void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
 {
   NS_ASSERT (m_mac != nullptr);
 
-  // HELLO is a control broadcast, no payload needed
-  Ptr<Packet> p = Create<Packet> ();
-
-  // Build MAC header directly (don’t use SendData which forces CSR_PKT_DATA)
+  // Outer MAC/HOP header
   static uint16_t helloSeq = 0;
   uint16_t seq = ++helloSeq;
 
@@ -219,18 +227,13 @@ CsrHopLayer::SendHello ()
   h.SetSeq (seq);
   h.SetDscp (7);
   h.SetAckable (false);
-  h.SetIsAck (false);
-  h.SetIsDack (false);
   h.SetType (CSR_PKT_HELLO);
   h.SetDestType (CSR_DEST_BROADCAST);
+  h.SetSpeedKey (8); // or map from helloPayload->Speed later
 
-  // OPNET start_discovery uses min_speed for hello
-  h.SetSpeedKey (8);
+  helloPayload->AddHeader (h);
 
-  p->AddHeader (h);
-
-  // Enqueue like any other TX frame
-  m_mac->EnqueueTxFrame (p, CSR_BROADCAST_ID, /*dscp*/7, /*ackable*/false);
+  m_mac->EnqueueTxFrame (helloPayload, CSR_BROADCAST_ID, 7, false);
 }
 
 /*void
