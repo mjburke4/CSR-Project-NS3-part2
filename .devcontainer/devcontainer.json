@@ -1,0 +1,4 @@
+{
+  "name": "CSR NS3 Development",
+  "image": "mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04"
+}

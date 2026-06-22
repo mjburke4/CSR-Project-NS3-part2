@@ -1,6 +1,7 @@
 #pragma once
 #include "csr-common.h"
 #include "csr-hello-header.h"
+#include "csr-hop-layer.h"
 
 
 class CsrNetLayer : public Object
@@ -33,6 +34,11 @@ static TypeId GetTypeId (void)
   void StartDiscovery (Time startDelay, Time duration);
   bool IsDiscoveryActive () const { return m_discoveryActive; }
 
+  void ProcessHello (Ptr<Packet> helloPayload,
+                   uint16_t hopSrc,
+                   double pathlossDb,
+                   double snrDb);
+
   void DumpNsdp (std::ostream& os) const
   {
     for (auto const& kv : m_nsdp)
@@ -49,9 +55,74 @@ static TypeId GetTypeId (void)
       }
   }
 
+  void ClearRoutes ()
+  {
+    m_routes.clear ();
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Cleared route table"
+              << std::endl;
+  }
+
+  void DumpRoutes () const
+  {
+    std::cout << "[NWK " << m_nodeId << "] Routes:";
+
+    if (m_routes.empty ())
+      {
+        std::cout << " <none>";
+      }
+    else
+      {
+        for (const auto &re : m_routes)
+          {
+            std::cout << " dst=" << re.nwkDst
+                      << "->nh=" << re.nextHop
+                      << "(cost=" << re.cost << ")";
+          }
+      }
+
+    std::cout << std::endl;
+  }
+
+  /*void SetHop (Ptr<CsrHopLayer> hop)
+  {
+    m_hop = hop;
+  }*/
+
+  /*void SetHop (Ptr<CsrHopLayer> hop)
+  {
+    m_hop = hop;
+
+    if (m_hop != nullptr)
+      {
+        m_hop->SetRxHelloFromHopCallback (
+          MakeCallback (&CsrNetLayer::ProcessHello, this));
+      }
+  }*/
+
   void SetHop (Ptr<CsrHopLayer> hop)
   {
     m_hop = hop;
+
+    if (m_hop != nullptr)
+      {
+        // Data/control payloads from HOP up to NWK
+        m_hop->SetRxFromHopCallback (
+          MakeCallback (&CsrNetLayer::ReceiveFromHop, this));
+
+        // HELLO/control discovery path: OPNET proc_hello() equivalent
+        m_hop->SetRxHelloFromHopCallback (
+          MakeCallback (&CsrNetLayer::ProcessHello, this));
+
+        // HOP ACK/DACK/resend completion releases NWK NSDP flow count
+        m_hop->SetNsdpDecrementCallback (
+          MakeCallback (&CsrNetLayer::DecrementNsdp, this));
+
+        // HOP asks NWK whether this flow should use DACK-style delayed release
+        m_hop->SetShouldDackCallback (
+          MakeCallback (&CsrNetLayer::ShouldDack, this));
+      }
   }
 
   // Net -> App callback: payload + network source node ID
@@ -127,8 +198,10 @@ static TypeId GetTypeId (void)
     if (e.count > 0)
       {
         e.count--;
-        //std::cout << "[NWK " << m_nodeId << "] NSDP(" << src
-        //  << "->" << dst << ") decremented to " << e.count << std::endl;
+      std::cout << "[NWK " << m_nodeId << "] NSDP("
+                << src << "->" << dst
+                << ") decremented to "
+                << e.count << std::endl;
       }
   }
 
@@ -189,14 +262,43 @@ static TypeId GetTypeId (void)
   }
 
     // Add a static route (for now): nwkDst -> nextHop
-  void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
+    void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
+  {
+    for (auto &re : m_routes)
+      {
+        if (re.nwkDst == nwkDst)
+          {
+            re.nextHop = nextHop;
+            re.cost = 1;
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Updated route dst=" << nwkDst
+                      << " nextHop=" << nextHop
+                      << std::endl;
+            return;
+          }
+      }
+
+    RouteEntry re;
+    re.nwkDst = nwkDst;
+    re.nextHop = nextHop;
+    re.cost = 1;
+    m_routes.push_back (re);
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Added route dst=" << nwkDst
+              << " nextHop=" << nextHop
+              << std::endl;
+  }
+
+  /*void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
   {
     RouteEntry re;
     re.nwkDst = nwkDst;
     re.nextHop = nextHop;
     re.cost = 1;
     m_routes.push_back (re);
-  }
+  }*/
 
 private:
   struct RouteEntry
@@ -213,6 +315,17 @@ private:
     uint8_t    dscp;
     bool       ack;
     Ptr<Packet> payload;
+  };
+
+  struct NwkNeighborEntry
+  {
+    uint16_t nodeId {0};
+    double lastHeardSec {-1.0};
+    double lastPathlossDb {std::numeric_limits<double>::quiet_NaN ()};
+    double lastSnrDb {std::numeric_limits<double>::quiet_NaN ()};
+    uint8_t speedKey {0};
+    int16_t rxPowerDbmX10 {0};
+    uint8_t activeNodes {0};
   };
 
   // NSDP: Network Source–Destination Pair entry
@@ -328,7 +441,7 @@ private:
   std::deque<NwkQueueEntry>             m_nwkQueue;
   EventId                               m_checkNwkQueueEvent;
   std::vector<RouteEntry>               m_routes;
-
+  std::map<uint16_t, NwkNeighborEntry>  m_nwkNeighbors;
   std::map<std::pair<uint16_t,uint16_t>, NsdpEntry> m_nsdp;
 
   bool    m_discoveryActive { false };
@@ -341,10 +454,13 @@ private:
   void DiscoveryStop ();
   void DiscoveryCooldownOver ();
   void SendHelloBroadcast ();
+  /*void ProcessHello (Ptr<Packet> helloPayload,
+                   uint16_t hopSrc,
+                   double pathlossDb,
+                   double snrDb);*/
   void EnsureDiscoveryForTx ();
   private:
   void TryDrainQueueAfterDiscovery ();
-
 
 };
 
@@ -360,18 +476,6 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
             << " (size=" << payload->GetSize () << " B)"
             << std::endl;
 }
-
-/*void
-CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
-{
-  if (m_discoveryStartEvent.IsPending ()) { Simulator::Cancel (m_discoveryStartEvent); }
-  if (m_discoveryStopEvent.IsPending ())  { Simulator::Cancel (m_discoveryStopEvent);  }
-
-  m_discoveryActive = false;
-
-  m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
-  m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
-}*/
 
 void CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 {
@@ -391,6 +495,96 @@ void CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 
   m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
   m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
+}
+
+void
+CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
+                           uint16_t hopSrc,
+                           double pathlossDb,
+                           double snrDb)
+{
+  CsrHelloHeader hh;
+  if (!helloPayload->RemoveHeader (hh))
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] RX HELLO from hopSrc=" << hopSrc
+                << " but missing CsrHelloHeader"
+                << std::endl;
+      return;
+    }
+
+  uint16_t advDst = hh.GetAdvertisedDst ();
+  uint8_t advHops = hh.GetAdvertisedHops ();  
+
+  uint16_t src = hh.GetNodeId ();
+
+  if (src == m_nodeId)
+    {
+      return;
+    }
+
+  if (advDst != CSR_BROADCAST_ID &&
+    advDst != m_nodeId &&
+    advDst != src)
+  {
+    AddStaticRoute (advDst, src);  // destination via HELLO sender
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Added advertised route dst=" << advDst
+              << " nextHop=" << src
+              << " advertisedHops=" << unsigned (advHops)
+              << std::endl;
+  }
+  
+  double now = Simulator::Now ().GetSeconds ();
+
+  auto &ne = m_nwkNeighbors[src];
+  bool isNew = (ne.lastHeardSec < 0.0);
+
+  ne.nodeId = src;
+  ne.lastHeardSec = now;
+  ne.lastPathlossDb = pathlossDb;
+  ne.lastSnrDb = snrDb;
+  ne.speedKey = hh.GetSpeedKey ();
+  ne.rxPowerDbmX10 = hh.GetRxPowerDbmX10 ();
+  ne.activeNodes = hh.GetActiveNodes ();
+
+  std::cout << "[NWK " << m_nodeId << "] "
+            << (isNew ? "New" : "Updated")
+            << " HELLO neighbor=" << src
+            << " hopSrc=" << hopSrc
+            << " speedKey=" << unsigned (ne.speedKey)
+            << " activeNodes=" << unsigned (ne.activeNodes)
+            << " pathloss=" << pathlossDb
+            << " snr=" << snrDb
+            << std::endl;
+
+  // Minimal OPNET-parity route population:
+  // if we heard node src directly, route to src via src.
+  bool haveRoute = false;
+  for (auto &re : m_routes)
+    {
+      if (re.nwkDst == src)
+        {
+          re.nextHop = src;
+          re.cost = 1;
+          haveRoute = true;
+          break;
+        }
+    }
+
+  if (!haveRoute)
+    {
+      AddStaticRoute (src, src);
+      /*std::cout << "[NWK " << m_nodeId
+                << "] Added discovery route dst=" << src
+                << " nextHop=" << src
+                << std::endl;*/
+    }
+
+  DumpRoutes ();
+
+  ScheduleCheckNwkQueue ();
 }
 
 /*void CsrNetLayer::EnsureDiscoveryForTx ()
@@ -499,6 +693,18 @@ CsrNetLayer::SendHelloBroadcast ()
   // OPNET-ish “active” proxy: neighbor count (or 0 for now)
   hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
 
+  // Temporary/simple: advertise first route in m_routes, if any.
+  if (!m_routes.empty ())
+    {
+      hh.SetAdvertisedDst (m_routes.front ().nwkDst);
+      hh.SetAdvertisedHops (static_cast<uint8_t> (m_routes.front ().cost));
+    }
+  else
+    {
+      hh.SetAdvertisedDst (CSR_BROADCAST_ID);
+      hh.SetAdvertisedHops (0);
+    }
+
   p->AddHeader (hh);
 
   m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
@@ -507,8 +713,14 @@ CsrNetLayer::SendHelloBroadcast ()
 uint32_t
 CsrNetLayer::GetNeighborCount () const
 {
-  return 0;
+  return static_cast<uint32_t> (m_nwkNeighbors.size ());
 }
+
+/*uint32_t
+CsrNetLayer::GetNeighborCount () const
+{
+  return 0;
+}*/
 
 /*void
 CsrNetLayer::SendHelloBroadcast ()

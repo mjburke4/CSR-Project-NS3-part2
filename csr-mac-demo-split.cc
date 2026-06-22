@@ -143,12 +143,12 @@ main (int argc, char *argv[])
 
   // Static routes for 3-node line: 0 -> 1 -> 2
   // Node 0: can reach 1 directly, and 2 via 1
-  net0->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
-  net0->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 1);
+  //net0->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
+  //net0->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 1);
 
   // Node 1: can reach 0 directly, and 2 directly
-  net1->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 0);
   net1->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 2);
+  net1->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 0);
 
   // Node 2: can reach 0 via 1, and 1 directly
   net2->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 1);
@@ -178,9 +178,14 @@ main (int argc, char *argv[])
   dev1->GetMac ().StartSlotTick (Seconds (1.0));
   dev2->GetMac ().StartSlotTick (Seconds (1.0));
 
-  net0->StartDiscovery (Seconds (10.0), Seconds (30.0));
-  net1->StartDiscovery (Seconds (10.0), Seconds (30.0));
-  net2->StartDiscovery (Seconds (10.0), Seconds (30.0));
+  // Discovery assist for direct 0->1 no-route test.
+  // Node 0 will trigger on-demand discovery at t=1.
+  // Node 1 sends HELLO shortly after so node 0 can learn route dst=1 -> nextHop=1.
+  net1->StartDiscovery (Seconds (1.5), Seconds (5.0));
+  
+  //net0->StartDiscovery (Seconds (10.0), Seconds (30.0));
+  //net1->StartDiscovery (Seconds (10.0), Seconds (30.0));
+  //net2->StartDiscovery (Seconds (10.0), Seconds (30.0));
 
   // OPNET-style bounded discovery window
   /*dev0->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
@@ -218,27 +223,27 @@ main (int argc, char *argv[])
       }
   });
 
-  // Burst 2 at t=12 s
+  /* // Burst 2 at t=12 s
   Simulator::Schedule (Seconds (12.0), [net0]() {
     for (int i = 0; i < 2; ++i)
       {
         uint32_t size = 140 + 20 * i;
         Ptr<Packet> payload = Create<Packet> (size);
-        net0->Send (/*dst*/ 2,
-                    /*dscp*/ 0,
+        net0->Send ( 2, //dst
+                     0, //dscp
                     payload,
-                    /*ack*/ true);
+                    true); //ack
       }
   });
 
   // Burst 3 at t=40 s
   Simulator::Schedule (Seconds (40.0), [net0]() {
     Ptr<Packet> payload = Create<Packet> (200);
-    net0->Send (/*dst*/ 2,
-                /*dscp*/ 7,
+    net0->Send ( 2, //dst
+                7, //dscp
                 payload,
-                /*ack*/ true);
-  });
+                true); //ack
+  }); */
 
   Simulator::Stop (Seconds (60.0));
   Simulator::Run ();

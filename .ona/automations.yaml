@@ -1,0 +1,61 @@
+tasks:
+  installDeps:
+    name: Install dependencies
+    description: Install NS3 build dependencies and prepare the ns-3-dev checkout.
+    command: |
+      sudo apt-get update
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        g++ \
+        git \
+        libgsl-dev \
+        libgtk-3-dev \
+        libsqlite3-dev \
+        libxml2-dev \
+        ninja-build \
+        pkg-config \
+        python3 \
+        python3-pip \
+        python3-venv \
+        sqlite3
+
+      if [ ! -d "$HOME/ns-3-dev/.git" ]; then
+        rm -rf "$HOME/ns-3-dev"
+        git clone --depth 1 https://gitlab.com/nsnam/ns-3-dev.git "$HOME/ns-3-dev"
+      else
+        git -C "$HOME/ns-3-dev" pull --ff-only
+      fi
+    triggeredBy:
+      - manual
+      - postDevcontainerStart
+      - prebuild
+
+  buildDemo:
+    name: Build CSR NS3 demo
+    description: Copy the CSR module into ns-3-dev and build the demo simulation.
+    command: |
+      rm -rf "$HOME/ns-3-dev/src/csr"
+      mkdir -p "$HOME/ns-3-dev/src/csr" "$HOME/ns-3-dev/scratch"
+      cp -R model "$HOME/ns-3-dev/src/csr/model"
+      cp CMakeLists.txt "$HOME/ns-3-dev/src/csr/CMakeLists.txt"
+      cp csr-mac-demo-split.cc "$HOME/ns-3-dev/scratch/csr-mac-demo-split.cc"
+
+      cd "$HOME/ns-3-dev"
+      ./ns3 configure --disable-examples
+      ./ns3 build csr-mac-demo-split
+    triggeredBy:
+      - manual
+    dependsOn:
+      - installDeps
+
+  runDemo:
+    name: Run CSR NS3 demo
+    description: Run the CSR demo simulation through ns-3.
+    command: |
+      cd "$HOME/ns-3-dev"
+      ./ns3 run csr-mac-demo-split
+    triggeredBy:
+      - manual
+    dependsOn:
+      - buildDemo

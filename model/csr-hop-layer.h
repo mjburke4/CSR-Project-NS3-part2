@@ -28,6 +28,11 @@ public:
     m_rxFromHopCb = cb;
   }
 
+  void SetRxHelloFromHopCallback (Callback<void, Ptr<Packet>, uint16_t, double, double> cb)
+  {
+    m_rxHelloFromHopCb = cb;
+  }
+
   // After SetRxFromHopCallback
   void SetNsdpDecrementCallback (Callback<void, uint16_t, uint16_t> cb)
   {
@@ -111,7 +116,10 @@ private:
   ResendEntry* FindResendEntry (uint16_t dst, uint16_t seq);
   bool CheckReceivedSeq (uint16_t src, uint16_t seq);
   static int32_t SeqDiff (uint16_t seq1, uint16_t seq2);
+  
   Callback<void, uint16_t, uint16_t> m_nsdpDecrCb;
+
+  Callback<void, Ptr<Packet>, uint16_t, double, double> m_rxHelloFromHopCb;
 
   Callback<bool, uint16_t, uint16_t> m_shouldDackCb;
 
@@ -311,8 +319,24 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
   //UpdateNeighborHeard (hdr.GetSrc ());
   
   // HELLO is discovery/control; no further processing needed yet
+  /*if (hdr.GetType () == CSR_PKT_HELLO)
+    {
+      return;
+    }*/
+   // HELLO is discovery/control. OPNET sends br_Hello up to NWK proc_hello().
   if (hdr.GetType () == CSR_PKT_HELLO)
     {
+      std::cout << "[HOP " << m_nodeId << "] RX HELLO from "
+                << hdr.GetSrc ()
+                << " pathloss=" << pathlossDb
+                << " snr=" << snrDb
+                << std::endl;
+
+      if (!m_rxHelloFromHopCb.IsNull ())
+        {
+          m_rxHelloFromHopCb (frame, hdr.GetSrc (), pathlossDb, snrDb);
+        }
+
       return;
     }
 
@@ -680,4 +704,3 @@ CsrHopLayer::CheckReceivedSeq (uint16_t src, uint16_t seq)
 // ------------------------------------------------------------
 // CsrNetLayer: network-layer with NWK queue + NSDP
 // ------------------------------------------------------------
-

@@ -28,18 +28,25 @@ public:
   void SetActiveNodes (uint8_t n);
   uint8_t GetActiveNodes () const;
 
+  void SetAdvertisedDst (uint16_t dst);
+  uint16_t GetAdvertisedDst () const;
+
+  void SetAdvertisedHops (uint8_t hops);
+  uint8_t GetAdvertisedHops () const;
+
   // Header overrides
   uint32_t GetSerializedSize () const override;
   void Serialize (Buffer::Iterator start) const override;
   uint32_t Deserialize (Buffer::Iterator start) override;
   void Print (std::ostream &os) const override;
-
 private:
   uint16_t m_nodeId {0};
   uint16_t m_helloSeq {0};
   uint8_t  m_speedKey {0};
   int16_t  m_rxPowerDbmX10 {0};
   uint8_t  m_activeNodes {0};
+  uint16_t m_advDst {0xFFFF};
+  uint8_t  m_advHops {0};
 };
 
 } // namespace ns3
