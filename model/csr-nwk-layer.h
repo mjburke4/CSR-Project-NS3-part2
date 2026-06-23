@@ -2,6 +2,7 @@
 #include "csr-common.h"
 #include "csr-hello-header.h"
 #include "csr-hop-layer.h"
+#include <cmath>
 
 
 class CsrNetLayer : public Object
@@ -578,10 +579,7 @@ private:
   void DiscoveryStop ();
   void DiscoveryCooldownOver ();
   void SendHelloBroadcast ();
-  /*void ProcessHello (Ptr<Packet> helloPayload,
-                   uint16_t hopSrc,
-                   double pathlossDb,
-                   double snrDb);*/
+
   void EnsureDiscoveryForTx ();
   private:
   void TryDrainQueueAfterDiscovery ();
@@ -688,7 +686,40 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
     // 3) Advertised route from HELLO sender
     //    If src advertises dst=X, then we can reach X via src.
     // ------------------------------------------------------------
-    uint16_t advDst = hh.GetAdvertisedDst ();
+    
+    uint8_t advCount = hh.GetAdvertisedRouteCount ();
+
+    for (uint8_t idx = 0; idx < advCount; ++idx)
+      {
+        auto ar = hh.GetAdvertisedRoute (idx);
+
+        if (ar.dst == CSR_BROADCAST_ID ||
+            ar.dst == m_nodeId ||
+            ar.dst == src)
+          {
+            continue;
+          }
+
+        uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
+        uint32_t totalCost = linkCost + ar.cost;
+
+        AddOrUpdateRoute (ar.dst,
+                          src,          // next hop is HELLO sender
+                          false,        // not immediate
+                          totalHops,
+                          pathlossDb,
+                          totalCost,
+                          ar.capability);
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Learned advertised route dst=" << ar.dst
+                  << " via nextHop=" << src
+                  << " hops=" << unsigned (totalHops)
+                  << " advCost=" << ar.cost
+                  << " totalCost=" << totalCost
+                  << std::endl;
+      }
+    /*uint16_t advDst = hh.GetAdvertisedDst ();
     uint8_t advHops = hh.GetAdvertisedHops ();
 
     if (advDst != CSR_BROADCAST_ID &&
@@ -716,7 +747,7 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
                   << " hops=" << unsigned (totalHops)
                   << " cost=" << totalCost
                   << std::endl;
-      }
+      } */
 
     DumpRoutes ();
 
@@ -875,68 +906,110 @@ CsrNetLayer::DiscoveryStop ()
   m_discoveryActive = false;
 }*/
 
-void CsrNetLayer::DiscoveryStop ()
-{
-  m_discState = DiscoveryState::COOLDOWN;
+  void CsrNetLayer::DiscoveryStop ()
+  {
+    m_discState = DiscoveryState::COOLDOWN;
 
-  // OPNET clear_discovery(): finalize + notify + stop discovery behavior
-  // (your minimal version can just switch off + trigger queue drain attempt)
-  Simulator::Schedule (m_discoveryCooldown, &CsrNetLayer::DiscoveryCooldownOver, this);
+    // OPNET clear_discovery(): finalize + notify + stop discovery behavior
+    // (your minimal version can just switch off + trigger queue drain attempt)
+    Simulator::Schedule (m_discoveryCooldown, &CsrNetLayer::DiscoveryCooldownOver, this);
 
-  TryDrainQueueAfterDiscovery(); // re-run CheckNwkQueue or schedule it
-}
+    TryDrainQueueAfterDiscovery(); // re-run CheckNwkQueue or schedule it
+  }
 
-void
-CsrNetLayer::TryDrainQueueAfterDiscovery ()
-{
-  // OPNET-equivalent of re-entering the NWK process after discovery
-  CheckNwkQueue ();
-}
+  void
+  CsrNetLayer::TryDrainQueueAfterDiscovery ()
+  {
+    // OPNET-equivalent of re-entering the NWK process after discovery
+    CheckNwkQueue ();
+  }
 
-void
-CsrNetLayer::SendHelloBroadcast ()
-{
-  if (!m_hop) return;
+  void
+  CsrNetLayer::SendHelloBroadcast ()
+  {
+    if (!m_hop) return;
 
-  Ptr<Packet> p = Create<Packet> ();
+    Ptr<Packet> p = Create<Packet> ();
 
-  static uint16_t helloSeq = 0;
+    static uint16_t helloSeq = 0;
 
-  CsrHelloHeader hh;
-  hh.SetNodeId (m_nodeId);
-  hh.SetHelloSeq (++helloSeq);
+    CsrHelloHeader hh;
+    hh.SetNodeId (m_nodeId);
+    hh.SetHelloSeq (++helloSeq);
 
-  // Keep it simple: speedKey is what you actually use in CSR headers anyway
-  hh.SetSpeedKey (m_minSpeedKey);   // define m_minSpeedKey or hardcode 8 temporarily
+    // Keep it simple: speedKey is what you actually use in CSR headers anyway
+    hh.SetSpeedKey (m_minSpeedKey);   // define m_minSpeedKey or hardcode 8 temporarily
 
-  // Integer scaled dBm*10, placeholder until you compute it properly
-  hh.SetRxPowerDbmX10 (-900);        // -90.0 dBm
+    // Integer scaled dBm*10, placeholder until you compute it properly
+    hh.SetRxPowerDbmX10 (-900);        // -90.0 dBm
 
-  // OPNET-ish “active” proxy: neighbor count (or 0 for now)
-  hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
+    // OPNET-ish “active” proxy: neighbor count (or 0 for now)
+    hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
 
-  // Temporary/simple: advertise first route in m_routes, if any.
-  if (!m_routes.empty ())
-    {
-      hh.SetAdvertisedDst (m_routes.front ().nwkDst);
-      hh.SetAdvertisedHops (static_cast<uint8_t> (m_routes.front ().cost));
-    }
-  else
-    {
-      hh.SetAdvertisedDst (CSR_BROADCAST_ID);
-      hh.SetAdvertisedHops (0);
-    }
+    hh.ClearAdvertisedRoutes ();
 
-  p->AddHeader (hh);
+    uint8_t added = 0;
+    for (const auto &re : m_routes)
+      {
+        if (!re.valid)
+          {
+            continue;
+          }
 
-  m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
-}
+        if (re.nwkDst == m_nodeId)
+          {
+            continue;
+          }
 
-uint32_t
-CsrNetLayer::GetNeighborCount () const
-{
-  return static_cast<uint32_t> (m_nwkNeighbors.size ());
-}
+        int16_t plX10 = 0;
+        if (!std::isnan (re.pathlossDb))
+          {
+            plX10 = static_cast<int16_t> (std::round (re.pathlossDb * 10.0));
+          }
+
+        if (hh.AddAdvertisedRoute (re.nwkDst,
+                                  re.numHop,
+                                  re.cost,
+                                  plX10,
+                                  re.capability))
+          {
+            added++;
+          }
+
+        if (added >= 8)
+          {
+            break;
+          }
+      }
+
+    std::cout << "[NWK " << m_nodeId
+              << "] HELLO advertising "
+              << unsigned (added)
+              << " routes"
+              << std::endl;
+              
+    // Temporary/simple: advertise first route in m_routes, if any.
+    if (!m_routes.empty ())
+      {
+        hh.SetAdvertisedDst (m_routes.front ().nwkDst);
+        hh.SetAdvertisedHops (static_cast<uint8_t> (m_routes.front ().cost));
+      }
+    else
+      {
+        hh.SetAdvertisedDst (CSR_BROADCAST_ID);
+        hh.SetAdvertisedHops (0);
+      }
+
+    p->AddHeader (hh);
+
+    m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
+  }
+
+  uint32_t
+  CsrNetLayer::GetNeighborCount () const
+  {
+    return static_cast<uint32_t> (m_nwkNeighbors.size ());
+  }
 
 /*uint32_t
 CsrNetLayer::GetNeighborCount () const

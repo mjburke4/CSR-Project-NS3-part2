@@ -151,8 +151,8 @@ main (int argc, char *argv[])
   net1->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 0);
 
   // Node 2: can reach 0 via 1, and 1 directly
-  net2->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 1);
-  net2->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
+ // net2->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 1);
+ // net2->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
 
   // Net -> App callbacks
   net0->SetRxFromNetCallback (MakeCallback (&AppRxFromNet));
@@ -223,6 +223,18 @@ main (int argc, char *argv[])
       }
   });
 
+  Simulator::Schedule (Seconds (8.0), [net2]() {
+  for (int i = 0; i < 2; ++i)
+    {
+      uint32_t size = 90 + 20 * i;
+      Ptr<Packet> payload = Create<Packet> (size);
+      net2->Send (/*dst*/ 0,
+                  /*dscp*/ 5,
+                  payload,
+                  /*ack*/ true);
+    }
+    });
+    
   /* // Burst 2 at t=12 s
   Simulator::Schedule (Seconds (12.0), [net0]() {
     for (int i = 0; i < 2; ++i)
