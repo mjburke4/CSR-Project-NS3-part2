@@ -589,6 +589,9 @@ private:
 
   void ScheduleDiscoveryHello ();
   void DiscoveryHelloTick ();
+  // Experimental NS-3 robustness mode.
+  // Legacy bare OPNET start_discovery() sends one HELLO.
+  // Do not enable for strict OPNET parity tests unless modeling routing-module-driven repeats.
   bool m_repeatDiscoveryHello { false }; // false = legacy OPNET-style one-shot discovery HELLO
 
 };
@@ -931,7 +934,7 @@ private:
               << std::endl;
               
     // Temporary/simple: advertise first route in m_routes, if any.
-    if (!m_routes.empty ())
+   /* if (!m_routes.empty ())
       {
         hh.SetAdvertisedDst (m_routes.front ().nwkDst);
         hh.SetAdvertisedHops (static_cast<uint8_t> (m_routes.front ().cost));
@@ -940,7 +943,7 @@ private:
       {
         hh.SetAdvertisedDst (CSR_BROADCAST_ID);
         hh.SetAdvertisedHops (0);
-      }
+      }*/
 
     p->AddHeader (hh);
 

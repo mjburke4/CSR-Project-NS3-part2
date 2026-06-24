@@ -39,11 +39,11 @@ namespace ns3 {
   void CsrHelloHeader::SetActiveNodes (uint8_t n) { m_activeNodes = n; }
   uint8_t CsrHelloHeader::GetActiveNodes () const { return m_activeNodes; }
 
-  void CsrHelloHeader::SetAdvertisedDst (uint16_t dst) { m_advDst = dst; }
-  uint16_t CsrHelloHeader::GetAdvertisedDst () const { return m_advDst; }
+  //void CsrHelloHeader::SetAdvertisedDst (uint16_t dst) { m_advDst = dst; }
+  //uint16_t CsrHelloHeader::GetAdvertisedDst () const { return m_advDst; }
 
-  void CsrHelloHeader::SetAdvertisedHops (uint8_t hops) { m_advHops = hops; }
-  uint8_t CsrHelloHeader::GetAdvertisedHops () const { return m_advHops; }
+  //void CsrHelloHeader::SetAdvertisedHops (uint8_t hops) { m_advHops = hops; }
+  //uint8_t CsrHelloHeader::GetAdvertisedHops () const { return m_advHops; }
 
   /*uint32_t
   CsrHelloHeader::GetSerializedSize () const

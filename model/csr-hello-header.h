@@ -29,11 +29,11 @@ public:
   void SetActiveNodes (uint8_t n);
   uint8_t GetActiveNodes () const;
 
-  void SetAdvertisedDst (uint16_t dst);
-  uint16_t GetAdvertisedDst () const;
+  //void SetAdvertisedDst (uint16_t dst);
+  //uint16_t GetAdvertisedDst () const;
 
-  void SetAdvertisedHops (uint8_t hops);
-  uint8_t GetAdvertisedHops () const;
+  //void SetAdvertisedHops (uint8_t hops);
+  //uint8_t GetAdvertisedHops () const;
 
   // Header overrides
   uint32_t GetSerializedSize () const override;
