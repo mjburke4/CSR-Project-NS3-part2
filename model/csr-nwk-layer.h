@@ -35,6 +35,7 @@ static TypeId GetTypeId (void)
   }
 
   void StartDiscovery (Time startDelay, Time duration);
+  void SetRepeatDiscoveryHello (bool enable);
   bool IsDiscoveryActive () const { return m_discoveryActive; }
 
   void ProcessHello (Ptr<Packet> helloPayload,
@@ -588,6 +589,7 @@ private:
 
   void ScheduleDiscoveryHello ();
   void DiscoveryHelloTick ();
+  bool m_repeatDiscoveryHello { false }; // false = legacy OPNET-style one-shot discovery HELLO
 
 };
 
@@ -765,117 +767,6 @@ private:
     // Discovery/route update may have unblocked queued packets.
     ScheduleCheckNwkQueue ();
   }
-  /*void
-  CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
-                            uint16_t hopSrc,
-                            double pathlossDb,
-                            double snrDb)
-  {
-    CsrHelloHeader hh;
-    if (!helloPayload->RemoveHeader (hh))
-      {
-        std::cout << "[NWK " << m_nodeId
-                  << "] RX HELLO from hopSrc=" << hopSrc
-                  << " but missing CsrHelloHeader"
-                  << std::endl;
-        return;
-      }
-
-    uint16_t advDst = hh.GetAdvertisedDst ();
-    uint8_t advHops = hh.GetAdvertisedHops ();  
-
-    uint16_t src = hh.GetNodeId ();
-
-    if (src == m_nodeId)
-      {
-        return;
-      }
-
-    if (advDst != CSR_BROADCAST_ID &&
-      advDst != m_nodeId &&
-      advDst != src)
-    {
-      AddStaticRoute (advDst, src);  // destination via HELLO sender
-
-      std::cout << "[NWK " << m_nodeId
-                << "] Added advertised route dst=" << advDst
-                << " nextHop=" << src
-                << " advertisedHops=" << unsigned (advHops)
-                << std::endl;
-    }
-    
-    double now = Simulator::Now ().GetSeconds ();
-
-    auto &ne = m_nwkNeighbors[src];
-    bool isNew = (ne.lastHeardSec < 0.0);
-
-    ne.nodeId = src;
-    ne.lastHeardSec = now;
-    ne.lastPathlossDb = pathlossDb;
-    ne.lastSnrDb = snrDb;
-    ne.speedKey = hh.GetSpeedKey ();
-    ne.rxPowerDbmX10 = hh.GetRxPowerDbmX10 ();
-    ne.activeNodes = hh.GetActiveNodes ();
-
-    std::cout << "[NWK " << m_nodeId << "] "
-              << (isNew ? "New" : "Updated")
-              << " HELLO neighbor=" << src
-              << " hopSrc=" << hopSrc
-              << " speedKey=" << unsigned (ne.speedKey)
-              << " activeNodes=" << unsigned (ne.activeNodes)
-              << " pathloss=" << pathlossDb
-              << " snr=" << snrDb
-              << std::endl;
-
-    // Minimal OPNET-parity route population:
-    // if we heard node src directly, route to src via src.
-    bool haveRoute = false;
-    for (auto &re : m_routes)
-      {
-        if (re.nwkDst == src)
-          {
-            re.nextHop = src;
-            re.cost = 1;
-            haveRoute = true;
-            break;
-          }
-      }
-
-    if (!haveRoute)
-      {
-        AddStaticRoute (src, src);
-      }
-
-    DumpRoutes ();
-
-    ScheduleCheckNwkQueue ();
-  }*/
-
-/*void CsrNetLayer::EnsureDiscoveryForTx ()
-{
-  if (!m_discoveryActive)
-    {
-      std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery" << std::endl;
-      StartDiscovery (Seconds (0.0), Seconds (30.0));
-    }
-}*/
-
-/*void CsrNetLayer::EnsureDiscoveryForTx ()
-{
-  if (m_discoveryActive)
-    {
-      return;
-    }
-
-  // Set state first so repeated callers in same time slice won't retrigger
-  m_discoveryActive = true;
-  m_discoveryInitiatedBy = DISCOVERY_REASON_NO_ROUTE;   // optional but very OPNET-ish
-  m_discoveryAttempts++;                                // optional counter (OPNET vibe)
-
-  std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
-
-  StartDiscovery (Seconds (0.0), Seconds (30.0));
-}*/
 
   void CsrNetLayer::EnsureDiscoveryForTx ()
   {
@@ -888,14 +779,10 @@ private:
     StartDiscovery (Seconds (0.0), Seconds (30.0));
   }
 
-
-  /*void CsrNetLayer::DiscoveryStart ()
+  void CsrNetLayer::SetRepeatDiscoveryHello (bool enable)
   {
-    m_discState = DiscoveryState::ACTIVE;
-
-    // OPNET start_discovery(): schedule stop already done outside (you did that), now send HELLO
-    SendHelloBroadcast();   // NWK->HOP HELLO, with OPNET-ish fields
-  }*/
+    m_repeatDiscoveryHello = enable;
+  }
 
   void
   CsrNetLayer::DiscoveryStart ()
@@ -904,14 +791,18 @@ private:
     m_discoveryActive = true;
 
     std::cout << "[NWK " << m_nodeId
-              << "] DiscoveryStart: sending HELLO advertisements"
+              << "] DiscoveryStart: sending HELLO advertisement"
               << std::endl;
 
+    // OPNET-style behavior: send one HELLO at discovery start
     SendHelloBroadcast ();
 
-    ScheduleDiscoveryHello ();
+    // Optional NS-3 robustness mode, disabled by default
+    if (m_repeatDiscoveryHello)
+      {
+        ScheduleDiscoveryHello ();
+      }
   }
-
   void
   CsrNetLayer::DiscoveryStop ()
   {
@@ -933,17 +824,6 @@ private:
 
     TryDrainQueueAfterDiscovery ();
   }
-
-  /*void CsrNetLayer::DiscoveryStop ()
-  {
-    m_discState = DiscoveryState::COOLDOWN;
-
-    // OPNET clear_discovery(): finalize + notify + stop discovery behavior
-    // (your minimal version can just switch off + trigger queue drain attempt)
-    Simulator::Schedule (m_discoveryCooldown, &CsrNetLayer::DiscoveryCooldownOver, this);
-
-    TryDrainQueueAfterDiscovery(); // re-run CheckNwkQueue or schedule it
-  }*/
 
   void
   CsrNetLayer::TryDrainQueueAfterDiscovery ()
@@ -1073,49 +953,17 @@ private:
     return static_cast<uint32_t> (m_nwkNeighbors.size ());
   }
 
-/*uint32_t
-CsrNetLayer::GetNeighborCount () const
-{
-  return 0;
-}*/
+  void
+  CsrNetLayer::DiscoveryCooldownOver ()
+  {
+    // OPNET-equivalent: discovery is fully complete and can be triggered again
+    m_discState = DiscoveryState::IDLE;
 
-/*void
-CsrNetLayer::SendHelloBroadcast ()
-{
-  if (!m_hop) return;
+    // Clear legacy flag if you still have it
+    m_discoveryActive = false;
 
-  // Build HELLO payload with CsrHelloHeader
-  Ptr<Packet> p = Create<Packet> ();
-
-  CsrHelloHeader hh;
-  hh.SetNodeId (m_nodeId);
-  hh.SetSource (m_nodeId);
-  hh.SetDestination (CSR_BROADCAST_ID);
-  hh.SetDestType (CSR_DEST_BROADCAST);
-
-  // Default values - can be configured later
-  hh.SetTxPower (30.0);      // max TX power dBm
-  hh.SetSpeed (8.0);         // min speed key
-  hh.SetRxPower (-90.0);     // RX threshold
-  hh.SetCapability (0);
-  hh.SetActive (0);
-
-  p->AddHeader (hh);
-
-  m_hop->SendHello (p);
-}*/
-
-void
-CsrNetLayer::DiscoveryCooldownOver ()
-{
-  // OPNET-equivalent: discovery is fully complete and can be triggered again
-  m_discState = DiscoveryState::IDLE;
-
-  // Clear legacy flag if you still have it
-  m_discoveryActive = false;
-
-  // Optional but safe: try to forward anything that may now succeed
-  CheckNwkQueue ();
-}
+    // Optional but safe: try to forward anything that may now succeed
+    CheckNwkQueue ();
+  }
 
 // ------------------------------------------------------------

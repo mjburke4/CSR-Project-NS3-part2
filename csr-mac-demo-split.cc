@@ -15,7 +15,6 @@ main (int argc, char *argv[])
 
   OpenRxCsv ("results/rx_metrics.csv");
   OpenNsdpCsv ("results/nsdp_metrics.csv");
-
   // Create three devices / nodes
   Ptr<CsrNetDevice> dev0 = CreateObject<CsrNetDevice> (0);
   Ptr<CsrNetDevice> dev1 = CreateObject<CsrNetDevice> (1);
@@ -147,6 +146,7 @@ main (int argc, char *argv[])
   net1->SetNodeId (1);
   net2->SetNodeId (2);
   net3->SetNodeId (3);
+  net1->SetRepeatDiscoveryHello (false);
 
   // Periodic NSDP sampler
   std::function<void()> sampleNsdp;
