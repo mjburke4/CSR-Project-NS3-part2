@@ -14,6 +14,8 @@ public:
   DiscoveryState m_discState { DiscoveryState::IDLE };
   EventId m_discoveryStartEvent, m_discoveryStopEvent, m_discoveryCooldownEvent;
   Time m_discoveryCooldown { Seconds(5) }; // tune later
+  EventId m_discoveryHelloEvent;
+  Time    m_discoveryHelloInterval { Seconds (2.0) };
 
 static TypeId GetTypeId (void)
   {
@@ -581,8 +583,11 @@ private:
   void SendHelloBroadcast ();
 
   void EnsureDiscoveryForTx ();
-  private:
+
   void TryDrainQueueAfterDiscovery ();
+
+  void ScheduleDiscoveryHello ();
+  void DiscoveryHelloTick ();
 
 };
 
@@ -591,15 +596,15 @@ private:
 // Simple "App" callbacks
 // ------------------------------------------------------------
 
-static void
-AppRxFromNet (Ptr<Packet> payload, uint16_t src)
-{
-  std::cout << "  [APP] Node received payload from " << src
-            << " (size=" << payload->GetSize () << " B)"
-            << std::endl;
-}
+  static void
+  AppRxFromNet (Ptr<Packet> payload, uint16_t src)
+  {
+    std::cout << "  [APP] Node received payload from " << src
+              << " (size=" << payload->GetSize () << " B)"
+              << std::endl;
+  }
 
-  void CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
+  /*void CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
   {
     if (m_discoveryStartEvent.IsPending ()) Simulator::Cancel (m_discoveryStartEvent);
     if (m_discoveryStopEvent.IsPending  ()) Simulator::Cancel (m_discoveryStopEvent);
@@ -617,6 +622,41 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
 
     m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
     m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
+  }*/
+
+  void
+  CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
+  {
+    // If already in discovery lifecycle, do not restart or cancel existing events.
+    if (m_discState == DiscoveryState::SCHEDULED ||
+        m_discState == DiscoveryState::ACTIVE ||
+        m_discState == DiscoveryState::COOLDOWN)
+      {
+        return;
+      }
+
+    if (m_discoveryStartEvent.IsPending ())
+      {
+        Simulator::Cancel (m_discoveryStartEvent);
+      }
+
+    if (m_discoveryStopEvent.IsPending ())
+      {
+        Simulator::Cancel (m_discoveryStopEvent);
+      }
+
+    if (m_discoveryHelloEvent.IsPending ())
+      {
+        Simulator::Cancel (m_discoveryHelloEvent);
+      }
+
+    m_discState = DiscoveryState::SCHEDULED;
+
+    m_discoveryStartEvent =
+      Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
+
+    m_discoveryStopEvent =
+      Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
   }
 
   void
@@ -719,35 +759,6 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
                   << " totalCost=" << totalCost
                   << std::endl;
       }
-    /*uint16_t advDst = hh.GetAdvertisedDst ();
-    uint8_t advHops = hh.GetAdvertisedHops ();
-
-    if (advDst != CSR_BROADCAST_ID &&
-        advDst != m_nodeId &&
-        advDst != src)
-      {
-        uint8_t totalHops = static_cast<uint8_t> (advHops + 1);
-
-        // Temporary cost model:
-        // cost to reach HELLO sender + advertised hop penalty.
-        // Later we can carry advertised route cost explicitly.
-        uint32_t totalCost = linkCost + static_cast<uint32_t> (10 * advHops);
-
-        AddOrUpdateRoute (advDst,
-                          src,          // next hop is the HELLO sender
-                          false,        // not an immediate neighbor route
-                          totalHops,
-                          pathlossDb,
-                          totalCost,
-                          0);           // capability placeholder
-
-        std::cout << "[NWK " << m_nodeId
-                  << "] Learned advertised route dst=" << advDst
-                  << " via nextHop=" << src
-                  << " hops=" << unsigned (totalHops)
-                  << " cost=" << totalCost
-                  << std::endl;
-      } */
 
     DumpRoutes ();
 
@@ -866,47 +877,64 @@ AppRxFromNet (Ptr<Packet> payload, uint16_t src)
   StartDiscovery (Seconds (0.0), Seconds (30.0));
 }*/
 
-void CsrNetLayer::EnsureDiscoveryForTx ()
-{
-  if (m_discState != DiscoveryState::IDLE)
-    {
-      return;
-    }
+  void CsrNetLayer::EnsureDiscoveryForTx ()
+  {
+    if (m_discState != DiscoveryState::IDLE)
+      {
+        return;
+      }
 
-  std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
-  StartDiscovery (Seconds (0.0), Seconds (30.0));
-}
+    std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
+    StartDiscovery (Seconds (0.0), Seconds (30.0));
+  }
 
-/*void
-CsrNetLayer::DiscoveryStart ()
-{
-  m_discoveryActive = true;
 
-  // OPNET start_discovery() immediately emits br_Hello
-  if (m_hop != nullptr)
-    {
-      // small jitter is optional; OPNET doesn’t necessarily jitter, but helps collisions
-      Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
-      double jitter = rng->GetValue (0.05, 0.20);
-      Simulator::Schedule (Seconds (jitter), &CsrHopLayer::SendHello, m_hop);
-    }
-}*/
+  /*void CsrNetLayer::DiscoveryStart ()
+  {
+    m_discState = DiscoveryState::ACTIVE;
 
-void CsrNetLayer::DiscoveryStart ()
-{
-  m_discState = DiscoveryState::ACTIVE;
+    // OPNET start_discovery(): schedule stop already done outside (you did that), now send HELLO
+    SendHelloBroadcast();   // NWK->HOP HELLO, with OPNET-ish fields
+  }*/
 
-  // OPNET start_discovery(): schedule stop already done outside (you did that), now send HELLO
-  SendHelloBroadcast();   // NWK->HOP HELLO, with OPNET-ish fields
-}
+  void
+  CsrNetLayer::DiscoveryStart ()
+  {
+    m_discState = DiscoveryState::ACTIVE;
+    m_discoveryActive = true;
 
-/*void
-CsrNetLayer::DiscoveryStop ()
-{
-  m_discoveryActive = false;
-}*/
+    std::cout << "[NWK " << m_nodeId
+              << "] DiscoveryStart: sending HELLO advertisements"
+              << std::endl;
 
-  void CsrNetLayer::DiscoveryStop ()
+    SendHelloBroadcast ();
+
+    ScheduleDiscoveryHello ();
+  }
+
+  void
+  CsrNetLayer::DiscoveryStop ()
+  {
+    if (m_discoveryHelloEvent.IsPending ())
+      {
+        Simulator::Cancel (m_discoveryHelloEvent);
+      }
+
+    m_discState = DiscoveryState::COOLDOWN;
+    m_discoveryActive = false;
+
+    std::cout << "[NWK " << m_nodeId
+              << "] DiscoveryStop"
+              << std::endl;
+
+    Simulator::Schedule (m_discoveryCooldown,
+                        &CsrNetLayer::DiscoveryCooldownOver,
+                        this);
+
+    TryDrainQueueAfterDiscovery ();
+  }
+
+  /*void CsrNetLayer::DiscoveryStop ()
   {
     m_discState = DiscoveryState::COOLDOWN;
 
@@ -915,13 +943,47 @@ CsrNetLayer::DiscoveryStop ()
     Simulator::Schedule (m_discoveryCooldown, &CsrNetLayer::DiscoveryCooldownOver, this);
 
     TryDrainQueueAfterDiscovery(); // re-run CheckNwkQueue or schedule it
-  }
+  }*/
 
   void
   CsrNetLayer::TryDrainQueueAfterDiscovery ()
   {
     // OPNET-equivalent of re-entering the NWK process after discovery
     CheckNwkQueue ();
+  }
+
+  void
+  CsrNetLayer::ScheduleDiscoveryHello ()
+  {
+    if (m_discState != DiscoveryState::ACTIVE)
+      {
+        return;
+      }
+
+    if (!m_discoveryHelloEvent.IsPending ())
+      {
+        m_discoveryHelloEvent =
+          Simulator::Schedule (m_discoveryHelloInterval,
+                              &CsrNetLayer::DiscoveryHelloTick,
+                              this);
+      }
+  }
+
+  void
+  CsrNetLayer::DiscoveryHelloTick ()
+  {
+    if (m_discState != DiscoveryState::ACTIVE)
+      {
+        return;
+      }
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Discovery HELLO repeat"
+              << std::endl;
+
+    SendHelloBroadcast ();
+
+    ScheduleDiscoveryHello ();
   }
 
   void
