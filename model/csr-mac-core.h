@@ -1,5 +1,6 @@
 #pragma once
 #include "csr-common.h"
+#include <algorithm>
 
 class CsrMacCore
 {
@@ -47,10 +48,10 @@ public:
   }
 
   uint32_t m_activeNodesForPostTx {1};
-  
+
   // SendHelloInternal moved after CsrNetDevice definition (see below)
 
-    // Discovery window (OPNET-style)
+  // Discovery window (OPNET-style)
   void
   StartDiscovery (Time startDelay, Time duration)
   {
@@ -394,4 +395,3 @@ CsrRateKeyToBps (int rateKbpsKey)
     default:  return rateKbpsKey * 1000.0; // fallback
     }
 }
-

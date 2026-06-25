@@ -21,6 +21,13 @@ public:
 
   void SetMac (CsrMacCore *mac)   { m_mac = mac; }
   void SetNodeId (uint16_t id)    { m_nodeId = id; }
+  void SetActiveNodesForPostTx (uint32_t n)
+  {
+    if (m_mac != nullptr)
+      {
+        m_mac->SetActiveNodesForPostTx (n);
+      }
+  }
 
   // Upper layer callback: payload + src
   void SetRxFromHopCallback (Callback<void, Ptr<Packet>, uint16_t> cb)

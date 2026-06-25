@@ -59,6 +59,19 @@ static TypeId GetTypeId (void)
       }
   }
 
+  void UpdateMacActiveNodes ()
+  {
+    if (m_hop != nullptr)
+      {
+        uint32_t active = GetActiveNodeCount ();
+        m_hop->SetActiveNodesForPostTx (active);
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] active_nodes=" << active
+                  << " pushed to MAC"
+                  << std::endl;
+      }
+  }
   void ClearRoutes ()
   {
     m_routes.clear ();
@@ -703,6 +716,7 @@ private:
     ne.speedKey = hh.GetSpeedKey ();
     ne.rxPowerDbmX10 = hh.GetRxPowerDbmX10 ();
     ne.activeNodes = hh.GetActiveNodes ();
+    UpdateMacActiveNodes ();
 
     std::cout << "[NWK " << m_nodeId << "] "
               << (isNew ? "New" : "Updated")
