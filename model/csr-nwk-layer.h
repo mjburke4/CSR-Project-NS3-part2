@@ -575,6 +575,7 @@ private:
   bool    m_discoveryActive { false };
 
   uint32_t GetNeighborCount () const;
+  uint32_t GetActiveNodeCount () const;
 
   uint8_t m_minSpeedKey { 8 };  // temporary default; map to your actual rate table later
 
@@ -889,7 +890,8 @@ private:
     hh.SetRxPowerDbmX10 (-900);        // -90.0 dBm
 
     // OPNET-ish “active” proxy: neighbor count (or 0 for now)
-    hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
+    //hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
+    hh.SetActiveNodes (static_cast<uint8_t> (GetActiveNodeCount ()));
 
     hh.ClearAdvertisedRoutes ();
 
@@ -948,6 +950,12 @@ private:
     p->AddHeader (hh);
 
     m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
+  }
+
+  uint32_t
+  CsrNetLayer::GetActiveNodeCount () const
+  {
+    return static_cast<uint32_t> (m_nwkNeighbors.size () + 1);
   }
 
   uint32_t

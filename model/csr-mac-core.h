@@ -40,6 +40,14 @@ public:
       }
     SendHelloInternal (true);
   }
+
+  void SetActiveNodesForPostTx (uint32_t n)
+  {
+    m_activeNodesForPostTx = std::max<uint32_t> (1, n);
+  }
+
+  uint32_t m_activeNodesForPostTx {1};
+  
   // SendHelloInternal moved after CsrNetDevice definition (see below)
 
     // Discovery window (OPNET-style)

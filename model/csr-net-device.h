@@ -70,6 +70,10 @@ public:
 
   uint16_t GetId () const { return m_id; }
 
+  void SetActiveNodesForPostTx (uint32_t n)
+  {
+    m_activeNodesForPostTx = std::max<uint32_t> (1, n);
+  }
 
   void SendToPeer (Ptr<Packet> frame,
                    uint16_t dest,
@@ -103,6 +107,16 @@ private:
   // Placeholder until active_nodes is plumbed from NWK/MAC state.
   // br_mac initializes active_nodes to 1.
   uint32_t m_activeNodesForPostTx { 1 };
+
+  uint32_t m_maxReportedActiveNodes {0};
+
+  void NoteReportedActiveNodes (uint32_t n)
+  {
+    if (n > m_maxReportedActiveNodes)
+      {
+        m_maxReportedActiveNodes = n;
+      }
+  }
 
   double GetPostTxWaitSeconds () const
   {
@@ -654,4 +668,3 @@ CsrMacCore::DoTx ()
 // ------------------------------------------------------------
 // CsrHopLayer: simplified hop layer
 // ------------------------------------------------------------
-

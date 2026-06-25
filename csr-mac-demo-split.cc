@@ -95,6 +95,11 @@ main (int argc, char *argv[])
     d->GetPhy().SetDefaultDistanceMeters(1.0); // only used if missing entry
   };
 
+  dev0->SetActiveNodesForPostTx (1);
+  dev1->SetActiveNodesForPostTx (1);
+  dev2->SetActiveNodesForPostTx (1);
+  dev3->SetActiveNodesForPostTx (1);
+  
   setAllLinkDistances(dev0);
   setAllLinkDistances(dev1);
   setAllLinkDistances(dev2);
