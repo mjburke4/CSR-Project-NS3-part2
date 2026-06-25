@@ -29,6 +29,14 @@ public:
       }
   }
 
+  void NoteReportedActiveNodes (uint32_t n)
+  {
+    if (m_mac != nullptr)
+      {
+        m_mac->NoteReportedActiveNodes (n);
+      }
+  }
+
   // Upper layer callback: payload + src
   void SetRxFromHopCallback (Callback<void, Ptr<Packet>, uint16_t> cb)
   {

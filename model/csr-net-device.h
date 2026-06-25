@@ -75,6 +75,25 @@ public:
     m_activeNodesForPostTx = std::max<uint32_t> (1, n);
   }
 
+  void NoteReportedActiveNodes (uint32_t n)
+  {
+    if (n > m_maxReportedActiveNodes)
+      {
+        m_maxReportedActiveNodes = n;
+
+        std::cout << "[MAC " << m_id
+                  << "] max_reported_active_nodes updated to "
+                  << m_maxReportedActiveNodes
+                  << std::endl;
+      }
+  }
+
+  uint32_t GetReportedActiveNodesForSlotting () const
+  {
+    return std::max<uint32_t> (m_activeNodesForPostTx,
+                              m_maxReportedActiveNodes);
+  }
+
   void SendToPeer (Ptr<Packet> frame,
                    uint16_t dest,
                    int rateKbps,
@@ -110,13 +129,14 @@ private:
 
   uint32_t m_maxReportedActiveNodes {0};
 
-  void NoteReportedActiveNodes (uint32_t n)
+
+  /*void NoteReportedActiveNodes (uint32_t n)
   {
     if (n > m_maxReportedActiveNodes)
       {
         m_maxReportedActiveNodes = n;
       }
-  }
+  }*/
 
   double GetPostTxWaitSeconds () const
   {
@@ -163,6 +183,15 @@ private:
   }
 
 };
+
+void
+CsrMacCore::SetActiveNodesForPostTx (uint32_t n)
+{
+  if (m_dev != nullptr)
+    {
+      m_dev->SetActiveNodesForPostTx (std::max<uint32_t> (1, n));
+    }
+}
 
 void
 CsrMacCore::PrintNeighbors () const

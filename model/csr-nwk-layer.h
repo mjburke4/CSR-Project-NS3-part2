@@ -718,6 +718,11 @@ private:
     ne.activeNodes = hh.GetActiveNodes ();
     UpdateMacActiveNodes ();
 
+    if (m_hop != nullptr)
+    {
+      m_hop->NoteReportedActiveNodes (ne.activeNodes);
+    }
+
     std::cout << "[NWK " << m_nodeId << "] "
               << (isNew ? "New" : "Updated")
               << " HELLO neighbor=" << src

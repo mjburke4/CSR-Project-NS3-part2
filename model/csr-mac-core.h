@@ -14,6 +14,8 @@ public:
   void SetDevice (CsrNetDevice *dev)  { m_dev = dev; }
   int SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const;
   void PrintNeighbors () const;
+  void NoteReportedActiveNodes (uint32_t n);
+  uint32_t GetReportedActiveNodesForSlotting () const;
 
   private:
   // DiscoveryStart, DiscoveryStop defined inline below
@@ -42,12 +44,10 @@ public:
     SendHelloInternal (true);
   }
 
-  void SetActiveNodesForPostTx (uint32_t n)
-  {
+  void SetActiveNodesForPostTx (uint32_t n);
+  /*{
     m_activeNodesForPostTx = std::max<uint32_t> (1, n);
-  }
-
-  uint32_t m_activeNodesForPostTx {1};
+  }*/
 
   // SendHelloInternal moved after CsrNetDevice definition (see below)
 
@@ -188,6 +188,7 @@ private:
   uint16_t  m_helloSeq { 0 };
   bool      m_helloEnabled { false };
   bool      m_discoveryActive { false };
+  uint32_t  m_maxReportedActiveNodes { 0 };
   EventId   m_discoveryStartEvent;
   EventId   m_discoveryStopEvent;
 
@@ -217,6 +218,14 @@ private:
   {
     const int SLOT_RANGE = 64;
     bool used[SLOT_RANGE];
+
+    uint32_t activeForSlotting = GetReportedActiveNodesForSlotting ();
+
+    std::cout << "[MAC " << m_nodeId
+              << "] PickTxSlot active_nodes_for_slotting="
+              << activeForSlotting
+              << std::endl;
+              
     for (int i = 0; i < SLOT_RANGE; ++i)
       {
         used[i] = false;
@@ -274,6 +283,21 @@ private:
   }
 
 };
+
+void
+CsrMacCore::NoteReportedActiveNodes (uint32_t n)
+{
+  if (n > m_maxReportedActiveNodes)
+    {
+      m_maxReportedActiveNodes = n;
+    }
+}
+
+uint32_t
+CsrMacCore::GetReportedActiveNodesForSlotting () const
+{
+  return std::max<uint32_t> (1, m_maxReportedActiveNodes);
+}
 
 void
 CsrMacCore::StartSlotTick (Time period)
