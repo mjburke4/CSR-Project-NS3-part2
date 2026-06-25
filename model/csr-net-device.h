@@ -95,6 +95,21 @@ private:
   double m_wakeCycleSec     { 0.988 };
   double m_awakeWindowSec   { 0.0011 + 0.0078 }; // ~0.0089 s
   double m_wakePhaseSec     { 0.0 };             // randomized per node
+  // OPNET br_mac.pr.c:
+  // POST_TX_WAIT_TIME = STAY_AWAKE_BASE_TIME + 1.5*active_nodes + STAY_AWAKE_GUARD_TIME
+  double m_stayAwakeBaseSec  { 15.0 };
+  double m_stayAwakeGuardSec { 0.5 };
+
+  // Placeholder until active_nodes is plumbed from NWK/MAC state.
+  // br_mac initializes active_nodes to 1.
+  uint32_t m_activeNodesForPostTx { 1 };
+
+  double GetPostTxWaitSeconds () const
+  {
+    return m_stayAwakeBaseSec
+        + 1.5 * static_cast<double> (m_activeNodesForPostTx)
+        + m_stayAwakeGuardSec;
+  }
 
   bool CanReceiveDuring (double tStart, double tEnd) const
   {
@@ -260,13 +275,26 @@ CsrNetDevice::SendToPeer (Ptr<Packet> frame,
   Ptr<CsrNetDevice> self = this;
   Ptr<Packet> frameCopy = frame->Copy ();
 
-  if (ackable)
+  /*if (ackable)
   {
     // Stay awake through TX + propagation + some ACK turnaround margin.
     // Keep this conservative for now; we can tune later.
     double ackMarginSec = 0.35;   // small “transaction” window
     this->ForceAwakeFor(duration + propDelay + ackMarginSec);
-  }
+  }*/
+  // OPNET br_mac.post_tx(): after the last transmission, MAC remains in
+  // receive/search for POST_TX_WAIT_TIME. This is not limited to ACKable data;
+  // HELLO/control transmissions also keep the node awake long enough to hear
+  // follow-on traffic.
+  double postTxWaitSec = GetPostTxWaitSeconds ();
+  this->ForceAwakeFor (duration + propDelay + postTxWaitSec);
+
+std::cout << "[MAC " << m_id
+          << "] Post-TX force-awake for "
+          << (duration + propDelay + postTxWaitSec)
+          << " s"
+          << " (POST_TX_WAIT=" << postTxWaitSec << " s)"
+          << std::endl;
 
   // Peek header once to know src/dst/seq
   CsrHeader hdrOnTx;
