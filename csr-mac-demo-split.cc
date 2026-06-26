@@ -230,10 +230,10 @@ main (int argc, char *argv[])
   dev3->GetMac ().SetRxCallback (MakeCallback (&CsrHopLayer::ReceiveFromMac, hop3));
 
   // Slot tick drives reservation decay (OPNET-like)
-  dev0->GetMac ().StartSlotTick (Seconds (1.0));
-  dev1->GetMac ().StartSlotTick (Seconds (1.0));
-  dev2->GetMac ().StartSlotTick (Seconds (1.0));
-  dev3->GetMac ().StartSlotTick (Seconds (1.0));
+  dev0->GetMac ().StartSlotTick (Seconds (0.013));
+  dev1->GetMac ().StartSlotTick (Seconds (0.013));
+  dev2->GetMac ().StartSlotTick (Seconds (0.013));
+  dev3->GetMac ().StartSlotTick (Seconds (0.013));
 
   // Discovery assist for direct 0->1 no-route test.
   // Node 0 will trigger on-demand discovery at t=1.

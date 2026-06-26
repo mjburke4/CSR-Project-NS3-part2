@@ -14,8 +14,19 @@ public:
   void SetDevice (CsrNetDevice *dev)  { m_dev = dev; }
   int SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const;
   void PrintNeighbors () const;
-  void NoteReportedActiveNodes (uint32_t n);
-  uint32_t GetReportedActiveNodesForSlotting () const;
+
+  void NoteReportedActiveNodes (uint32_t n)
+  {
+    if (n > m_maxReportedActiveNodes)
+      {
+        m_maxReportedActiveNodes = n;
+      }
+  }
+
+  uint32_t GetReportedActiveNodesForSlotting () const
+  {
+    return std::max<uint32_t> (1, m_maxReportedActiveNodes);
+  }
 
   private:
   // DiscoveryStart, DiscoveryStop defined inline below
@@ -23,8 +34,10 @@ public:
   void SendHelloInternal (bool reschedule);
   // --- Slot tick for reservation decay (OPNET rtslot_counter style) ---
   EventId m_slotTickEvent;
-  Time    m_slotTickPeriod { Seconds (1.0) };   // default; tune later
+  //Time    m_slotTickPeriod { Seconds (1.0) };   // default; tune later
+  Time    m_slotTickPeriod { Seconds (0.013) }; // OPNET TSLOT_CYCLE
   bool    m_slotTickEnabled { false };
+  static constexpr int DEFAULT_RTSLOT_COUNTER = 20;
 
   void SlotTick ();
 
@@ -45,9 +58,6 @@ public:
   }
 
   void SetActiveNodesForPostTx (uint32_t n);
-  /*{
-    m_activeNodesForPostTx = std::max<uint32_t> (1, n);
-  }*/
 
   // SendHelloInternal moved after CsrNetDevice definition (see below)
 
@@ -83,6 +93,31 @@ public:
     m_discoveryActive = false;
   }
 
+  int
+  GetOpnetSlotRange (uint32_t activeNodesForSlotting) const
+  {
+    switch (activeNodesForSlotting)
+      {
+      case 0:  return 15;
+      case 1:  return 18;
+      case 2:  return 21;
+      case 3:  return 25;
+      case 4:  return 31;
+      case 5:  return 37;
+      case 6:  return 44;
+      case 7:  return 52;
+      case 8:  return 63;
+      case 9:  return 75;
+      case 10: return 89;
+      case 11: return 106;
+      case 12: return 127;
+      case 13: return 151;
+      case 14: return 180;
+      case 15: return 214;
+      case 16: return 255;
+      default: return 255;
+      }
+  }
 
   void SetRxCallback (Callback<void, Ptr<Packet>, double, double> cb)
   {
@@ -122,13 +157,27 @@ public:
   void NoteNeighborReservedSlot (uint16_t neighbor, int slot)
   {
     NeighborInfo &info = m_neighbors[neighbor];
+
     info.reserveSlot = slot;
-    info.rtCounter   = 4;   // simple “hold” window, tune later if you want
+    info.rtCounter   = DEFAULT_RTSLOT_COUNTER;
+
+    std::cout << "[MAC " << m_nodeId << "] Learned neighbor " << neighbor
+              << " uses slot " << slot
+              << " (rtCounter=" << info.rtCounter << ")"
+              << std::endl;
+  }
+
+  /*void NoteNeighborReservedSlot (uint16_t neighbor, int slot)
+  {
+    NeighborInfo &info = m_neighbors[neighbor];
+    info.reserveSlot = slot;
+    info.rtCounter   = 20; //4;   // simple “hold” window, tune later if you want
+
     std::cout << "[MAC " << m_nodeId << "] Learned neighbor " << neighbor
           << " uses slot " << slot
           << " (rtCounter=" << m_neighbors[neighbor].rtCounter << ")"
           << std::endl;
-  }
+  }*/
 
   void StartHello (Time interval)
   {
@@ -214,7 +263,7 @@ private:
   //void DiscoveryStop ();
   //void SendHelloInternal (bool reschedule);
 
-  int PickTxSlot (uint16_t dest)
+  /*int PickTxSlot (uint16_t dest)
   {
     const int SLOT_RANGE = 64;
     bool used[SLOT_RANGE];
@@ -282,22 +331,119 @@ private:
     return chosenSlot;
   }
 
+};*/
+
+  int
+  PickTxSlot (uint16_t dest)
+  {
+    uint32_t activeForSlotting = GetReportedActiveNodesForSlotting ();
+    int slotRange = GetOpnetSlotRange (activeForSlotting);
+
+    // OPNET get_slot() returns a slot in [1, slot_range].
+    // Keep a fixed reservation table up to 255 for now.
+    const int MAX_SLOTRESERVE_NS3 = 256;
+
+    bool used[MAX_SLOTRESERVE_NS3];
+    for (int i = 0; i < MAX_SLOTRESERVE_NS3; ++i)
+      {
+        used[i] = false;
+      }
+
+    std::cout << "[MAC " << m_nodeId
+              << "] PickTxSlot(dest=" << dest
+              << ") active_nodes_for_slotting=" << activeForSlotting
+              << " opnet_slot_range=" << slotRange
+              << std::endl;
+
+    // Mark reserved slots learned from neighbors.
+    for (auto &kv : m_neighbors)
+      {
+        NeighborInfo &ni = kv.second;
+
+        if (ni.rtCounter > 0 &&
+            ni.reserveSlot >= 0 &&
+            ni.reserveSlot < MAX_SLOTRESERVE_NS3)
+          {
+            used[ni.reserveSlot] = true;
+
+            std::cout << "[MAC " << m_nodeId
+                      << "] avoiding neighbor " << kv.first
+                      << " reserveSlot=" << ni.reserveSlot
+                      << " rtslot_counter=" << ni.rtCounter
+                      << std::endl;
+          }
+
+        if (ni.rtCounter == 0)
+          {
+            ni.reserveSlot = -1;
+          }
+      }
+
+    /*for (auto &kv : m_neighbors)
+      {
+        NeighborInfo &ni = kv.second;
+
+        if (ni.rtCounter > 0 &&
+            ni.reserveSlot >= 0 &&
+            ni.reserveSlot < MAX_SLOTRESERVE_NS3)
+          {
+            used[ni.reserveSlot] = true;
+          }
+
+        // Keep existing behavior: reservation decay happens in SlotTick(),
+        // not here. This is closer to the OPNET rtslot_counter idea.
+        if (ni.rtCounter == 0)
+          {
+            ni.reserveSlot = -1;
+          }
+      }*/
+
+    // Debug: show avoided slots inside the selectable OPNET range.
+    std::cout << "[MAC " << m_nodeId << "] PickTxSlot(dest=" << dest << ") avoid:";
+    for (int s = 1; s <= slotRange; ++s)
+      {
+        if (used[s])
+          {
+            std::cout << " " << s;
+          }
+      }
+    std::cout << std::endl;
+
+    // Build list of free slots in OPNET range [1, slotRange].
+    std::vector<int> freeSlots;
+    freeSlots.reserve (slotRange);
+
+    for (int s = 1; s <= slotRange; ++s)
+      {
+        if (!used[s])
+          {
+            freeSlots.push_back (s);
+          }
+      }
+
+    Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+
+    int chosenSlot;
+    if (!freeSlots.empty ())
+      {
+        int idx = rng->GetInteger (0, static_cast<int> (freeSlots.size ()) - 1);
+        chosenSlot = freeSlots[idx];
+      }
+    else
+      {
+        // Fallback: OPNET-style random slot in [1, slotRange].
+        chosenSlot = rng->GetInteger (1, slotRange);
+      }
+
+    std::cout << "[MAC " << m_nodeId
+              << "] PickTxSlot chose " << chosenSlot
+              << " from range [1," << slotRange << "]"
+              << std::endl;
+
+    return chosenSlot;
+  }
+
 };
-
-void
-CsrMacCore::NoteReportedActiveNodes (uint32_t n)
-{
-  if (n > m_maxReportedActiveNodes)
-    {
-      m_maxReportedActiveNodes = n;
-    }
-}
-
-uint32_t
-CsrMacCore::GetReportedActiveNodesForSlotting () const
-{
-  return std::max<uint32_t> (1, m_maxReportedActiveNodes);
-}
 
 void
 CsrMacCore::StartSlotTick (Time period)
@@ -323,7 +469,7 @@ CsrMacCore::StopSlotTick ()
     }
 }
 
-void
+/*void
 CsrMacCore::SlotTick ()
 {
   if (!m_slotTickEnabled)
@@ -339,15 +485,50 @@ CsrMacCore::SlotTick ()
     {
       ni.rtCounter--;
       if (ni.rtCounter == 0) ni.reserveSlot = -1;
-
-      /*std::cout << "[MAC " << m_nodeId << "] SlotTick neighbor " << kv.first
+        std::cout << "[MAC " << m_nodeId << "] SlotTick neighbor " << kv.first
                 << " rtCounter=" << ni.rtCounter
                 << " reserveSlot=" << ni.reserveSlot
-                << std::endl;*/
+                << std::endl;
     }
   }
   // Re-arm
   m_slotTickEvent = Simulator::Schedule (m_slotTickPeriod, &CsrMacCore::SlotTick, this);
+}*/
+
+void
+CsrMacCore::SlotTick ()
+{
+  if (!m_slotTickEnabled)
+    {
+      return;
+    }
+
+  for (auto &kv : m_neighbors)
+    {
+      uint16_t neighbor = kv.first;
+      NeighborInfo &ni = kv.second;
+
+      if (ni.rtCounter > 0)
+        {
+          ni.rtCounter--;
+
+          if (ni.rtCounter == 0)
+            {
+              std::cout << "[MAC " << m_nodeId
+                        << "] rtslot_counter expired for neighbor "
+                        << neighbor
+                        << " reserveSlot=" << ni.reserveSlot
+                        << std::endl;
+
+              ni.reserveSlot = -1;
+            }
+        }
+    }
+
+  m_slotTickEvent =
+    Simulator::Schedule (m_slotTickPeriod,
+                         &CsrMacCore::SlotTick,
+                         this);
 }
 
 // SendHello() moved after CsrNetDevice definition (see below)
