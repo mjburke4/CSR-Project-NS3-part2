@@ -181,13 +181,12 @@ private:
 
     return false;
   }
-
 };
 
 // Keep MAC-local active_nodes and device post-TX active_nodes synchronized.
 // MAC uses this for OPNET get_slot() range;
 // CsrNetDevice uses this for POST_TX_WAIT_TIME.
-void
+/*void
 CsrMacCore::SetActiveNodesForPostTx (uint32_t n)
 {
   uint32_t active = std::max<uint32_t> (1, n);
@@ -205,6 +204,28 @@ CsrMacCore::SetActiveNodesForPostTx (uint32_t n)
             << "] active_nodes set to "
             << active
             << " for slotting and post-TX wait"
+            << std::endl;
+}*/
+
+void
+CsrMacCore::SetActiveNodesForPostTx (uint32_t n)
+{
+  uint32_t active = std::max<uint32_t> (1, n);
+
+  // Local active_nodes used by MAC slotting.
+  // Keep separate from max_reported_active_nodes.
+  m_activeNodesForPostTx = active;
+
+  // Device copy used by OPNET-style POST_TX_WAIT_TIME.
+  if (m_dev != nullptr)
+    {
+      m_dev->SetActiveNodesForPostTx (active);
+    }
+
+  std::cout << "[MAC " << m_nodeId
+            << "] active_nodes set to "
+            << active
+            << " for local slotting and post-TX wait"
             << std::endl;
 }
 

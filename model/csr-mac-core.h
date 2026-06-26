@@ -15,7 +15,7 @@ public:
   int SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const;
   void PrintNeighbors () const;
 
-  void NoteReportedActiveNodes (uint32_t n)
+  /*void NoteReportedActiveNodes (uint32_t n)
   {
     if (n > m_maxReportedActiveNodes)
       {
@@ -26,6 +26,30 @@ public:
   uint32_t GetReportedActiveNodesForSlotting () const
   {
     return std::max<uint32_t> (1, m_maxReportedActiveNodes);
+  }*/
+
+  void NoteReportedActiveNodes (uint32_t n)
+  {
+    uint32_t reported = std::max<uint32_t> (1, n);
+
+    if (reported > m_maxReportedActiveNodes)
+      {
+        m_maxReportedActiveNodes = reported;
+
+        std::cout << "[MAC " << m_nodeId
+                  << "] max_reported_active_nodes updated to "
+                  << m_maxReportedActiveNodes
+                  << std::endl;
+      }
+  }
+
+  uint32_t GetReportedActiveNodesForSlotting () const
+  {
+    // OPNET-style:
+    // get_slot(max_reported_active_nodes > active_nodes ?
+    //          max_reported_active_nodes : active_nodes, rn_range)
+    return std::max<uint32_t> (m_activeNodesForPostTx,
+                              m_maxReportedActiveNodes);
   }
 
   private:
@@ -237,7 +261,9 @@ private:
   uint16_t  m_helloSeq { 0 };
   bool      m_helloEnabled { false };
   bool      m_discoveryActive { false };
-  uint32_t  m_maxReportedActiveNodes { 0 };
+  //uint32_t  m_maxReportedActiveNodes { 0 };
+  uint32_t  m_activeNodesForPostTx { 1 };      // local active_nodes
+  uint32_t  m_maxReportedActiveNodes { 0 };    // max Active reported by neighbors
   EventId   m_discoveryStartEvent;
   EventId   m_discoveryStopEvent;
 
