@@ -599,6 +599,12 @@ private:
 
   void EnsureDiscoveryForTx ();
 
+  void ProcessRoutesPayload (const CsrHelloHeader &hh,
+                           uint16_t helloSrc,
+                           double pathlossDb,
+                           double snrDb,
+                           uint32_t linkCost);
+
   void TryDrainQueueAfterDiscovery ();
 
   void ScheduleDiscoveryHello ();
@@ -751,8 +757,14 @@ private:
     // 3) Advertised route from HELLO sender
     //    If src advertises dst=X, then we can reach X via src.
     // ------------------------------------------------------------
-    
-    uint8_t advCount = hh.GetAdvertisedRouteCount ();
+
+    ProcessRoutesPayload (hh,
+                      src,
+                      pathlossDb,
+                      snrDb,
+                      linkCost);
+
+    /*uint8_t advCount = hh.GetAdvertisedRouteCount ();
 
     for (uint8_t idx = 0; idx < advCount; ++idx)
       {
@@ -783,12 +795,64 @@ private:
                   << " advCost=" << ar.cost
                   << " totalCost=" << totalCost
                   << std::endl;
-      }
+      }*/
 
     DumpRoutes ();
 
     // Discovery/route update may have unblocked queued packets.
     ScheduleCheckNwkQueue ();
+  }
+
+  void
+  CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
+                                    uint16_t helloSrc,
+                                    double pathlossDb,
+                                    double snrDb,
+                                    uint32_t linkCost)
+  {
+    uint8_t advCount = hh.GetAdvertisedRouteCount ();
+
+    if (advCount == 0)
+      {
+        return;
+      }
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Processing Routes_PAYLOAD from "
+              << helloSrc
+              << " advCount=" << unsigned (advCount)
+              << std::endl;
+
+    for (uint8_t idx = 0; idx < advCount; ++idx)
+      {
+        auto ar = hh.GetAdvertisedRoute (idx);
+
+        if (ar.dst == CSR_BROADCAST_ID ||
+            ar.dst == m_nodeId ||
+            ar.dst == helloSrc)
+          {
+            continue;
+          }
+
+        uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
+        uint32_t totalCost = linkCost + ar.cost;
+
+        AddOrUpdateRoute (ar.dst,
+                          helloSrc,      // next hop is the HELLO sender
+                          false,         // not immediate
+                          totalHops,
+                          pathlossDb,
+                          totalCost,
+                          ar.capability);
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Learned advertised route dst=" << ar.dst
+                  << " via nextHop=" << helloSrc
+                  << " hops=" << unsigned (totalHops)
+                  << " advCost=" << ar.cost
+                  << " totalCost=" << totalCost
+                  << std::endl;
+      }
   }
 
   void CsrNetLayer::EnsureDiscoveryForTx ()
