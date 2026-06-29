@@ -62,6 +62,7 @@ public:
   void NoteLinkFailure (uint16_t nextHop)
   {
     auto &ne = m_nwkNeighbors[nextHop];
+
     ne.nodeId = nextHop;
     ne.numFailures++;
 
@@ -70,8 +71,169 @@ public:
               << " numFailures=" << ne.numFailures
               << std::endl;
 
-    // If we have route entries through this nextHop, recompute their direct-link component
-    // later when we have fresh pathloss. For now, mark the route cost stale via log only.
+    RecomputeRoutesViaNextHop (nextHop);
+  }
+
+  /*void
+  RecomputeRoutesViaNextHop (uint16_t nextHop)
+  {
+    auto nit = m_nwkNeighbors.find (nextHop);
+    if (nit == m_nwkNeighbors.end ())
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Cannot recompute routes via nextHop=" << nextHop
+                  << " because neighbor state is missing"
+                  << std::endl;
+        return;
+      }
+
+    NwkNeighborEntry &ne = nit->second;
+
+    if (std::isnan (ne.lastPathlossDb))
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Cannot recompute routes via nextHop=" << nextHop
+                  << " because pathloss is unknown"
+                  << std::endl;
+        return;
+      }
+
+    double s0PowerDbm = static_cast<double> (ne.rxPowerDbmX10) / 10.0;
+
+    // If RxPower was not populated yet, fall back to local configured S0.
+    if (s0PowerDbm == 0.0)
+      {
+        s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
+      }
+
+    int chosenSpeed = 0;
+    double chosenTxPower = 0.0;
+    int estDistance = 0;
+    double speedMargin = 0.0;
+    double totalMargin = 0.0;
+
+    uint32_t directLinkCost =
+      ComputeLinkCost (s0PowerDbm,
+                      ne.lastPathlossDb,
+                      ne.numFailures,
+                      &chosenSpeed,
+                      &chosenTxPower,
+                      &estDistance,
+                      &speedMargin,
+                      &totalMargin);
+
+    for (auto &re : m_routes)
+      {
+        if (!re.valid || re.nextHop != nextHop)
+          {
+            continue;
+          }
+
+        uint32_t oldCost = re.cost;
+
+        if (re.immediate || re.nwkDst == nextHop)
+          {
+            re.cost = directLinkCost;
+          }
+        else
+          {
+            // For now, preserve the downstream portion as:
+            // old route cost - old direct link cost, approximately.
+            // This is still an approximation until advertised route cost is stored separately.
+            if (oldCost > re.cost)
+              {
+                // Defensive, should not happen.
+                re.cost = directLinkCost;
+              }
+            else
+              {
+                // Minimal behavior: penalize route by replacing cost with at least directLinkCost.
+                // Later we will split route cost into linkCostToNextHop + advertisedCost.
+                re.cost = std::max (oldCost, directLinkCost);
+              }
+          }
+
+        re.lastUpdated = Simulator::Now ();
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Recomputed route via failed nextHop=" << nextHop
+                  << " dst=" << re.nwkDst
+                  << " oldCost=" << oldCost
+                  << " newCost=" << re.cost
+                  << " numFailures=" << ne.numFailures
+                  << " speed=" << chosenSpeed
+                  << " txPower=" << chosenTxPower
+                  << " estDistance=" << estDistance
+                  << " speedMargin=" << speedMargin
+                  << " totalMargin=" << totalMargin
+                  << std::endl;
+      }
+
+    DumpRoutes ();
+  }*/
+
+  void
+  RecomputeRoutesViaNextHop (uint16_t nextHop)
+  {
+    auto nit = m_nwkNeighbors.find (nextHop);
+    if (nit == m_nwkNeighbors.end ())
+      {
+        return;
+      }
+
+    NwkNeighborEntry &ne = nit->second;
+
+    if (std::isnan (ne.lastPathlossDb))
+      {
+        return;
+      }
+
+    double s0PowerDbm = static_cast<double> (ne.rxPowerDbmX10) / 10.0;
+    if (s0PowerDbm == 0.0)
+      {
+        s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
+      }
+
+    int chosenSpeed = 0;
+    double chosenTxPower = 0.0;
+    int estDistance = 0;
+    double speedMargin = 0.0;
+    double totalMargin = 0.0;
+
+    uint32_t newLinkCost =
+      ComputeLinkCost (s0PowerDbm,
+                      ne.lastPathlossDb,
+                      ne.numFailures,
+                      &chosenSpeed,
+                      &chosenTxPower,
+                      &estDistance,
+                      &speedMargin,
+                      &totalMargin);
+
+    for (auto &re : m_routes)
+      {
+        if (!re.valid || re.nextHop != nextHop)
+          {
+            continue;
+          }
+
+        uint32_t oldCost = re.cost;
+
+        re.linkCostToNextHop = newLinkCost;
+        re.cost = re.linkCostToNextHop + re.advertisedCost;
+        re.lastUpdated = Simulator::Now ();
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Recomputed route after link failure"
+                  << " dst=" << re.nwkDst
+                  << " nextHop=" << nextHop
+                  << " oldCost=" << oldCost
+                  << " newCost=" << re.cost
+                  << " linkCost=" << re.linkCostToNextHop
+                  << " advertisedCost=" << re.advertisedCost
+                  << " numFailures=" << ne.numFailures
+                  << std::endl;
+      }
   }
 
   void UpdateMacActiveNodes ()
@@ -113,6 +275,9 @@ public:
                       << "->nh=" << re.nextHop
                       << "(hops=" << unsigned (re.numHop)
                       << ",cost=" << re.cost
+                      << ",linkCost=" << re.linkCostToNextHop
+                      << ",advCost=" << re.advertisedCost
+                      << ",from=" << re.learnedFrom
                       << ",imm=" << (re.immediate ? 1 : 0)
                       << ",pl=" << re.pathlossDb
                       << ",valid=" << (re.valid ? 1 : 0)
@@ -286,17 +451,26 @@ public:
       }
   }
 
- void AddOrUpdateRoute (uint16_t nwkDst,
-                  uint16_t nextHop,
-                  bool immediate,
-                  uint8_t numHop,
-                  double pathlossDb,
-                  uint32_t cost,
-                  uint8_t capability = 0)
+ void
+  AddOrUpdateRoute (uint16_t nwkDst,
+                    uint16_t nextHop,
+                    bool immediate,
+                    uint8_t numHop,
+                    double pathlossDb,
+                    uint32_t linkCostToNextHop,
+                    uint32_t advertisedCost,
+                    uint16_t learnedFrom,
+                    uint8_t capability = 0)
   {
     if (nwkDst == m_nodeId)
       {
         return;
+      }
+
+    uint32_t totalCost = linkCostToNextHop + advertisedCost;
+    if (totalCost == 0)
+      {
+        totalCost = 1;
       }
 
     for (auto &re : m_routes)
@@ -304,7 +478,7 @@ public:
         if (re.nwkDst == nwkDst)
           {
             bool sameNextHop = (re.nextHop == nextHop);
-            bool betterCost  = (cost + 5 < re.cost);
+            bool betterCost  = (totalCost + 5 < re.cost);
             bool invalid     = !re.valid;
 
             if (sameNextHop || betterCost || invalid)
@@ -314,15 +488,22 @@ public:
                 re.nextHop = nextHop;
                 re.pathlossDb = pathlossDb;
                 re.numHop = numHop;
-                re.cost = cost;
+
+                re.linkCostToNextHop = linkCostToNextHop;
+                re.advertisedCost = advertisedCost;
+                re.cost = totalCost;
+
                 re.lastUpdated = Simulator::Now ();
                 re.valid = true;
+                re.learnedFrom = learnedFrom;
 
                 std::cout << "[NWK " << m_nodeId
                           << "] Updated route dst=" << nwkDst
                           << " nextHop=" << nextHop
                           << " hops=" << unsigned (numHop)
-                          << " cost=" << cost
+                          << " cost=" << re.cost
+                          << " linkCost=" << re.linkCostToNextHop
+                          << " advCost=" << re.advertisedCost
                           << " pathloss=" << pathlossDb
                           << std::endl;
               }
@@ -338,7 +519,12 @@ public:
     re.nextHop = nextHop;
     re.pathlossDb = pathlossDb;
     re.numHop = numHop;
-    re.cost = cost;
+
+    re.linkCostToNextHop = linkCostToNextHop;
+    re.advertisedCost = advertisedCost;
+    re.cost = totalCost;
+    re.learnedFrom = learnedFrom;
+
     re.energyLevel = 100;
     re.lastUpdated = Simulator::Now ();
     re.valid = true;
@@ -349,7 +535,9 @@ public:
               << "] Added route dst=" << nwkDst
               << " nextHop=" << nextHop
               << " hops=" << unsigned (numHop)
-              << " cost=" << cost
+              << " cost=" << re.cost
+              << " linkCost=" << re.linkCostToNextHop
+              << " advCost=" << re.advertisedCost
               << " pathloss=" << pathlossDb
               << std::endl;
   }
@@ -365,6 +553,8 @@ public:
                       hops,
                       std::numeric_limits<double>::quiet_NaN (),
                       1,
+                      0,
+                      CSR_BROADCAST_ID,
                       0);
   }
 
@@ -400,6 +590,8 @@ public:
                       hops,
                       pathlossDb,
                       cost,
+                      0,
+                      CSR_BROADCAST_ID,
                       capability);
 
     std::cout << "[NWK " << m_nodeId
@@ -414,44 +606,6 @@ public:
               << " cost=" << cost
               << std::endl;
   }
-    // Add a static route (for now): nwkDst -> nextHop
-  /*  void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
-  {
-    for (auto &re : m_routes)
-      {
-        if (re.nwkDst == nwkDst)
-          {
-            re.nextHop = nextHop;
-            re.cost = 1;
-
-            std::cout << "[NWK " << m_nodeId
-                      << "] Updated route dst=" << nwkDst
-                      << " nextHop=" << nextHop
-                      << std::endl;
-            return;
-          }
-      }
-
-    RouteEntry re;
-    re.nwkDst = nwkDst;
-    re.nextHop = nextHop;
-    re.cost = 1;
-    m_routes.push_back (re);
-
-    std::cout << "[NWK " << m_nodeId
-              << "] Added route dst=" << nwkDst
-              << " nextHop=" << nextHop
-              << std::endl;
-  }*/
-
-  /*void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
-  {
-    RouteEntry re;
-    re.nwkDst = nwkDst;
-    re.nextHop = nextHop;
-    re.cost = 1;
-    m_routes.push_back (re);
-  }*/
 
 private:
 
@@ -469,6 +623,10 @@ private:
 
     Time     lastUpdated {Seconds (0.0)};
     bool     valid {true};
+    uint32_t linkCostToNextHop {0};
+    uint32_t advertisedCost {0};
+
+    uint16_t learnedFrom {CSR_BROADCAST_ID}; // node that taught us this route
   };
 
   struct NwkQueueEntry
@@ -917,13 +1075,23 @@ private:
               << " cost=" << linkCost
               << std::endl;
 
-    AddOrUpdateRoute (src,
+    /*AddOrUpdateRoute (src,
                       src,
                       true,       // immediate neighbor
                       1,          // one hop
                       pathlossDb,
                       linkCost,
-                      0);         // capability placeholder
+                      0);         // capability placeholder*/
+
+    AddOrUpdateRoute (src,
+                  src,
+                  true,
+                  1,
+                  pathlossDb,
+                  linkCost,
+                  0,
+                  src,   // learned from the neighbor itself
+                  0);
 
     // ------------------------------------------------------------
     // 3) Advertised route from HELLO sender
@@ -976,13 +1144,23 @@ private:
         uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
         uint32_t totalCost = linkCost + ar.cost;
 
-        AddOrUpdateRoute (ar.dst,
+        /*AddOrUpdateRoute (ar.dst,
                           helloSrc,      // next hop is the HELLO sender
                           false,         // not immediate
                           totalHops,
                           pathlossDb,
                           totalCost,
-                          ar.capability);
+                          ar.capability);*/
+
+       AddOrUpdateRoute (ar.dst,
+                        helloSrc,
+                        false,
+                        totalHops,
+                        pathlossDb,
+                        linkCost,
+                        ar.cost,
+                        helloSrc,      // learned from HELLO sender
+                        ar.capability);
 
         std::cout << "[NWK " << m_nodeId
                   << "] Learned advertised route dst=" << ar.dst
@@ -1145,6 +1323,14 @@ private:
                                   re.capability))
           {
             added++;
+
+            std::cout << "[NWK " << m_nodeId
+            << "] HELLO add route adv dst=" << re.nwkDst
+            << " hops=" << unsigned (re.numHop)
+            << " cost=" << re.cost
+            << " linkCost=" << re.linkCostToNextHop
+            << " advCost=" << re.advertisedCost
+            << std::endl;
           }
 
         if (added >= 8)
