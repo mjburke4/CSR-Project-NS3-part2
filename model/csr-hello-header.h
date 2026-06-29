@@ -60,8 +60,6 @@ private:
   uint8_t  m_speedKey {0};
   int16_t  m_rxPowerDbmX10 {0};
   uint8_t  m_activeNodes {0};
-  //uint16_t m_advDst {0xFFFF};
-  //uint8_t  m_advHops {0};
   static constexpr uint8_t MAX_ADVERTISED_ROUTES = 8;
   std::vector<AdvertisedRoute> m_advertisedRoutes;
   

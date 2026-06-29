@@ -17,7 +17,7 @@ public:
   EventId m_discoveryHelloEvent;
   Time    m_discoveryHelloInterval { Seconds (2.0) };
 
-static TypeId GetTypeId (void)
+  static TypeId GetTypeId (void)
   {
     static TypeId tid = TypeId ("ns3::CsrNetLayer")
       .SetParent<Object> ()
@@ -57,6 +57,21 @@ static TypeId GetTypeId (void)
            << "," << m_nwkQueue.size ()
            << "\n";
       }
+  }
+
+  void NoteLinkFailure (uint16_t nextHop)
+  {
+    auto &ne = m_nwkNeighbors[nextHop];
+    ne.nodeId = nextHop;
+    ne.numFailures++;
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Link failure to nextHop=" << nextHop
+              << " numFailures=" << ne.numFailures
+              << std::endl;
+
+    // If we have route entries through this nextHop, recompute their direct-link component
+    // later when we have fresh pathloss. For now, mark the route cost stale via log only.
   }
 
   void UpdateMacActiveNodes ()
@@ -129,6 +144,9 @@ static TypeId GetTypeId (void)
         // HOP asks NWK whether this flow should use DACK-style delayed release
         m_hop->SetShouldDackCallback (
           MakeCallback (&CsrNetLayer::ShouldDack, this));
+
+        m_hop->SetLinkFailureCallback (
+          MakeCallback (&CsrNetLayer::NoteLinkFailure, this));
       }
   }
 
@@ -436,12 +454,6 @@ static TypeId GetTypeId (void)
   }*/
 
 private:
- /* struct RouteEntry
-  {
-    uint16_t nwkDst;   // network-layer destination
-    uint16_t nextHop;  // hop-level next hop
-    uint32_t cost;     // optional, for future use
-  };*/
 
   struct RouteEntry
   {
@@ -477,6 +489,9 @@ private:
     uint8_t speedKey {0};
     int16_t rxPowerDbmX10 {0};
     uint8_t activeNodes {0};
+
+    // OPNET BrT_Neighbor_Entry::num_failures
+    uint32_t numFailures {0};
   };
 
   // NSDP: Network Source–Destination Pair entry
@@ -594,41 +609,15 @@ private:
     return true;
   }
 
-  /*bool LookupNextHop (uint16_t nwkDst, uint16_t &nextHopOut)
-  {
-    for (const auto &re : m_routes)
-      {
-        if (re.nwkDst == nwkDst)
-          {
-            nextHopOut = re.nextHop;
-            return true;
-          }
-      }
-    return false;
-  }*/
-
-  /*uint32_t
-  ComputeLinkCost (double pathlossDb, double snrDb) const
-  {
-    // Temporary NS-3 cost model.
-    // Later we can replace this with the exact OPNET link_calc() behavior.
-    double plPenalty = std::max (0.0, pathlossDb - 80.0);
-    double snrPenalty = std::max (0.0, 10.0 - snrDb) * 5.0;
-
-    uint32_t cost = static_cast<uint32_t> (std::round (10.0 + plPenalty + snrPenalty));
-
-    return std::max<uint32_t> (1, cost);
-  }*/
-
   uint32_t
   ComputeLinkCost (double s0PowerDbm,
-                  double pathlossDb,
-                  uint32_t numFailures,
-                  int *speedOut = nullptr,
-                  double *txPowerOut = nullptr,
-                  int *estDistanceOut = nullptr,
-                  double *speedMarginOut = nullptr,
-                  double *totalMarginOut = nullptr) const
+                   double pathlossDb,
+                   uint32_t numFailures,
+                   int *speedOut = nullptr,
+                   double *txPowerOut = nullptr,
+                   int *estDistanceOut = nullptr,
+                   double *speedMarginOut = nullptr,
+                   double *totalMarginOut = nullptr) const
   {
     // Port of legacy OPNET br_hop.link_calc(), simplified for NS-3.
     // TX0_power is the power needed to meet link margin at 8 kbps.
@@ -803,26 +792,6 @@ private:
               << std::endl;
   }
 
-  /*void CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
-  {
-    if (m_discoveryStartEvent.IsPending ()) Simulator::Cancel (m_discoveryStartEvent);
-    if (m_discoveryStopEvent.IsPending  ()) Simulator::Cancel (m_discoveryStopEvent);
-
-    // If we're already scheduled/active/cooldown, don't restart (OPNET-like gating)
-    if (m_discState == DiscoveryState::SCHEDULED ||
-        m_discState == DiscoveryState::ACTIVE ||
-        m_discState == DiscoveryState::COOLDOWN)
-      {
-        return;
-      }
-
-    // IMPORTANT: mark as scheduled immediately (prevents duplicate triggers)
-    m_discState = DiscoveryState::SCHEDULED;
-
-    m_discoveryStartEvent = Simulator::Schedule (startDelay, &CsrNetLayer::DiscoveryStart, this);
-    m_discoveryStopEvent  = Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
-  }*/
-
   void
   CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
   {
@@ -939,6 +908,7 @@ private:
               << "] link_calc neighbor=" << src
               << " s0=" << s0PowerDbm
               << " pathloss=" << pathlossDb
+              << " numFailures=" << ne.numFailures
               << " speed=" << chosenSpeed
               << " txPower=" << chosenTxPower
               << " estDistance=" << estDistance
@@ -965,39 +935,6 @@ private:
                       pathlossDb,
                       snrDb,
                       linkCost);
-
-    /*uint8_t advCount = hh.GetAdvertisedRouteCount ();
-
-    for (uint8_t idx = 0; idx < advCount; ++idx)
-      {
-        auto ar = hh.GetAdvertisedRoute (idx);
-
-        if (ar.dst == CSR_BROADCAST_ID ||
-            ar.dst == m_nodeId ||
-            ar.dst == src)
-          {
-            continue;
-          }
-
-        uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
-        uint32_t totalCost = linkCost + ar.cost;
-
-        AddOrUpdateRoute (ar.dst,
-                          src,          // next hop is HELLO sender
-                          false,        // not immediate
-                          totalHops,
-                          pathlossDb,
-                          totalCost,
-                          ar.capability);
-
-        std::cout << "[NWK " << m_nodeId
-                  << "] Learned advertised route dst=" << ar.dst
-                  << " via nextHop=" << src
-                  << " hops=" << unsigned (totalHops)
-                  << " advCost=" << ar.cost
-                  << " totalCost=" << totalCost
-                  << std::endl;
-      }*/
 
     DumpRoutes ();
 

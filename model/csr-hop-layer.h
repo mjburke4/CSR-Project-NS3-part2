@@ -59,6 +59,11 @@ public:
     m_shouldDackCb = cb;
   }
 
+  void SetLinkFailureCallback (Callback<void, uint16_t> cb)
+  {
+    m_linkFailureCb = cb;
+  }
+
   // App/NWK send
   void SendData (uint16_t dst, uint8_t dscp,
                  Ptr<Packet> payload, bool ack);
@@ -137,6 +142,8 @@ private:
   Callback<void, Ptr<Packet>, uint16_t, double, double> m_rxHelloFromHopCb;
 
   Callback<bool, uint16_t, uint16_t> m_shouldDackCb;
+
+  Callback<void, uint16_t> m_linkFailureCb;
 
   void NotifyNsdpFromFrame (Ptr<Packet> frame)
   {
@@ -593,9 +600,14 @@ CsrHopLayer::CheckResend ()
           NS_LOG_INFO ("Hop " << m_nodeId << " giving up on dest="
                               << e.dest << " seq=" << e.seq);
 
+         if (!m_linkFailureCb.IsNull ())
+            {
+              m_linkFailureCb (e.dest);
+            }
+
           // Inform Net layer that this flow lost a packet
           NotifyNsdpFromFrame (e.frame);
-          
+
           // Decrement flow-control outstanding counter
           FlowCtrlEntry &fc = GetFlowCtrlEntry (e.dest);
           if (fc.outstanding > 0)
