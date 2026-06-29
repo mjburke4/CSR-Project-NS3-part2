@@ -195,16 +195,38 @@ main (int argc, char *argv[])
   // net0->AddStaticRoute (3, 1);
 
   // Node 1: knows immediate neighbors 0 and 2.
-  net1->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 0);
-  net1->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 2);
+  //net1->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 0);
+  //net1->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 2);
 
   // Node 2: knows immediate neighbors 1 and 3.
-  net2->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
-  net2->AddStaticRoute (/*nwkDst*/ 3, /*nextHop*/ 3);
+  //net2->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
+  //net2->AddStaticRoute (/*nwkDst*/ 3, /*nextHop*/ 3);
 
   // Node 3: intentionally NO routes.
   // Later we can test reverse path 3->0.
   // net3->AddStaticRoute (2, 2);
+
+  // Node 1: immediate neighbors 0 and 2
+  net1->AddStaticRouteWithPathloss (/*nwkDst*/ 0,
+                                    /*nextHop*/ 0,
+                                    /*pathlossDb*/ 107.377,
+                                    /*immediate*/ true);
+
+  net1->AddStaticRouteWithPathloss (/*nwkDst*/ 2,
+                                    /*nextHop*/ 2,
+                                    /*pathlossDb*/ 115.742,
+                                    /*immediate*/ true);
+
+  // Node 2: immediate neighbors 1 and 3
+  net2->AddStaticRouteWithPathloss (/*nwkDst*/ 1,
+                                    /*nextHop*/ 1,
+                                    /*pathlossDb*/ 115.742,
+                                    /*immediate*/ true);
+
+  net2->AddStaticRouteWithPathloss (/*nwkDst*/ 3,
+                                    /*nextHop*/ 3,
+                                    /*pathlossDb*/ 111.868,
+                                    /*immediate*/ true);
 
   // Net -> App callbacks
   net0->SetRxFromNetCallback (MakeCallback (&AppRxFromNet));

@@ -39,12 +39,6 @@ namespace ns3 {
   void CsrHelloHeader::SetActiveNodes (uint8_t n) { m_activeNodes = n; }
   uint8_t CsrHelloHeader::GetActiveNodes () const { return m_activeNodes; }
 
-  //void CsrHelloHeader::SetAdvertisedDst (uint16_t dst) { m_advDst = dst; }
-  //uint16_t CsrHelloHeader::GetAdvertisedDst () const { return m_advDst; }
-
-  //void CsrHelloHeader::SetAdvertisedHops (uint8_t hops) { m_advHops = hops; }
-  //uint8_t CsrHelloHeader::GetAdvertisedHops () const { return m_advHops; }
-
   /*uint32_t
   CsrHelloHeader::GetSerializedSize () const
   {
@@ -90,18 +84,6 @@ namespace ns3 {
       }
   }
 
-  /*void
-  CsrHelloHeader::Serialize (Buffer::Iterator i) const
-  {
-    i.WriteHtonU16 (m_nodeId);
-    i.WriteHtonU16 (m_helloSeq);
-    i.WriteU8 (m_speedKey);
-    i.WriteHtonU16 (static_cast<uint16_t>(m_rxPowerDbmX10));
-    i.WriteU8 (m_activeNodes);
-    i.WriteHtonU16 (m_advDst);
-    i.WriteU8 (m_advHops);
-  }*/
-
   uint32_t
   CsrHelloHeader::Deserialize (Buffer::Iterator i)
   {
@@ -134,19 +116,6 @@ namespace ns3 {
     return GetSerializedSize ();
   }
 
-  /*uint32_t
-  CsrHelloHeader::Deserialize (Buffer::Iterator i)
-  {
-    m_nodeId = i.ReadNtohU16 ();
-    m_helloSeq = i.ReadNtohU16 ();
-    m_speedKey = i.ReadU8 ();
-    m_rxPowerDbmX10 = static_cast<int16_t>(i.ReadNtohU16 ());
-    m_activeNodes = i.ReadU8 ();
-    m_advDst = i.ReadNtohU16 ();
-    m_advHops = i.ReadU8 ();
-    return GetSerializedSize ();
-  }*/
-
   void
   CsrHelloHeader::Print (std::ostream &os) const
   {
@@ -157,18 +126,6 @@ namespace ns3 {
       << " activeNodes=" << unsigned (m_activeNodes)
       << " advRoutes=" << unsigned (GetAdvertisedRouteCount ());
   }
-  
-  /*void
-  CsrHelloHeader::Print (std::ostream &os) const
-  {
-    os << "nodeId=" << m_nodeId
-      << " helloSeq=" << m_helloSeq
-      << " speedKey=" << unsigned(m_speedKey)
-      << " rxPwr(dBm*10)=" << m_rxPowerDbmX10
-      << " activeNodes=" << unsigned(m_activeNodes)
-      << " advDst=" << m_advDst
-      << " advHops=" << unsigned(m_advHops);
-  }*/
 
   void
   CsrHelloHeader::ClearAdvertisedRoutes ()

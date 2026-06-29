@@ -350,6 +350,52 @@ static TypeId GetTypeId (void)
                       0);
   }
 
+  void
+  AddStaticRouteWithPathloss (uint16_t nwkDst,
+                              uint16_t nextHop,
+                              double pathlossDb,
+                              bool immediate = true,
+                              uint8_t capability = 0)
+  {
+    double s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
+
+    int chosenSpeed = 0;
+    double chosenTxPower = 0.0;
+    int estDistance = 0;
+    double speedMargin = 0.0;
+    double totalMargin = 0.0;
+
+    uint32_t cost = ComputeLinkCost (s0PowerDbm,
+                                    pathlossDb,
+                                    0, // num_failures placeholder
+                                    &chosenSpeed,
+                                    &chosenTxPower,
+                                    &estDistance,
+                                    &speedMargin,
+                                    &totalMargin);
+
+    uint8_t hops = immediate ? 1 : 2;
+
+    AddOrUpdateRoute (nwkDst,
+                      nextHop,
+                      immediate,
+                      hops,
+                      pathlossDb,
+                      cost,
+                      capability);
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Static route link_calc dst=" << nwkDst
+              << " nextHop=" << nextHop
+              << " pathloss=" << pathlossDb
+              << " speed=" << chosenSpeed
+              << " txPower=" << chosenTxPower
+              << " estDistance=" << estDistance
+              << " speedMargin=" << speedMargin
+              << " totalMargin=" << totalMargin
+              << " cost=" << cost
+              << std::endl;
+  }
     // Add a static route (for now): nwkDst -> nextHop
   /*  void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
   {
@@ -561,7 +607,7 @@ private:
     return false;
   }*/
 
-  uint32_t
+  /*uint32_t
   ComputeLinkCost (double pathlossDb, double snrDb) const
   {
     // Temporary NS-3 cost model.
@@ -570,6 +616,123 @@ private:
     double snrPenalty = std::max (0.0, 10.0 - snrDb) * 5.0;
 
     uint32_t cost = static_cast<uint32_t> (std::round (10.0 + plPenalty + snrPenalty));
+
+    return std::max<uint32_t> (1, cost);
+  }*/
+
+  uint32_t
+  ComputeLinkCost (double s0PowerDbm,
+                  double pathlossDb,
+                  uint32_t numFailures,
+                  int *speedOut = nullptr,
+                  double *txPowerOut = nullptr,
+                  int *estDistanceOut = nullptr,
+                  double *speedMarginOut = nullptr,
+                  double *totalMarginOut = nullptr) const
+  {
+    // Port of legacy OPNET br_hop.link_calc(), simplified for NS-3.
+    // TX0_power is the power needed to meet link margin at 8 kbps.
+    double tx0PowerDbm = s0PowerDbm + pathlossDb;
+
+    // Txm_power is power required at configured minimum speed.
+    double txmPowerDbm = tx0PowerDbm;
+    switch (m_minCfgSpeedKbps)
+      {
+      case 1000: txmPowerDbm = tx0PowerDbm + 23.0; break;
+      case 500:  txmPowerDbm = tx0PowerDbm + 20.0; break;
+      case 128:  txmPowerDbm = tx0PowerDbm + 12.0; break;
+      case 64:   txmPowerDbm = tx0PowerDbm + 9.0;  break;
+      case 32:   txmPowerDbm = tx0PowerDbm + 6.0;  break;
+      case 16:   txmPowerDbm = tx0PowerDbm + 3.0;  break;
+      case 8:    txmPowerDbm = tx0PowerDbm;        break;
+      default:   txmPowerDbm = tx0PowerDbm;        break;
+      }
+
+    int speed = m_minCfgSpeedKbps;
+
+    // Highest speed that can meet link margin at max configured TX power.
+    double marginAt8K = m_maxTxPowerDbm - tx0PowerDbm;
+
+    if      (marginAt8K >= 23.0) speed = 1000;
+    else if (marginAt8K >= 20.0) speed = 500;
+    else if (marginAt8K >= 12.0) speed = 128;
+    else if (marginAt8K >= 9.0)  speed = 64;
+    else if (marginAt8K >= 6.0)  speed = 32;
+    else if (marginAt8K >= 3.0)  speed = 16;
+    else if (marginAt8K > 0.0)   speed = 8;
+    else                         speed = m_minCfgSpeedKbps;
+
+    // Limit speed to configured min/max.
+    if (speed < m_minCfgSpeedKbps)
+      {
+        speed = m_minCfgSpeedKbps;
+      }
+    if (speed > m_maxCfgSpeedKbps)
+      {
+        speed = m_maxCfgSpeedKbps;
+      }
+
+    // Required TX power for selected speed.
+    double txPowerDbm = tx0PowerDbm;
+    switch (speed)
+      {
+      case 1000: txPowerDbm = tx0PowerDbm + 23.0; break;
+      case 500:  txPowerDbm = tx0PowerDbm + 20.0; break;
+      case 128:  txPowerDbm = tx0PowerDbm + 12.0; break;
+      case 64:   txPowerDbm = tx0PowerDbm + 9.0;  break;
+      case 32:   txPowerDbm = tx0PowerDbm + 6.0;  break;
+      case 16:   txPowerDbm = tx0PowerDbm + 3.0;  break;
+      case 8:    txPowerDbm = tx0PowerDbm;        break;
+      default:   txPowerDbm = tx0PowerDbm;        break;
+      }
+
+    double totalMargin = m_maxTxPowerDbm - txmPowerDbm;
+    double speedMargin = m_maxTxPowerDbm - txPowerDbm;
+
+    // Limit actual power to configured min/max.
+    if (txPowerDbm < m_minTxPowerDbm)
+      {
+        txPowerDbm = m_minTxPowerDbm;
+      }
+    if (txPowerDbm > m_maxTxPowerDbm)
+      {
+        txPowerDbm = m_maxTxPowerDbm;
+      }
+
+    // Scaled distance from transmit power using r^4 model.
+    int estDistance;
+    if (txPowerDbm <= m_txAmpBreakpointDbm)
+      {
+        estDistance = 75;
+      }
+    else
+      {
+        estDistance = static_cast<int> (
+          std::floor (std::pow (10.0, (txPowerDbm - m_txAmpBreakpointDbm) / 40.0) * 100.0));
+      }
+
+    uint32_t cost = static_cast<uint32_t> (
+      std::floor (static_cast<double> (estDistance) * 100.0 / static_cast<double> (speed)));
+
+    // OPNET link-quality penalties/bonuses.
+    if ((m_maxTxPowerDbm - txmPowerDbm - 3.0 * static_cast<double> (numFailures)) < 0.0)
+      {
+        cost *= 2;
+      }
+
+    if ((m_maxTxPowerDbm - txPowerDbm - 3.0 * static_cast<double> (numFailures)) > 3.0)
+      {
+        cost = static_cast<uint32_t> (std::floor (static_cast<double> (cost) / 2.0));
+      }
+
+    // Quantize TX power like OPNET.
+    txPowerDbm = std::ceil (txPowerDbm);
+
+    if (speedOut)       { *speedOut = speed; }
+    if (txPowerOut)     { *txPowerOut = txPowerDbm; }
+    if (estDistanceOut) { *estDistanceOut = estDistance; }
+    if (speedMarginOut) { *speedMarginOut = speedMargin; }
+    if (totalMarginOut) { *totalMarginOut = totalMargin; }
 
     return std::max<uint32_t> (1, cost);
   }
@@ -591,6 +754,17 @@ private:
   uint32_t GetActiveNodeCount () const;
 
   uint8_t m_minSpeedKey { 8 };  // temporary default; map to your actual rate table later
+
+  // OPNET-ish link_calc configuration.
+  // These mirror OPNET attributes: Link Margin, Max Power, Min Power,
+  // Max Speed, Min Speed, and TX_AMP_BREAKPOINT.
+  double   m_linkMarginDb       { 10.0 };
+  double   m_rxS0BaseLevelDbm   { -115.0 };
+  double   m_maxTxPowerDbm      { 30.0 };
+  double   m_minTxPowerDbm      { 0.0 };
+  int      m_maxCfgSpeedKbps    { 128 };
+  int      m_minCfgSpeedKbps    { 8 };
+  double   m_txAmpBreakpointDbm { 14.0 };
 
   void DiscoveryStart ();
   void DiscoveryStop ();
@@ -743,7 +917,35 @@ private:
     // 2) Direct route to HELLO sender
     //    If we heard src directly, route dst=src via nextHop=src.
     // ------------------------------------------------------------
-    uint32_t linkCost = ComputeLinkCost (pathlossDb, snrDb);
+    //uint32_t linkCost = ComputeLinkCost (pathlossDb, snrDb);
+    double s0PowerDbm = static_cast<double> (hh.GetRxPowerDbmX10 ()) / 10.0;
+
+    int chosenSpeed = 0;
+    double chosenTxPower = 0.0;
+    int estDistance = 0;
+    double speedMargin = 0.0;
+    double totalMargin = 0.0;
+
+    uint32_t linkCost = ComputeLinkCost (s0PowerDbm,
+                                        pathlossDb,
+                                        0, // num_failures placeholder for now
+                                        &chosenSpeed,
+                                        &chosenTxPower,
+                                        &estDistance,
+                                        &speedMargin,
+                                        &totalMargin);
+
+    std::cout << "[NWK " << m_nodeId
+              << "] link_calc neighbor=" << src
+              << " s0=" << s0PowerDbm
+              << " pathloss=" << pathlossDb
+              << " speed=" << chosenSpeed
+              << " txPower=" << chosenTxPower
+              << " estDistance=" << estDistance
+              << " speedMargin=" << speedMargin
+              << " totalMargin=" << totalMargin
+              << " cost=" << linkCost
+              << std::endl;
 
     AddOrUpdateRoute (src,
                       src,
@@ -970,7 +1172,9 @@ private:
     hh.SetSpeedKey (m_minSpeedKey);   // define m_minSpeedKey or hardcode 8 temporarily
 
     // Integer scaled dBm*10, placeholder until you compute it properly
-    hh.SetRxPowerDbmX10 (-900);        // -90.0 dBm
+    //hh.SetRxPowerDbmX10 (-900);        // -90.0 dBm
+    double s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
+    hh.SetRxPowerDbmX10 (static_cast<int16_t> (std::round (s0PowerDbm * 10.0)));
 
     // OPNET-ish “active” proxy: neighbor count (or 0 for now)
     //hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
@@ -1017,18 +1221,6 @@ private:
               << unsigned (added)
               << " routes"
               << std::endl;
-              
-    // Temporary/simple: advertise first route in m_routes, if any.
-   /* if (!m_routes.empty ())
-      {
-        hh.SetAdvertisedDst (m_routes.front ().nwkDst);
-        hh.SetAdvertisedHops (static_cast<uint8_t> (m_routes.front ().cost));
-      }
-    else
-      {
-        hh.SetAdvertisedDst (CSR_BROADCAST_ID);
-        hh.SetAdvertisedHops (0);
-      }*/
 
     p->AddHeader (hh);
 
