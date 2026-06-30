@@ -8,7 +8,7 @@
 class CsrNetLayer : public Object
 {
 public:
-  
+
   enum class DiscoveryState { IDLE, SCHEDULED, ACTIVE, COOLDOWN };
 
   DiscoveryState m_discState { DiscoveryState::IDLE };
@@ -1290,6 +1290,15 @@ private:
 
     hh.ClearAdvertisedRoutes ();
 
+    if (m_routes.empty ())
+      {
+        hh.SetArlRouteMsgType (CsrArlRouteMsgType::Discover);
+      }
+    else
+      {
+        hh.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
+      }
+
     uint8_t added = 0;
     for (const auto &re : m_routes)
       {
@@ -1333,9 +1342,15 @@ private:
               << " routes"
               << std::endl;
 
+    std::cout << "[NWK " << m_nodeId
+              << "] HELLO ARL route msg type="
+              << unsigned (static_cast<uint8_t> (hh.GetArlRouteMsgType ()))
+              << std::endl;
+
     p->AddHeader (hh);
 
     m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
+
   }
 
   uint32_t

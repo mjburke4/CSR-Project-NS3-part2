@@ -5,6 +5,15 @@
 
 namespace ns3 {
 
+enum class CsrArlRouteMsgType : uint8_t
+{
+  None          = 0,
+  Discover      = 1,
+  RoutingUpdate = 2,
+  NeighborCheck = 3,
+  KeyRequest    = 4
+};
+
 class CsrHelloHeader : public Header
 {
 public:
@@ -28,6 +37,9 @@ public:
 
   void SetActiveNodes (uint8_t n);
   uint8_t GetActiveNodes () const;
+
+  void SetArlRouteMsgType (CsrArlRouteMsgType t);
+  CsrArlRouteMsgType GetArlRouteMsgType () const;
 
   // Header overrides
   uint32_t GetSerializedSize () const override;
@@ -60,6 +72,7 @@ private:
   uint8_t  m_speedKey {0};
   int16_t  m_rxPowerDbmX10 {0};
   uint8_t  m_activeNodes {0};
+  uint8_t  m_arlRouteMsgType {static_cast<uint8_t> (CsrArlRouteMsgType::None)};
   static constexpr uint8_t MAX_ADVERTISED_ROUTES = 8;
   std::vector<AdvertisedRoute> m_advertisedRoutes;
   
