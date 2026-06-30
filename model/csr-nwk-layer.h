@@ -921,10 +921,11 @@ private:
   void EnsureDiscoveryForTx ();
 
   void ProcessRoutesPayload (const CsrHelloHeader &hh,
-                           uint16_t helloSrc,
-                           double pathlossDb,
-                           double snrDb,
-                           uint32_t linkCost);
+                             uint16_t helloSrc,
+                             double pathlossDb,
+                             double snrDb,
+                             uint32_t linkCost);
+  bool ShouldAdvertiseRoute (const RouteEntry &re) const;
 
   void TryDrainQueueAfterDiscovery ();
 
@@ -1144,14 +1145,6 @@ private:
         uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
         uint32_t totalCost = linkCost + ar.cost;
 
-        /*AddOrUpdateRoute (ar.dst,
-                          helloSrc,      // next hop is the HELLO sender
-                          false,         // not immediate
-                          totalHops,
-                          pathlossDb,
-                          totalCost,
-                          ar.capability);*/
-
        AddOrUpdateRoute (ar.dst,
                         helloSrc,
                         false,
@@ -1300,12 +1293,7 @@ private:
     uint8_t added = 0;
     for (const auto &re : m_routes)
       {
-        if (!re.valid)
-          {
-            continue;
-          }
-
-        if (re.nwkDst == m_nodeId)
+        if (!ShouldAdvertiseRoute (re))
           {
             continue;
           }
@@ -1325,12 +1313,13 @@ private:
             added++;
 
             std::cout << "[NWK " << m_nodeId
-            << "] HELLO add route adv dst=" << re.nwkDst
-            << " hops=" << unsigned (re.numHop)
-            << " cost=" << re.cost
-            << " linkCost=" << re.linkCostToNextHop
-            << " advCost=" << re.advertisedCost
-            << std::endl;
+                      << "] HELLO add route adv dst=" << re.nwkDst
+                      << " hops=" << unsigned (re.numHop)
+                      << " cost=" << re.cost
+                      << " linkCost=" << re.linkCostToNextHop
+                      << " advCost=" << re.advertisedCost
+                      << " learnedFrom=" << re.learnedFrom
+                      << std::endl;
           }
 
         if (added >= 8)
@@ -1338,7 +1327,6 @@ private:
             break;
           }
       }
-
     std::cout << "[NWK " << m_nodeId
               << "] HELLO advertising "
               << unsigned (added)
@@ -1362,17 +1350,49 @@ private:
     return static_cast<uint32_t> (m_nwkNeighbors.size ());
   }
 
-  void
-  CsrNetLayer::DiscoveryCooldownOver ()
-  {
+void
+CsrNetLayer::DiscoveryCooldownOver ()
+{
     // OPNET-equivalent: discovery is fully complete and can be triggered again
-    m_discState = DiscoveryState::IDLE;
+  m_discState = DiscoveryState::IDLE;
 
     // Clear legacy flag if you still have it
-    m_discoveryActive = false;
+  m_discoveryActive = false;
 
     // Optional but safe: try to forward anything that may now succeed
-    CheckNwkQueue ();
-  }
+   CheckNwkQueue ();
+}
 
+bool
+CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
+{
+  static constexpr uint8_t MAX_ADVERTISED_HOPS = 8;
+
+  if (!re.valid)
+    {
+      return false;
+    }
+
+  if (re.nwkDst == m_nodeId)
+    {
+      return false;
+    }
+
+  if (re.cost == 0)
+    {
+      return false;
+    }
+
+  if (re.numHop == 0)
+    {
+      return false;
+    }
+
+  if (re.numHop >= MAX_ADVERTISED_HOPS)
+    {
+      return false;
+    }
+
+  return true;
+}
 // ------------------------------------------------------------
