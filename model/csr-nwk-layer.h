@@ -36,6 +36,7 @@ public:
 
   void StartDiscovery (Time startDelay, Time duration);
   void SetRepeatDiscoveryHello (bool enable);
+  void SendRoutingUpdate ();
   bool IsDiscoveryActive () const { return m_discoveryActive; }
 
   void ProcessHello (Ptr<Packet> helloPayload,
@@ -916,7 +917,8 @@ private:
   void DiscoveryStart ();
   void DiscoveryStop ();
   void DiscoveryCooldownOver ();
-  void SendHelloBroadcast ();
+  //void SendHelloBroadcast ();
+  void SendHelloBroadcast (CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover);
 
   void EnsureDiscoveryForTx ();
 
@@ -925,6 +927,27 @@ private:
                              double pathlossDb,
                              double snrDb,
                              uint32_t linkCost);
+
+  void ProcessArlRouteMessage (const CsrHelloHeader &hh,
+                              uint16_t helloSrc,
+                              double pathlossDb,
+                              double snrDb,
+                              uint32_t linkCost);
+
+  void ProcessDiscover (const CsrHelloHeader &hh,
+                        uint16_t helloSrc,
+                        double pathlossDb,
+                        double snrDb,
+                        uint32_t linkCost);
+
+  void ProcessRoutingUpdate (const CsrHelloHeader &hh,
+                            uint16_t helloSrc,
+                            double pathlossDb,
+                            double snrDb,
+                            uint32_t linkCost);
+
+  const char* ArlRouteMsgTypeName (CsrArlRouteMsgType t) const;
+
   bool ShouldAdvertiseRoute (const RouteEntry &re) const;
 
   void TryDrainQueueAfterDiscovery ();
@@ -943,17 +966,17 @@ private:
 // Simple "App" callbacks
 // ------------------------------------------------------------
 
-  static void
-  AppRxFromNet (Ptr<Packet> payload, uint16_t src)
-  {
+static void
+AppRxFromNet (Ptr<Packet> payload, uint16_t src)
+{
     std::cout << "  [APP] Node received payload from " << src
               << " (size=" << payload->GetSize () << " B)"
               << std::endl;
-  }
+}
 
-  void
-  CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
-  {
+void
+CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
+{
     // If already in discovery lifecycle, do not restart or cancel existing events.
     if (m_discState == DiscoveryState::SCHEDULED ||
         m_discState == DiscoveryState::ACTIVE ||
@@ -984,14 +1007,14 @@ private:
 
     m_discoveryStopEvent =
       Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
-  }
+}
 
-  void
-  CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
+void
+CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
                             uint16_t hopSrc,
                             double pathlossDb,
                             double snrDb)
-  {
+{
     CsrHelloHeader hh;
     if (!helloPayload->RemoveHeader (hh))
       {
@@ -1004,34 +1027,34 @@ private:
 
     uint16_t src = hh.GetNodeId ();
 
-    if (src == m_nodeId)
-      {
+  if (src == m_nodeId)
+    {
         return;
-      }
+    }
 
-    double now = Simulator::Now ().GetSeconds ();
+  double now = Simulator::Now ().GetSeconds ();
 
     // ------------------------------------------------------------
     // 1) Update NWK neighbor table, similar to OPNET proc_hello()
     // ------------------------------------------------------------
-    auto &ne = m_nwkNeighbors[src];
-    bool isNew = (ne.lastHeardSec < 0.0);
+  auto &ne = m_nwkNeighbors[src];
+  bool isNew = (ne.lastHeardSec < 0.0);
 
-    ne.nodeId = src;
-    ne.lastHeardSec = now;
-    ne.lastPathlossDb = pathlossDb;
-    ne.lastSnrDb = snrDb;
-    ne.speedKey = hh.GetSpeedKey ();
-    ne.rxPowerDbmX10 = hh.GetRxPowerDbmX10 ();
-    ne.activeNodes = hh.GetActiveNodes ();
-    UpdateMacActiveNodes ();
+  ne.nodeId = src;
+  ne.lastHeardSec = now;
+  ne.lastPathlossDb = pathlossDb;
+  ne.lastSnrDb = snrDb;
+  ne.speedKey = hh.GetSpeedKey ();
+  ne.rxPowerDbmX10 = hh.GetRxPowerDbmX10 ();
+  ne.activeNodes = hh.GetActiveNodes ();
+  UpdateMacActiveNodes ();
 
-    if (m_hop != nullptr)
+  if (m_hop != nullptr)
     {
       m_hop->NoteReportedActiveNodes (ne.activeNodes);
     }
 
-    std::cout << "[NWK " << m_nodeId << "] "
+  std::cout << "[NWK " << m_nodeId << "] "
               << (isNew ? "New" : "Updated")
               << " HELLO neighbor=" << src
               << " hopSrc=" << hopSrc
@@ -1046,15 +1069,15 @@ private:
     //    If we heard src directly, route dst=src via nextHop=src.
     // ------------------------------------------------------------
     //uint32_t linkCost = ComputeLinkCost (pathlossDb, snrDb);
-    double s0PowerDbm = static_cast<double> (hh.GetRxPowerDbmX10 ()) / 10.0;
+  double s0PowerDbm = static_cast<double> (hh.GetRxPowerDbmX10 ()) / 10.0;
 
-    int chosenSpeed = 0;
-    double chosenTxPower = 0.0;
-    int estDistance = 0;
-    double speedMargin = 0.0;
-    double totalMargin = 0.0;
+  int chosenSpeed = 0;
+  double chosenTxPower = 0.0;
+  int estDistance = 0;
+  double speedMargin = 0.0;
+  double totalMargin = 0.0;
 
-    uint32_t linkCost = ComputeLinkCost (s0PowerDbm,
+  uint32_t linkCost = ComputeLinkCost (s0PowerDbm,
                                         pathlossDb,
                                         0, // num_failures placeholder for now
                                         &chosenSpeed,
@@ -1063,7 +1086,7 @@ private:
                                         &speedMargin,
                                         &totalMargin);
 
-    std::cout << "[NWK " << m_nodeId
+  std::cout << "[NWK " << m_nodeId
               << "] link_calc neighbor=" << src
               << " s0=" << s0PowerDbm
               << " pathloss=" << pathlossDb
@@ -1076,15 +1099,7 @@ private:
               << " cost=" << linkCost
               << std::endl;
 
-    /*AddOrUpdateRoute (src,
-                      src,
-                      true,       // immediate neighbor
-                      1,          // one hop
-                      pathlossDb,
-                      linkCost,
-                      0);         // capability placeholder*/
-
-    AddOrUpdateRoute (src,
+  AddOrUpdateRoute (src,
                   src,
                   true,
                   1,
@@ -1099,17 +1114,90 @@ private:
     //    If src advertises dst=X, then we can reach X via src.
     // ------------------------------------------------------------
 
-    ProcessRoutesPayload (hh,
-                      src,
-                      pathlossDb,
-                      snrDb,
-                      linkCost);
+  ProcessArlRouteMessage (hh,
+                        src,
+                        pathlossDb,
+                        snrDb,
+                        linkCost);
 
     DumpRoutes ();
 
     // Discovery/route update may have unblocked queued packets.
     ScheduleCheckNwkQueue ();
-  }
+}
+
+  const char*
+  CsrNetLayer::ArlRouteMsgTypeName (CsrArlRouteMsgType t) const
+{
+  switch (t)
+    {
+     case CsrArlRouteMsgType::None:
+      return "None";
+    case CsrArlRouteMsgType::Discover:
+      return "Discover";
+    case CsrArlRouteMsgType::RoutingUpdate:
+      return "RoutingUpdate";
+    case CsrArlRouteMsgType::NeighborCheck:
+      return "NeighborCheck";
+    case CsrArlRouteMsgType::KeyRequest:
+      return "KeyRequest";
+    default:
+      return "Unknown";
+    }
+}
+
+void
+CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
+                                      uint16_t helloSrc,
+                                      double pathlossDb,
+                                      double snrDb,
+                                      uint32_t linkCost)
+{
+    CsrArlRouteMsgType type = hh.GetArlRouteMsgType ();
+
+    std::cout << "[NWK " << m_nodeId
+              << "] ARL route message from " << helloSrc
+              << " type=" << ArlRouteMsgTypeName (type)
+              << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+              << std::endl;
+
+    switch (type)
+      {
+      case CsrArlRouteMsgType::Discover:
+        ProcessDiscover (hh, helloSrc, pathlossDb, snrDb, linkCost);
+        break;
+
+      case CsrArlRouteMsgType::RoutingUpdate:
+        ProcessRoutingUpdate (hh, helloSrc, pathlossDb, snrDb, linkCost);
+        break;
+
+      case CsrArlRouteMsgType::NeighborCheck:
+        std::cout << "[NWK " << m_nodeId
+                  << "] NeighborCheck handling is not implemented yet"
+                  << std::endl;
+        break;
+
+      case CsrArlRouteMsgType::KeyRequest:
+        std::cout << "[NWK " << m_nodeId
+                  << "] KeyRequest handling is not implemented yet"
+                  << std::endl;
+        break;
+
+      case CsrArlRouteMsgType::None:
+      default:
+        // Backward-compatible fallback: if a packet has route ads but no type,
+        // process them as a routing update.
+        if (hh.GetAdvertisedRouteCount () > 0)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Untyped ARL payload has routes; treating as RoutingUpdate"
+                      << std::endl;
+
+            ProcessRoutingUpdate (hh, helloSrc, pathlossDb, snrDb, linkCost);
+          }
+        break;
+      }
+}
 
   void
   CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
@@ -1165,6 +1253,39 @@ private:
       }
   }
 
+void
+CsrNetLayer::ProcessRoutingUpdate (const CsrHelloHeader &hh,
+                                   uint16_t helloSrc,
+                                   double pathlossDb,
+                                   double snrDb,
+                                   uint32_t linkCost)
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] ProcessRoutingUpdate from " << helloSrc
+            << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+            << std::endl;
+
+  ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);
+}
+
+void
+CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
+                                uint16_t helloSrc,
+                                double pathlossDb,
+                                double snrDb,
+                                uint32_t linkCost)
+{
+    std::cout << "[NWK " << m_nodeId
+              << "] ProcessDiscover from " << helloSrc
+              << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+              << std::endl;
+
+    // In current NS-3 approximation, Discover may still carry route info.
+    // Legacy ARL routes.c treats Discover as part of discovery state; we keep
+    // route payload processing here for now to preserve behavior.
+    ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);
+}
+
   void CsrNetLayer::EnsureDiscoveryForTx ()
   {
     if (m_discState != DiscoveryState::IDLE)
@@ -1181,25 +1302,27 @@ private:
     m_repeatDiscoveryHello = enable;
   }
 
-  void
-  CsrNetLayer::DiscoveryStart ()
-  {
-    m_discState = DiscoveryState::ACTIVE;
-    m_discoveryActive = true;
+void
+CsrNetLayer::DiscoveryStart ()
+{
+  m_discState = DiscoveryState::ACTIVE;
+  m_discoveryActive = true;
 
-    std::cout << "[NWK " << m_nodeId
+  std::cout << "[NWK " << m_nodeId
               << "] DiscoveryStart: sending HELLO advertisement"
               << std::endl;
 
     // OPNET-style behavior: send one HELLO at discovery start
-    SendHelloBroadcast ();
+  SendHelloBroadcast (CsrArlRouteMsgType::Discover);
+    //SendHelloBroadcast ();
 
     // Optional NS-3 robustness mode, disabled by default
-    if (m_repeatDiscoveryHello)
-      {
-        ScheduleDiscoveryHello ();
-      }
-  }
+  if (m_repeatDiscoveryHello)
+    {
+      ScheduleDiscoveryHello ();
+    }
+}
+
   void
   CsrNetLayer::DiscoveryStop ()
   {
@@ -1222,106 +1345,108 @@ private:
     TryDrainQueueAfterDiscovery ();
   }
 
-  void
-  CsrNetLayer::TryDrainQueueAfterDiscovery ()
-  {
+void
+CsrNetLayer::TryDrainQueueAfterDiscovery ()
+{
     // OPNET-equivalent of re-entering the NWK process after discovery
-    CheckNwkQueue ();
-  }
+  CheckNwkQueue ();
+}
 
-  void
-  CsrNetLayer::ScheduleDiscoveryHello ()
-  {
-    if (m_discState != DiscoveryState::ACTIVE)
-      {
-        return;
-      }
+void
+CsrNetLayer::ScheduleDiscoveryHello ()
+{
+  if (m_discState != DiscoveryState::ACTIVE)
+    {
+      return;
+    }
 
-    if (!m_discoveryHelloEvent.IsPending ())
-      {
-        m_discoveryHelloEvent =
-          Simulator::Schedule (m_discoveryHelloInterval,
+  if (!m_discoveryHelloEvent.IsPending ())
+    {
+      m_discoveryHelloEvent =
+        Simulator::Schedule (m_discoveryHelloInterval,
                               &CsrNetLayer::DiscoveryHelloTick,
                               this);
-      }
-  }
+    }
+}
 
-  void
-  CsrNetLayer::DiscoveryHelloTick ()
-  {
-    if (m_discState != DiscoveryState::ACTIVE)
-      {
-        return;
-      }
+void
+CsrNetLayer::DiscoveryHelloTick ()
+{
+  if (m_discState != DiscoveryState::ACTIVE)
+    {
+      return;
+    }
 
-    std::cout << "[NWK " << m_nodeId
+  std::cout << "[NWK " << m_nodeId
               << "] Discovery HELLO repeat"
               << std::endl;
 
-    SendHelloBroadcast ();
+  SendHelloBroadcast ();
 
-    ScheduleDiscoveryHello ();
-  }
+  ScheduleDiscoveryHello ();
+}
 
-  void
-  CsrNetLayer::SendHelloBroadcast ()
-  {
-    if (!m_hop) return;
+void
+CsrNetLayer::SendHelloBroadcast (CsrArlRouteMsgType type)
+{
+  if (!m_hop) return;
 
-    Ptr<Packet> p = Create<Packet> ();
+  Ptr<Packet> p = Create<Packet> ();
 
-    static uint16_t helloSeq = 0;
+  static uint16_t helloSeq = 0;
 
-    CsrHelloHeader hh;
-    hh.SetNodeId (m_nodeId);
-    hh.SetHelloSeq (++helloSeq);
+  CsrHelloHeader hh;
+  hh.SetNodeId (m_nodeId);
+  hh.SetHelloSeq (++helloSeq);
 
     // Keep it simple: speedKey is what you actually use in CSR headers anyway
-    hh.SetSpeedKey (m_minSpeedKey);   // define m_minSpeedKey or hardcode 8 temporarily
+  hh.SetSpeedKey (m_minSpeedKey);   // define m_minSpeedKey or hardcode 8 temporarily
 
     // Integer scaled dBm*10, placeholder until you compute it properly
     //hh.SetRxPowerDbmX10 (-900);        // -90.0 dBm
-    double s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
-    hh.SetRxPowerDbmX10 (static_cast<int16_t> (std::round (s0PowerDbm * 10.0)));
+  double s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
+  hh.SetRxPowerDbmX10 (static_cast<int16_t> (std::round (s0PowerDbm * 10.0)));
 
     // OPNET-ish “active” proxy: neighbor count (or 0 for now)
     //hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
-    hh.SetActiveNodes (static_cast<uint8_t> (GetActiveNodeCount ()));
+  hh.SetActiveNodes (static_cast<uint8_t> (GetActiveNodeCount ()));
 
-    hh.ClearAdvertisedRoutes ();
+  hh.ClearAdvertisedRoutes ();
 
-    if (m_routes.empty ())
-      {
-        hh.SetArlRouteMsgType (CsrArlRouteMsgType::Discover);
-      }
-    else
-      {
-        hh.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
-      }
+  hh.SetArlRouteMsgType (type);
 
-    uint8_t added = 0;
-    for (const auto &re : m_routes)
-      {
-        if (!ShouldAdvertiseRoute (re))
-          {
-            continue;
-          }
+  /*if (m_routes.empty ())
+    {
+      hh.SetArlRouteMsgType (CsrArlRouteMsgType::Discover);
+    }
+  else
+    {
+      hh.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
+    }*/
 
-        int16_t plX10 = 0;
-        if (!std::isnan (re.pathlossDb))
-          {
-            plX10 = static_cast<int16_t> (std::round (re.pathlossDb * 10.0));
-          }
+  uint8_t added = 0;
+  for (const auto &re : m_routes)
+    {
+      if (!ShouldAdvertiseRoute (re))
+        {
+          continue;
+        }
 
-        if (hh.AddAdvertisedRoute (re.nwkDst,
+      int16_t plX10 = 0;
+      if (!std::isnan (re.pathlossDb))
+        {
+          plX10 = static_cast<int16_t> (std::round (re.pathlossDb * 10.0));
+         }
+
+      if (hh.AddAdvertisedRoute (re.nwkDst,
                                   re.numHop,
                                   re.cost,
                                   plX10,
                                   re.capability))
-          {
-            added++;
+        {
+          added++;
 
-            std::cout << "[NWK " << m_nodeId
+          std::cout << "[NWK " << m_nodeId
                       << "] HELLO add route adv dst=" << re.nwkDst
                       << " hops=" << unsigned (re.numHop)
                       << " cost=" << re.cost
@@ -1329,13 +1454,13 @@ private:
                       << " advCost=" << re.advertisedCost
                       << " learnedFrom=" << re.learnedFrom
                       << std::endl;
-          }
+        }
 
-        if (added >= 8)
-          {
-            break;
-          }
-      }
+      if (added >= 8)
+        {
+           break;
+        }
+    }
     std::cout << "[NWK " << m_nodeId
               << "] HELLO advertising "
               << unsigned (added)
@@ -1351,19 +1476,29 @@ private:
 
     m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
 
-  }
+}
 
-  uint32_t
-  CsrNetLayer::GetActiveNodeCount () const
-  {
-    return static_cast<uint32_t> (m_nwkNeighbors.size () + 1);
-  }
+uint32_t
+CsrNetLayer::GetActiveNodeCount () const
+{
+  return static_cast<uint32_t> (m_nwkNeighbors.size () + 1);
+}
 
-  uint32_t
-  CsrNetLayer::GetNeighborCount () const
-  {
-    return static_cast<uint32_t> (m_nwkNeighbors.size ());
-  }
+uint32_t
+CsrNetLayer::GetNeighborCount () const
+{
+  return static_cast<uint32_t> (m_nwkNeighbors.size ());
+}
+
+void
+CsrNetLayer::SendRoutingUpdate ()
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending ARL RoutingUpdate"
+            << std::endl;
+
+  SendHelloBroadcast (CsrArlRouteMsgType::RoutingUpdate);
+}
 
 void
 CsrNetLayer::DiscoveryCooldownOver ()

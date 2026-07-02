@@ -4,7 +4,7 @@
 
 class CsrMacCore
 {
-public:
+  public:
   CsrMacCore ()
     : m_nodeId (0),
       m_dev (nullptr)
@@ -14,19 +14,6 @@ public:
   void SetDevice (CsrNetDevice *dev)  { m_dev = dev; }
   int SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const;
   void PrintNeighbors () const;
-
-  /*void NoteReportedActiveNodes (uint32_t n)
-  {
-    if (n > m_maxReportedActiveNodes)
-      {
-        m_maxReportedActiveNodes = n;
-      }
-  }
-
-  uint32_t GetReportedActiveNodesForSlotting () const
-  {
-    return std::max<uint32_t> (1, m_maxReportedActiveNodes);
-  }*/
 
   void NoteReportedActiveNodes (uint32_t n)
   {
