@@ -75,104 +75,6 @@ public:
     RecomputeRoutesViaNextHop (nextHop);
   }
 
-  /*void
-  RecomputeRoutesViaNextHop (uint16_t nextHop)
-  {
-    auto nit = m_nwkNeighbors.find (nextHop);
-    if (nit == m_nwkNeighbors.end ())
-      {
-        std::cout << "[NWK " << m_nodeId
-                  << "] Cannot recompute routes via nextHop=" << nextHop
-                  << " because neighbor state is missing"
-                  << std::endl;
-        return;
-      }
-
-    NwkNeighborEntry &ne = nit->second;
-
-    if (std::isnan (ne.lastPathlossDb))
-      {
-        std::cout << "[NWK " << m_nodeId
-                  << "] Cannot recompute routes via nextHop=" << nextHop
-                  << " because pathloss is unknown"
-                  << std::endl;
-        return;
-      }
-
-    double s0PowerDbm = static_cast<double> (ne.rxPowerDbmX10) / 10.0;
-
-    // If RxPower was not populated yet, fall back to local configured S0.
-    if (s0PowerDbm == 0.0)
-      {
-        s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
-      }
-
-    int chosenSpeed = 0;
-    double chosenTxPower = 0.0;
-    int estDistance = 0;
-    double speedMargin = 0.0;
-    double totalMargin = 0.0;
-
-    uint32_t directLinkCost =
-      ComputeLinkCost (s0PowerDbm,
-                      ne.lastPathlossDb,
-                      ne.numFailures,
-                      &chosenSpeed,
-                      &chosenTxPower,
-                      &estDistance,
-                      &speedMargin,
-                      &totalMargin);
-
-    for (auto &re : m_routes)
-      {
-        if (!re.valid || re.nextHop != nextHop)
-          {
-            continue;
-          }
-
-        uint32_t oldCost = re.cost;
-
-        if (re.immediate || re.nwkDst == nextHop)
-          {
-            re.cost = directLinkCost;
-          }
-        else
-          {
-            // For now, preserve the downstream portion as:
-            // old route cost - old direct link cost, approximately.
-            // This is still an approximation until advertised route cost is stored separately.
-            if (oldCost > re.cost)
-              {
-                // Defensive, should not happen.
-                re.cost = directLinkCost;
-              }
-            else
-              {
-                // Minimal behavior: penalize route by replacing cost with at least directLinkCost.
-                // Later we will split route cost into linkCostToNextHop + advertisedCost.
-                re.cost = std::max (oldCost, directLinkCost);
-              }
-          }
-
-        re.lastUpdated = Simulator::Now ();
-
-        std::cout << "[NWK " << m_nodeId
-                  << "] Recomputed route via failed nextHop=" << nextHop
-                  << " dst=" << re.nwkDst
-                  << " oldCost=" << oldCost
-                  << " newCost=" << re.cost
-                  << " numFailures=" << ne.numFailures
-                  << " speed=" << chosenSpeed
-                  << " txPower=" << chosenTxPower
-                  << " estDistance=" << estDistance
-                  << " speedMargin=" << speedMargin
-                  << " totalMargin=" << totalMargin
-                  << std::endl;
-      }
-
-    DumpRoutes ();
-  }*/
-
   void
   RecomputeRoutesViaNextHop (uint16_t nextHop)
   {
@@ -452,7 +354,7 @@ public:
       }
   }
 
- void
+  bool
   AddOrUpdateRoute (uint16_t nwkDst,
                     uint16_t nextHop,
                     bool immediate,
@@ -465,7 +367,7 @@ public:
   {
     if (nwkDst == m_nodeId)
       {
-        return;
+          return false;
       }
 
     uint32_t totalCost = linkCostToNextHop + advertisedCost;
@@ -507,9 +409,19 @@ public:
                           << " advCost=" << re.advertisedCost
                           << " pathloss=" << pathlossDb
                           << std::endl;
+
+                return true;
               }
 
-            return;
+            std::cout << "[NWK " << m_nodeId
+            << "] Ignored route dst=" << nwkDst
+            << " via nextHop=" << nextHop
+            << " cost=" << totalCost
+            << " existingCost=" << re.cost
+            << " existingNextHop=" << re.nextHop
+            << std::endl;
+
+            return false;
           }
       }
 
@@ -541,6 +453,8 @@ public:
               << " advCost=" << re.advertisedCost
               << " pathloss=" << pathlossDb
               << std::endl;
+
+    return true;
   }
 
   void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
@@ -917,7 +831,7 @@ private:
   void DiscoveryStart ();
   void DiscoveryStop ();
   void DiscoveryCooldownOver ();
-  //void SendHelloBroadcast ();
+
   void SendHelloBroadcast (CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover);
 
   void EnsureDiscoveryForTx ();
@@ -1068,7 +982,7 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
     // 2) Direct route to HELLO sender
     //    If we heard src directly, route dst=src via nextHop=src.
     // ------------------------------------------------------------
-    //uint32_t linkCost = ComputeLinkCost (pathlossDb, snrDb);
+
   double s0PowerDbm = static_cast<double> (hh.GetRxPowerDbmX10 ()) / 10.0;
 
   int chosenSpeed = 0;
@@ -1078,13 +992,13 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   double totalMargin = 0.0;
 
   uint32_t linkCost = ComputeLinkCost (s0PowerDbm,
-                                        pathlossDb,
-                                        0, // num_failures placeholder for now
-                                        &chosenSpeed,
-                                        &chosenTxPower,
-                                        &estDistance,
-                                        &speedMargin,
-                                        &totalMargin);
+                                      pathlossDb,
+                                      ne.numFailures,
+                                      &chosenSpeed,
+                                      &chosenTxPower,
+                                      &estDistance,
+                                      &speedMargin,
+                                      &totalMargin);
 
   std::cout << "[NWK " << m_nodeId
               << "] link_calc neighbor=" << src
@@ -1233,23 +1147,37 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
         uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
         uint32_t totalCost = linkCost + ar.cost;
 
-       AddOrUpdateRoute (ar.dst,
-                        helloSrc,
-                        false,
-                        totalHops,
-                        pathlossDb,
-                        linkCost,
-                        ar.cost,
-                        helloSrc,      // learned from HELLO sender
-                        ar.capability);
+        bool accepted =
+          AddOrUpdateRoute (ar.dst,
+                            helloSrc,
+                            false,
+                            totalHops,
+                            pathlossDb,
+                            linkCost,
+                            ar.cost,
+                            helloSrc,
+                            ar.capability);
 
-        std::cout << "[NWK " << m_nodeId
-                  << "] Learned advertised route dst=" << ar.dst
-                  << " via nextHop=" << helloSrc
-                  << " hops=" << unsigned (totalHops)
-                  << " advCost=" << ar.cost
-                  << " totalCost=" << totalCost
-                  << std::endl;
+        if (accepted)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Accepted advertised route dst=" << ar.dst
+                      << " via nextHop=" << helloSrc
+                      << " hops=" << unsigned (totalHops)
+                      << " advCost=" << ar.cost
+                      << " totalCost=" << totalCost
+                      << std::endl;
+          }
+        else
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Rejected advertised route dst=" << ar.dst
+                      << " via nextHop=" << helloSrc
+                      << " hops=" << unsigned (totalHops)
+                      << " advCost=" << ar.cost
+                      << " totalCost=" << totalCost
+                      << std::endl;
+          }
       }
   }
 
@@ -1415,17 +1343,7 @@ CsrNetLayer::SendHelloBroadcast (CsrArlRouteMsgType type)
 
   hh.SetArlRouteMsgType (type);
 
-  /*if (m_routes.empty ())
-    {
-      hh.SetArlRouteMsgType (CsrArlRouteMsgType::Discover);
-    }
-  else
-    {
-      hh.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
-    }*/
-
-  uint8_t added = 0;
-  for (const auto &re : m_routes)
+  /*for (const auto &re : m_routes)
     {
       if (!ShouldAdvertiseRoute (re))
         {
@@ -1460,7 +1378,57 @@ CsrNetLayer::SendHelloBroadcast (CsrArlRouteMsgType type)
         {
            break;
         }
+    }*/
+
+  uint8_t added = 0;
+
+  if (type == CsrArlRouteMsgType::RoutingUpdate)
+    {
+      for (const auto &re : m_routes)
+        {
+          if (!ShouldAdvertiseRoute (re))
+            {
+              continue;
+            }
+
+          int16_t plX10 = 0;
+          if (!std::isnan (re.pathlossDb))
+            {
+              plX10 = static_cast<int16_t> (std::round (re.pathlossDb * 10.0));
+            }
+
+          if (hh.AddAdvertisedRoute (re.nwkDst,
+                                    re.numHop,
+                                    re.cost,
+                                    plX10,
+                                    re.capability))
+            {
+              added++;
+
+              std::cout << "[NWK " << m_nodeId
+                        << "] HELLO add route adv dst=" << re.nwkDst
+                        << " hops=" << unsigned (re.numHop)
+                        << " cost=" << re.cost
+                        << " linkCost=" << re.linkCostToNextHop
+                        << " advCost=" << re.advertisedCost
+                        << " learnedFrom=" << re.learnedFrom
+                        << std::endl;
+            }
+
+          if (added >= 8)
+            {
+              break;
+            }
+        }
     }
+  else
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] ARL " << ArlRouteMsgTypeName (type)
+                << " sent without Routes_PAYLOAD"
+                << std::endl;
+    }
+
     std::cout << "[NWK " << m_nodeId
               << "] HELLO advertising "
               << unsigned (added)
