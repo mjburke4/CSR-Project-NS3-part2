@@ -233,6 +233,11 @@ main (int argc, char *argv[])
   net2->StartNeighborFreshnessMonitor (Seconds (20.0), Seconds (2.0));
   net3->StartNeighborFreshnessMonitor (Seconds (20.0), Seconds (2.0));
 
+  net0->SetInvalidateRoutesOnStaleNeighbor (true);
+  net1->SetInvalidateRoutesOnStaleNeighbor (true);
+  net2->SetInvalidateRoutesOnStaleNeighbor (true);
+  net3->SetInvalidateRoutesOnStaleNeighbor (true);
+
   // Discovery assist for direct 0->1 no-route test.
   // Node 0 will trigger on-demand discovery at t=1.
   // Node 1 sends HELLO shortly after so node 0 can learn route dst=1 -> nextHop=1.

@@ -40,6 +40,15 @@ public:
   void SendNeighborCheck ();
   void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
                                     Time period = Seconds (2.0));
+  void SetInvalidateRoutesOnStaleNeighbor (bool enable)
+  {
+    m_invalidateRoutesOnStaleNeighbor = enable;
+
+    std::cout << "[NWK " << m_nodeId
+              << "] invalidate_routes_on_stale_neighbor="
+              << (m_invalidateRoutesOnStaleNeighbor ? "true" : "false")
+              << std::endl;
+  }
   bool IsDiscoveryActive () const { return m_discoveryActive; }
 
   void ProcessHello (Ptr<Packet> helloPayload,
@@ -885,6 +894,7 @@ private:
 
   void CheckNeighborFreshness ();
   void InvalidateRoutesViaNextHop (uint16_t nextHop, const char *reason);
+  bool m_invalidateRoutesOnStaleNeighbor { false };
 
   EventId m_neighborFreshnessEvent;
   Time m_neighborFreshnessTimeout { Seconds (20.0) };
@@ -1145,13 +1155,13 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
       }
 }
 
-  void
-  CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
+void
+CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
                                     uint16_t helloSrc,
                                     double pathlossDb,
                                     double snrDb,
                                     uint32_t linkCost)
-  {
+{
     uint8_t advCount = hh.GetAdvertisedRouteCount ();
 
     if (advCount == 0)
@@ -1211,7 +1221,7 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
                       << std::endl;
           }
       }
-  }
+}
 
 void
 CsrNetLayer::ProcessRoutingUpdate (const CsrHelloHeader &hh,
@@ -1281,7 +1291,18 @@ CsrNetLayer::CheckNeighborFreshness ()
                     << "s"
                     << std::endl;
 
-          InvalidateRoutesViaNextHop (ne.nodeId, "neighbor stale");
+          if (m_invalidateRoutesOnStaleNeighbor)
+            {
+              InvalidateRoutesViaNextHop (ne.nodeId, "neighbor stale");
+            }
+          else
+            {
+              std::cout << "[NWK " << m_nodeId
+                        << "] Stale neighbor " << ne.nodeId
+                        << " marked stale, but routes are preserved"
+                        << " because invalidate_routes_on_stale_neighbor=false"
+                        << std::endl;
+            }
         }
     }
 
