@@ -171,40 +171,11 @@ main (int argc, char *argv[])
   net1->SetHop (hop1);
   net2->SetHop (hop2);
 
-  // Static routes for 3-node line: 0 -> 1 -> 2
-  // Node 0: can reach 1 directly, and 2 via 1
-  //net0->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
-  //net0->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 1);
-
-  // Node 1: can reach 0 directly, and 2 directly
- // net1->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 2);
- // net1->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 0);
-
-  // Node 2: can reach 0 via 1, and 1 directly
- // net2->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 1);
- // net2->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
 
  // ------------------------------------------------------------
   // Static seed routes for 4-node propagation test:
   // 0 -- 1 -- 2 -- 3
   // ------------------------------------------------------------
-
-  // Node 0: intentionally NO routes.
-  // It must learn dst=3 dynamically.
-  // net0->AddStaticRoute (1, 1);
-  // net0->AddStaticRoute (3, 1);
-
-  // Node 1: knows immediate neighbors 0 and 2.
-  //net1->AddStaticRoute (/*nwkDst*/ 0, /*nextHop*/ 0);
-  //net1->AddStaticRoute (/*nwkDst*/ 2, /*nextHop*/ 2);
-
-  // Node 2: knows immediate neighbors 1 and 3.
-  //net2->AddStaticRoute (/*nwkDst*/ 1, /*nextHop*/ 1);
-  //net2->AddStaticRoute (/*nwkDst*/ 3, /*nextHop*/ 3);
-
-  // Node 3: intentionally NO routes.
-  // Later we can test reverse path 3->0.
-  // net3->AddStaticRoute (2, 2);
 
   // Node 1: immediate neighbors 0 and 2
   net1->AddStaticRouteWithPathloss (/*nwkDst*/ 0,
@@ -256,6 +227,11 @@ main (int argc, char *argv[])
   dev1->GetMac ().StartSlotTick (Seconds (0.013));
   dev2->GetMac ().StartSlotTick (Seconds (0.013));
   dev3->GetMac ().StartSlotTick (Seconds (0.013));
+
+  net0->StartNeighborFreshnessMonitor (Seconds (20.0), Seconds (2.0));
+  net1->StartNeighborFreshnessMonitor (Seconds (20.0), Seconds (2.0));
+  net2->StartNeighborFreshnessMonitor (Seconds (20.0), Seconds (2.0));
+  net3->StartNeighborFreshnessMonitor (Seconds (20.0), Seconds (2.0));
 
   // Discovery assist for direct 0->1 no-route test.
   // Node 0 will trigger on-demand discovery at t=1.

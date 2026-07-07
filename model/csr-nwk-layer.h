@@ -38,6 +38,8 @@ public:
   void SetRepeatDiscoveryHello (bool enable);
   void SendRoutingUpdate ();
   void SendNeighborCheck ();
+  void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
+                                    Time period = Seconds (2.0));
   bool IsDiscoveryActive () const { return m_discoveryActive; }
 
   void ProcessHello (Ptr<Packet> helloPayload,
@@ -566,6 +568,7 @@ private:
 
     // OPNET BrT_Neighbor_Entry::num_failures
     uint32_t numFailures {0};
+    bool stale {false};
   };
 
   // NSDP: Network Source–Destination Pair entry
@@ -880,6 +883,12 @@ private:
   // Do not enable for strict OPNET parity tests unless modeling routing-module-driven repeats.
   bool m_repeatDiscoveryHello { false }; // false = legacy OPNET-style one-shot discovery HELLO
 
+  void CheckNeighborFreshness ();
+  void InvalidateRoutesViaNextHop (uint16_t nextHop, const char *reason);
+
+  EventId m_neighborFreshnessEvent;
+  Time m_neighborFreshnessTimeout { Seconds (20.0) };
+  Time m_neighborFreshnessCheckPeriod { Seconds (2.0) };
 };
 
 
@@ -960,6 +969,7 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
     // ------------------------------------------------------------
   auto &ne = m_nwkNeighbors[src];
   bool isNew = (ne.lastHeardSec < 0.0);
+  bool wasStale = ne.stale;
 
   ne.nodeId = src;
   ne.lastHeardSec = now;
@@ -968,6 +978,17 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   ne.speedKey = hh.GetSpeedKey ();
   ne.rxPowerDbmX10 = hh.GetRxPowerDbmX10 ();
   ne.activeNodes = hh.GetActiveNodes ();
+  ne.stale = false;
+
+  if (wasStale)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Neighbor " << src
+                << " is fresh again after receiving "
+                << ArlRouteMsgTypeName (hh.GetArlRouteMsgType ())
+                << std::endl;
+    }
+
   UpdateMacActiveNodes ();
 
   if (m_hop != nullptr)
@@ -1205,6 +1226,105 @@ CsrNetLayer::ProcessRoutingUpdate (const CsrHelloHeader &hh,
             << std::endl;
 
   ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);
+}
+
+void
+CsrNetLayer::StartNeighborFreshnessMonitor (Time timeout, Time period)
+{
+  m_neighborFreshnessTimeout = timeout;
+  m_neighborFreshnessCheckPeriod = period;
+
+  if (m_neighborFreshnessEvent.IsPending ())
+    {
+      Simulator::Cancel (m_neighborFreshnessEvent);
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Starting neighbor freshness monitor timeout="
+            << m_neighborFreshnessTimeout.GetSeconds ()
+            << "s period="
+            << m_neighborFreshnessCheckPeriod.GetSeconds ()
+            << "s"
+            << std::endl;
+
+  m_neighborFreshnessEvent =
+    Simulator::Schedule (m_neighborFreshnessCheckPeriod,
+                         &CsrNetLayer::CheckNeighborFreshness,
+                         this);
+}
+
+void
+CsrNetLayer::CheckNeighborFreshness ()
+{
+  double now = Simulator::Now ().GetSeconds ();
+  double timeoutSec = m_neighborFreshnessTimeout.GetSeconds ();
+
+  for (auto &kv : m_nwkNeighbors)
+    {
+      NwkNeighborEntry &ne = kv.second;
+
+      if (ne.lastHeardSec < 0.0)
+        {
+          continue;
+        }
+
+      double ageSec = now - ne.lastHeardSec;
+
+      if (!ne.stale && ageSec > timeoutSec)
+        {
+          ne.stale = true;
+
+          std::cout << "[NWK " << m_nodeId
+                    << "] Neighbor stale nextHop=" << ne.nodeId
+                    << " age=" << ageSec
+                    << "s timeout=" << timeoutSec
+                    << "s"
+                    << std::endl;
+
+          InvalidateRoutesViaNextHop (ne.nodeId, "neighbor stale");
+        }
+    }
+
+  m_neighborFreshnessEvent =
+    Simulator::Schedule (m_neighborFreshnessCheckPeriod,
+                         &CsrNetLayer::CheckNeighborFreshness,
+                         this);
+}
+
+void
+CsrNetLayer::InvalidateRoutesViaNextHop (uint16_t nextHop, const char *reason)
+{
+  bool anyInvalidated = false;
+
+  for (auto &re : m_routes)
+    {
+      if (!re.valid)
+        {
+          continue;
+        }
+
+      if (re.nextHop != nextHop)
+        {
+          continue;
+        }
+
+      re.valid = false;
+      re.lastUpdated = Simulator::Now ();
+      anyInvalidated = true;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Invalidated route dst=" << re.nwkDst
+                << " nextHop=" << re.nextHop
+                << " cost=" << re.cost
+                << " reason=" << reason
+                << std::endl;
+    }
+
+  if (anyInvalidated)
+    {
+      DumpRoutes ();
+      ScheduleCheckNwkQueue ();
+    }
 }
 
 void
