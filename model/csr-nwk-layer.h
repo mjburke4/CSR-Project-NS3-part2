@@ -37,6 +37,7 @@ public:
   void StartDiscovery (Time startDelay, Time duration);
   void SetRepeatDiscoveryHello (bool enable);
   void SendRoutingUpdate ();
+  void SendNeighborCheck ();
   bool IsDiscoveryActive () const { return m_discoveryActive; }
 
   void ProcessHello (Ptr<Packet> helloPayload,
@@ -860,6 +861,12 @@ private:
                             double snrDb,
                             uint32_t linkCost);
 
+  void ProcessNeighborCheck (const CsrHelloHeader &hh,
+                           uint16_t helloSrc,
+                           double pathlossDb,
+                           double snrDb,
+                           uint32_t linkCost);
+
   const char* ArlRouteMsgTypeName (CsrArlRouteMsgType t) const;
 
   bool ShouldAdvertiseRoute (const RouteEntry &re) const;
@@ -1085,10 +1092,14 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
         ProcessRoutingUpdate (hh, helloSrc, pathlossDb, snrDb, linkCost);
         break;
 
-      case CsrArlRouteMsgType::NeighborCheck:
+      /*case CsrArlRouteMsgType::NeighborCheck:
         std::cout << "[NWK " << m_nodeId
                   << "] NeighborCheck handling is not implemented yet"
                   << std::endl;
+        break;*/
+
+      case CsrArlRouteMsgType::NeighborCheck:
+        ProcessNeighborCheck (hh, helloSrc, pathlossDb, snrDb, linkCost);
         break;
 
       case CsrArlRouteMsgType::KeyRequest:
@@ -1203,7 +1214,27 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
                                 double snrDb,
                                 uint32_t linkCost)
 {
-    std::cout << "[NWK " << m_nodeId
+  std::cout << "[NWK " << m_nodeId
+            << "] ProcessDiscover from " << helloSrc
+            << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+            << std::endl;
+
+    if (hh.GetAdvertisedRouteCount () > 0)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Ignoring Routes_PAYLOAD carried inside Discover from "
+                  << helloSrc
+                  << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+                  << " ; routes are only processed from RoutingUpdate"
+                  << std::endl;
+      }
+
+    // Discovery has already updated neighbor state and the direct route in
+    // ProcessHello(). Do not process advertised routes here.
+    (void) pathlossDb;
+    (void) snrDb;
+    (void) linkCost;
+    /*std::cout << "[NWK " << m_nodeId
               << "] ProcessDiscover from " << helloSrc
               << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
               << std::endl;
@@ -1211,24 +1242,53 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
     // In current NS-3 approximation, Discover may still carry route info.
     // Legacy ARL routes.c treats Discover as part of discovery state; we keep
     // route payload processing here for now to preserve behavior.
-    ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);
+    ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);*/
 }
 
-  void CsrNetLayer::EnsureDiscoveryForTx ()
-  {
-    if (m_discState != DiscoveryState::IDLE)
-      {
-        return;
-      }
+void
+CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
+                                   uint16_t helloSrc,
+                                   double pathlossDb,
+                                   double snrDb,
+                                   uint32_t linkCost)
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] ProcessNeighborCheck from " << helloSrc
+            << " pathloss=" << pathlossDb
+            << " snr=" << snrDb
+            << " linkCost=" << linkCost
+            << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+            << std::endl;
 
-    std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
-    StartDiscovery (Seconds (0.0), Seconds (30.0));
-  }
+  if (hh.GetAdvertisedRouteCount () > 0)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring Routes_PAYLOAD carried inside NeighborCheck from "
+                << helloSrc
+                << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+                << " ; routes are only processed from RoutingUpdate"
+                << std::endl;
+    }
 
-  void CsrNetLayer::SetRepeatDiscoveryHello (bool enable)
-  {
-    m_repeatDiscoveryHello = enable;
-  }
+  // Neighbor state and direct-route refresh already happened in ProcessHello().
+  // NeighborCheck is a liveness/link-quality probe for now.
+}
+
+void CsrNetLayer::EnsureDiscoveryForTx ()
+{
+  if (m_discState != DiscoveryState::IDLE)
+    {
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
+  StartDiscovery (Seconds (0.0), Seconds (30.0));
+}
+
+void CsrNetLayer::SetRepeatDiscoveryHello (bool enable)
+{
+  m_repeatDiscoveryHello = enable;
+}
 
 void
 CsrNetLayer::DiscoveryStart ()
@@ -1466,6 +1526,16 @@ CsrNetLayer::SendRoutingUpdate ()
             << std::endl;
 
   SendHelloBroadcast (CsrArlRouteMsgType::RoutingUpdate);
+}
+
+void
+CsrNetLayer::SendNeighborCheck ()
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending ARL NeighborCheck"
+            << std::endl;
+
+  SendHelloBroadcast (CsrArlRouteMsgType::NeighborCheck);
 }
 
 void
