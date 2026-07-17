@@ -14,6 +14,15 @@ enum class CsrArlRouteMsgType : uint8_t
   KeyRequest    = 4
 };
 
+enum class CsrNeighborCheckType : uint8_t
+{
+  Discovery = 0,  // CHECK_DISCOVERY
+  Message   = 1,  // CHECK_MESSAGE
+  NoPath    = 2,  // CHECK_NO_PATH
+  Overheard = 3,  // CHECK_OVERHEARD
+  Verify    = 4,  // CHECK_VERIFY
+  None      = 0xFF
+};
 class CsrHelloHeader : public Header
 {
 public:
@@ -40,6 +49,9 @@ public:
 
   void SetArlRouteMsgType (CsrArlRouteMsgType t);
   CsrArlRouteMsgType GetArlRouteMsgType () const;
+
+  void SetNeighborCheckType (CsrNeighborCheckType t);
+  CsrNeighborCheckType GetNeighborCheckType () const;
 
   // Header overrides
   uint32_t GetSerializedSize () const override;
@@ -75,7 +87,11 @@ private:
   uint8_t  m_arlRouteMsgType {static_cast<uint8_t> (CsrArlRouteMsgType::None)};
   static constexpr uint8_t MAX_ADVERTISED_ROUTES = 8;
   std::vector<AdvertisedRoute> m_advertisedRoutes;
-  
+
+  uint8_t m_neighborCheckType {
+  static_cast<uint8_t> (CsrNeighborCheckType::None)
+  };
+
 };
 
 } // namespace ns3

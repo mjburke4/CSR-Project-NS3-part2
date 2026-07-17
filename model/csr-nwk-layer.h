@@ -37,7 +37,10 @@ public:
   void StartDiscovery (Time startDelay, Time duration);
   void SetRepeatDiscoveryHello (bool enable);
   void SendRoutingUpdate ();
-  void SendNeighborCheck ();
+  //void SendNeighborCheck ();
+  void SendNeighborCheck (
+    CsrNeighborCheckType type = CsrNeighborCheckType::Message);
+  const char* NeighborCheckTypeName (CsrNeighborCheckType t) const;
   void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
                                     Time period = Seconds (2.0));
   void SetInvalidateRoutesOnStaleNeighbor (bool enable)
@@ -845,7 +848,11 @@ private:
   void DiscoveryStop ();
   void DiscoveryCooldownOver ();
 
-  void SendHelloBroadcast (CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover);
+  //void SendHelloBroadcast (CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover);
+
+  void SendHelloBroadcast (
+    CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover,
+      CsrNeighborCheckType checkType = CsrNeighborCheckType::None);
 
   void EnsureDiscoveryForTx ();
 
@@ -1386,7 +1393,7 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
     ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);*/
 }
 
-void
+/*void
 CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
                                    uint16_t helloSrc,
                                    double pathlossDb,
@@ -1413,6 +1420,82 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
 
   // Neighbor state and direct-route refresh already happened in ProcessHello().
   // NeighborCheck is a liveness/link-quality probe for now.
+}*/
+
+void
+CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
+                                   uint16_t helloSrc,
+                                   double pathlossDb,
+                                   double snrDb,
+                                   uint32_t linkCost)
+{
+  CsrNeighborCheckType type = hh.GetNeighborCheckType ();
+
+  std::cout << "[NWK " << m_nodeId
+            << "] ProcessNeighborCheck from " << helloSrc
+            << " subtype=" << NeighborCheckTypeName (type)
+            << " pathloss=" << pathlossDb
+            << " snr=" << snrDb
+            << " linkCost=" << linkCost
+            << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+            << std::endl;
+
+  switch (type)
+    {
+    case CsrNeighborCheckType::Discovery:
+      std::cout << "[NWK " << m_nodeId
+                << "] NeighborCheck Discovery confirms discovery reception from "
+                << helloSrc
+                << std::endl;
+      break;
+
+    case CsrNeighborCheckType::Message:
+      std::cout << "[NWK " << m_nodeId
+                << "] NeighborCheck Message confirms link with "
+                << helloSrc
+                << std::endl;
+      break;
+
+    case CsrNeighborCheckType::Verify:
+      std::cout << "[NWK " << m_nodeId
+                << "] NeighborCheck Verify received from "
+                << helloSrc
+                << std::endl;
+      break;
+
+    case CsrNeighborCheckType::Overheard:
+      std::cout << "[NWK " << m_nodeId
+                << "] NeighborCheck Overheard received from "
+                << helloSrc
+                << std::endl;
+      break;
+
+    case CsrNeighborCheckType::NoPath:
+      std::cout << "[NWK " << m_nodeId
+                << "] NeighborCheck NoPath received from "
+                << helloSrc
+                << " ; destination payload not implemented yet"
+                << std::endl;
+      break;
+
+    case CsrNeighborCheckType::None:
+    default:
+      std::cout << "[NWK " << m_nodeId
+                << "] NeighborCheck missing or unknown subtype from "
+                << helloSrc
+                << std::endl;
+      break;
+    }
+
+  if (hh.GetAdvertisedRouteCount () > 0)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring Routes_PAYLOAD inside NeighborCheck"
+                << std::endl;
+    }
+
+  // Neighbor freshness and the direct route were already refreshed
+  // by ProcessHello() before this subtype handler was called.
 }
 
 void CsrNetLayer::EnsureDiscoveryForTx ()
@@ -1516,7 +1599,9 @@ CsrNetLayer::DiscoveryHelloTick ()
 }
 
 void
-CsrNetLayer::SendHelloBroadcast (CsrArlRouteMsgType type)
+CsrNetLayer::SendHelloBroadcast (
+  CsrArlRouteMsgType type,
+  CsrNeighborCheckType checkType)
 {
   if (!m_hop) return;
 
@@ -1543,6 +1628,8 @@ CsrNetLayer::SendHelloBroadcast (CsrArlRouteMsgType type)
   hh.ClearAdvertisedRoutes ();
 
   hh.SetArlRouteMsgType (type);
+
+  hh.SetNeighborCheckType (checkType);
 
   /*for (const auto &re : m_routes)
     {
@@ -1669,7 +1756,7 @@ CsrNetLayer::SendRoutingUpdate ()
   SendHelloBroadcast (CsrArlRouteMsgType::RoutingUpdate);
 }
 
-void
+/*void
 CsrNetLayer::SendNeighborCheck ()
 {
   std::cout << "[NWK " << m_nodeId
@@ -1677,6 +1764,17 @@ CsrNetLayer::SendNeighborCheck ()
             << std::endl;
 
   SendHelloBroadcast (CsrArlRouteMsgType::NeighborCheck);
+}*/
+
+void
+CsrNetLayer::SendNeighborCheck (CsrNeighborCheckType type)
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending ARL NeighborCheck subtype="
+            << unsigned (static_cast<uint8_t> (type))
+            << std::endl;
+
+  SendHelloBroadcast (CsrArlRouteMsgType::NeighborCheck, type);
 }
 
 void
@@ -1723,5 +1821,31 @@ CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
     }
 
   return true;
+}
+
+const char*
+CsrNetLayer::NeighborCheckTypeName (CsrNeighborCheckType t) const
+{
+  switch (t)
+    {
+    case CsrNeighborCheckType::Discovery:
+      return "Discovery";
+
+    case CsrNeighborCheckType::Message:
+      return "Message";
+
+    case CsrNeighborCheckType::NoPath:
+      return "NoPath";
+
+    case CsrNeighborCheckType::Overheard:
+      return "Overheard";
+
+    case CsrNeighborCheckType::Verify:
+      return "Verify";
+
+    case CsrNeighborCheckType::None:
+    default:
+      return "None";
+    }
 }
 // ------------------------------------------------------------
