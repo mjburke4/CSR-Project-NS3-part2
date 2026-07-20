@@ -76,6 +76,7 @@ public:
   // instead of void SendHello();
   void SendHello (Ptr<Packet> helloPayload);
 
+  void SendNeighborCheck (uint16_t dst, Ptr<Packet> payload);
 
   void PrintNeighbors () const;
 
@@ -157,6 +158,11 @@ private:
 
     CsrHeader mh;
     if (!copy->PeekHeader (mh))
+      {
+        return;
+      }
+
+    if (mh.GetType () != CSR_PKT_DATA)
       {
         return;
       }
@@ -324,6 +330,44 @@ CsrHopLayer::SendData (uint16_t dst, uint8_t dscp,
   m_mac->EnqueueTxFrame (frame, dst, dscp, ack);
 }
 
+void
+CsrHopLayer::SendNeighborCheck (uint16_t dst, Ptr<Packet> payload)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  uint16_t &lastSeq = m_lastSentSeqByDest[dst];
+  uint16_t seq = static_cast<uint16_t> ((lastSeq + 1) & 0xFFFF);
+  lastSeq = seq;
+
+  CsrHeader hdr (m_nodeId,
+                 dst,
+                 seq,
+                 7,     // robust control priority
+                 true,  // ACKable
+                 false);
+
+  hdr.SetType (CSR_PKT_NEIGHBOR_CHECK);
+  hdr.SetDestType (CSR_DEST_UNICAST);
+  hdr.SetSpeedKey (8);
+
+  Ptr<Packet> frame = payload->Copy ();
+  frame->AddHeader (hdr);
+
+  FlowCtrlEntry &fc = GetFlowCtrlEntry (dst);
+  fc.outstanding++;
+
+  EnqueueResend (dst, seq, frame->Copy ());
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX reliable NeighborCheck to " << dst
+            << " seq=" << seq
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (frame,
+                         dst,
+                         7,
+                         true);
+}
 
 void
 CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
@@ -380,6 +424,63 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
       return;
     }
 
+  if (hdr.GetType () == CSR_PKT_NEIGHBOR_CHECK)
+    {
+      if (hdr.GetDst () != m_nodeId)
+        {
+          return;
+        }
+
+      bool firstReception =
+        CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq ());
+
+      std::cout << "[HOP " << m_nodeId
+                << "] RX reliable NeighborCheck from "
+                << hdr.GetSrc ()
+                << " seq=" << hdr.GetSeq ()
+                << " firstReception="
+                << (firstReception ? 1 : 0)
+                << std::endl;
+
+      if (firstReception && !m_rxHelloFromHopCb.IsNull ())
+        {
+          m_rxHelloFromHopCb (frame,
+                              hdr.GetSrc (),
+                              pathlossDb,
+                              snrDb);
+        }
+
+      // Always ACK, including duplicates. The original ACK may have been lost.
+      if (hdr.IsAckable ())
+        {
+          CsrHeader ackHdr (m_nodeId,
+                            hdr.GetSrc (),
+                            hdr.GetSeq (),
+                            7,
+                            false,
+                            true);
+
+          ackHdr.SetType (CSR_PKT_ACK);
+          ackHdr.SetDestType (CSR_DEST_UNICAST);
+          ackHdr.SetSpeedKey (8);
+
+          Ptr<Packet> ackPkt = Create<Packet> ();
+          ackPkt->AddHeader (ackHdr);
+
+          std::cout << "[HOP " << m_nodeId
+                    << "] ACK NeighborCheck to "
+                    << hdr.GetSrc ()
+                    << " seq=" << hdr.GetSeq ()
+                    << std::endl;
+
+          m_mac->EnqueueTxFrame (ackPkt,
+                                hdr.GetSrc (),
+                                7,
+                                false);
+        }
+
+      return;
+    }
   // Duplicate suppression: check if this (src, seq) has been seen before
   bool firstReception = CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq ());
 

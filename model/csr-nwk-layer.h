@@ -38,7 +38,10 @@ public:
   void SetRepeatDiscoveryHello (bool enable);
   void SendRoutingUpdate ();
   //void SendNeighborCheck ();
+  //void SendNeighborCheck (
+  //  CsrNeighborCheckType type = CsrNeighborCheckType::Message);
   void SendNeighborCheck (
+   uint16_t neighbor,
     CsrNeighborCheckType type = CsrNeighborCheckType::Message);
   const char* NeighborCheckTypeName (CsrNeighborCheckType t) const;
   void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
@@ -906,6 +909,8 @@ private:
   EventId m_neighborFreshnessEvent;
   Time m_neighborFreshnessTimeout { Seconds (20.0) };
   Time m_neighborFreshnessCheckPeriod { Seconds (2.0) };
+
+  uint16_t m_neighborCheckSeq {0};
 };
 
 
@@ -1757,16 +1762,6 @@ CsrNetLayer::SendRoutingUpdate ()
 }
 
 /*void
-CsrNetLayer::SendNeighborCheck ()
-{
-  std::cout << "[NWK " << m_nodeId
-            << "] Sending ARL NeighborCheck"
-            << std::endl;
-
-  SendHelloBroadcast (CsrArlRouteMsgType::NeighborCheck);
-}*/
-
-void
 CsrNetLayer::SendNeighborCheck (CsrNeighborCheckType type)
 {
   std::cout << "[NWK " << m_nodeId
@@ -1775,6 +1770,46 @@ CsrNetLayer::SendNeighborCheck (CsrNeighborCheckType type)
             << std::endl;
 
   SendHelloBroadcast (CsrArlRouteMsgType::NeighborCheck, type);
+}*/
+
+void
+CsrNetLayer::SendNeighborCheck (uint16_t neighbor,
+                                CsrNeighborCheckType type)
+{
+  if (m_hop == nullptr)
+    {
+      return;
+    }
+
+  Ptr<Packet> p = Create<Packet> ();
+
+  CsrHelloHeader hh;
+  hh.SetNodeId (m_nodeId);
+  hh.SetHelloSeq (++m_neighborCheckSeq);
+  hh.SetSpeedKey (m_minSpeedKey);
+
+  double s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
+  hh.SetRxPowerDbmX10 (
+    static_cast<int16_t> (std::round (s0PowerDbm * 10.0)));
+
+  hh.SetActiveNodes (
+    static_cast<uint8_t> (GetActiveNodeCount ()));
+
+  hh.SetArlRouteMsgType (
+    CsrArlRouteMsgType::NeighborCheck);
+
+  hh.SetNeighborCheckType (type);
+  hh.ClearAdvertisedRoutes ();
+
+  p->AddHeader (hh);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending targeted ARL NeighborCheck"
+            << " neighbor=" << neighbor
+            << " subtype=" << NeighborCheckTypeName (type)
+            << std::endl;
+
+  m_hop->SendNeighborCheck (neighbor, p);
 }
 
 void
