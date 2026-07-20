@@ -94,6 +94,63 @@ public:
   }
 
   void
+  NoteNeighborCheckSuccess (uint16_t neighbor)
+  {
+    auto it = m_nwkNeighbors.find (neighbor);
+
+    if (it == m_nwkNeighbors.end ())
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] NeighborCheck ACK from unknown neighbor="
+                  << neighbor
+                  << std::endl;
+        return;
+      }
+
+    NwkNeighborEntry &ne = it->second;
+
+    uint32_t oldFailures = ne.numFailures;
+    bool wasStale = ne.stale;
+
+    ne.stale = false;
+    ne.lastHeardSec = Simulator::Now ().GetSeconds ();
+
+    // Conservative recovery: one successful check removes one failure.
+    // Do not immediately erase all historical failures.
+    if (ne.numFailures > 0)
+      {
+        ne.numFailures--;
+      }
+
+    std::cout << "[NWK " << m_nodeId
+              << "] NeighborCheck success neighbor=" << neighbor
+              << " stale=" << (wasStale ? 1 : 0) << "->0"
+              << " numFailures=" << oldFailures
+              << "->" << ne.numFailures
+              << std::endl;
+
+    if (wasStale)
+      {
+        for (auto &re : m_routes)
+          {
+            if (re.nextHop == neighbor)
+              {
+                re.valid = true;
+                re.lastUpdated = Simulator::Now ();
+
+                std::cout << "[NWK " << m_nodeId
+                          << "] Reactivated route dst=" << re.nwkDst
+                          << " nextHop=" << neighbor
+                          << " after successful NeighborCheck"
+                          << std::endl;
+              }
+          }
+      }
+    RecomputeRoutesViaNextHop (neighbor);
+    ScheduleCheckNwkQueue ();
+  }
+
+  void
   RecomputeRoutesViaNextHop (uint16_t nextHop)
   {
     auto nit = m_nwkNeighbors.find (nextHop);
@@ -233,6 +290,9 @@ public:
 
         m_hop->SetLinkFailureCallback (
           MakeCallback (&CsrNetLayer::NoteLinkFailure, this));
+
+        m_hop->SetNeighborCheckSuccessCallback (
+          MakeCallback (&CsrNetLayer::NoteNeighborCheckSuccess, this));
       }
   }
 

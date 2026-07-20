@@ -64,6 +64,11 @@ public:
     m_linkFailureCb = cb;
   }
 
+  void SetNeighborCheckSuccessCallback (Callback<void, uint16_t> cb)
+  {
+    m_neighborCheckSuccessCb = cb;
+  }
+
   // App/NWK send
   void SendData (uint16_t dst, uint8_t dscp,
                  Ptr<Packet> payload, bool ack);
@@ -145,6 +150,8 @@ private:
   Callback<bool, uint16_t, uint16_t> m_shouldDackCb;
 
   Callback<void, uint16_t> m_linkFailureCb;
+
+  Callback<void, uint16_t> m_neighborCheckSuccessCb;
 
   void NotifyNsdpFromFrame (Ptr<Packet> frame)
   {
@@ -555,6 +562,19 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
       return;
     }
 
+  bool neighborCheckCompleted = false;
+
+  if (entry->frame != nullptr)
+    {
+      CsrHeader originalHdr;
+
+      if (entry->frame->PeekHeader (originalHdr) &&
+          originalHdr.GetType () == CSR_PKT_NEIGHBOR_CHECK)
+        {
+          neighborCheckCompleted = true;
+        }
+    }
+
   // Inform Net layer that this (nwkSrc,nwkDst) flow completed one packet
   NotifyNsdpFromFrame (entry->frame);
 
@@ -563,6 +583,20 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
   if (fc.outstanding > 0)
     {
       fc.outstanding--;
+    }
+
+  if (neighborCheckCompleted)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Reliable NeighborCheck completed with "
+                << src
+                << " seq=" << seq
+                << std::endl;
+
+      if (!m_neighborCheckSuccessCb.IsNull ())
+        {
+          m_neighborCheckSuccessCb (src);
+        }
     }
 
   for (auto it = m_resendQueue.begin (); it != m_resendQueue.end (); ++it)
