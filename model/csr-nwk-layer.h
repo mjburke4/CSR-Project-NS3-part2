@@ -40,9 +40,14 @@ public:
   //void SendNeighborCheck ();
   //void SendNeighborCheck (
   //  CsrNeighborCheckType type = CsrNeighborCheckType::Message);
-  void SendNeighborCheck (
+  /*void SendNeighborCheck (
    uint16_t neighbor,
-    CsrNeighborCheckType type = CsrNeighborCheckType::Message);
+    CsrNeighborCheckType type = CsrNeighborCheckType::Message);*/
+
+  void SendNeighborCheck (
+    uint16_t neighbor,
+    CsrNeighborCheckType type = CsrNeighborCheckType::Message,
+    uint16_t target = CSR_BROADCAST_ID);
   const char* NeighborCheckTypeName (CsrNeighborCheckType t) const;
   void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
                                     Time period = Seconds (2.0));
@@ -76,6 +81,14 @@ public:
            << "," << m_nwkQueue.size ()
            << "\n";
       }
+  }
+
+  void
+  SendNoPath (uint16_t neighbor, uint16_t unreachableDest)
+  {
+    SendNeighborCheck (neighbor,
+                      CsrNeighborCheckType::NoPath,
+                      unreachableDest);
   }
 
   void NoteLinkFailure (uint16_t nextHop)
@@ -1535,13 +1548,65 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
                 << std::endl;
       break;
 
-    case CsrNeighborCheckType::NoPath:
+    /*case CsrNeighborCheckType::NoPath:
       std::cout << "[NWK " << m_nodeId
                 << "] NeighborCheck NoPath received from "
                 << helloSrc
                 << " ; destination payload not implemented yet"
                 << std::endl;
-      break;
+      break;*/
+
+    case CsrNeighborCheckType::NoPath:
+      {
+        uint16_t unreachableDest = hh.GetNeighborCheckTarget ();
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] NeighborCheck NoPath received from "
+                  << helloSrc
+                  << " unreachableDest=" << unreachableDest
+                  << std::endl;
+
+        if (unreachableDest == CSR_BROADCAST_ID)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Ignoring malformed NoPath with no destination"
+                      << std::endl;
+            break;
+          }
+
+        bool matchingForwardRoute = false;
+
+        for (const auto &re : m_routes)
+          {
+            if (re.valid &&
+                re.nwkDst == unreachableDest &&
+                re.nextHop == helloSrc)
+              {
+                matchingForwardRoute = true;
+
+                std::cout << "[NWK " << m_nodeId
+                          << "] NoPath reporter=" << helloSrc
+                          << " is current nextHop for dst="
+                          << unreachableDest
+                          << "; preserving forward route while awaiting update"
+                          << std::endl;
+
+                break;
+              }
+          }
+
+        if (!matchingForwardRoute)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] NoPath from " << helloSrc
+                      << " does not match current route for dst="
+                      << unreachableDest
+                      << "; treating report as stale or informational"
+                      << std::endl;
+          }
+
+        break;
+      }
 
     case CsrNeighborCheckType::None:
     default:
@@ -1834,7 +1899,8 @@ CsrNetLayer::SendNeighborCheck (CsrNeighborCheckType type)
 
 void
 CsrNetLayer::SendNeighborCheck (uint16_t neighbor,
-                                CsrNeighborCheckType type)
+                                CsrNeighborCheckType type,
+                                uint16_t target)
 {
   if (m_hop == nullptr)
     {
@@ -1859,6 +1925,7 @@ CsrNetLayer::SendNeighborCheck (uint16_t neighbor,
     CsrArlRouteMsgType::NeighborCheck);
 
   hh.SetNeighborCheckType (type);
+  hh.SetNeighborCheckTarget (target);
   hh.ClearAdvertisedRoutes ();
 
   p->AddHeader (hh);
@@ -1866,8 +1933,14 @@ CsrNetLayer::SendNeighborCheck (uint16_t neighbor,
   std::cout << "[NWK " << m_nodeId
             << "] Sending targeted ARL NeighborCheck"
             << " neighbor=" << neighbor
-            << " subtype=" << NeighborCheckTypeName (type)
-            << std::endl;
+            << " subtype=" << NeighborCheckTypeName (type);
+
+  if (type == CsrNeighborCheckType::NoPath)
+    {
+      std::cout << " unreachableDest=" << target;
+    }
+
+  std::cout << std::endl;
 
   m_hop->SendNeighborCheck (neighbor, p);
 }

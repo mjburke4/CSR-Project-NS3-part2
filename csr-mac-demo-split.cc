@@ -265,14 +265,14 @@ main (int argc, char *argv[])
     net1->SendRoutingUpdate ();
   });
 
-  /*Simulator::Schedule (Seconds (3.4), [net1]() {
-  net1->SendNeighborCheck ();
-  });*/
-
   Simulator::Schedule (Seconds (3.4), [net1]() {
   net1->SendNeighborCheck (
     0,
     CsrNeighborCheckType::Message);
+  });
+
+  Simulator::Schedule (Seconds (12.0), [net2]() {
+  net2->SendNoPath (1, 3);
   });
   // OPNET-style bounded discovery window
   /*dev0->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));

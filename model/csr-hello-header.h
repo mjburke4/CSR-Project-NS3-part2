@@ -59,6 +59,9 @@ public:
   uint32_t Deserialize (Buffer::Iterator start) override;
   void Print (std::ostream &os) const override;
 
+  void SetNeighborCheckTarget (uint16_t target);
+  uint16_t GetNeighborCheckTarget () const;
+
   struct AdvertisedRoute
   {
     uint16_t dst {0xFFFF};
@@ -92,6 +95,7 @@ private:
   static_cast<uint8_t> (CsrNeighborCheckType::None)
   };
 
+  uint16_t m_neighborCheckTarget {0xFFFF};
 };
 
 } // namespace ns3

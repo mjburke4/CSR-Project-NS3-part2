@@ -42,6 +42,18 @@ namespace ns3 {
     return static_cast<CsrNeighborCheckType> (m_neighborCheckType);
   }
 
+  void
+  CsrHelloHeader::SetNeighborCheckTarget (uint16_t target)
+  {
+    m_neighborCheckTarget = target;
+  }
+
+  uint16_t
+  CsrHelloHeader::GetNeighborCheckTarget () const
+  {
+    return m_neighborCheckTarget;
+  }
+
   CsrArlRouteMsgType
   CsrHelloHeader::GetArlRouteMsgType () const
   {
@@ -73,8 +85,11 @@ namespace ns3 {
     // dst(2), hops(1), cost(4), pathlossDbX10(2), capability(1)
    // return 2 + 2 + 1 + 2 + 1 + 1 + 1
     //    + static_cast<uint32_t> (m_advertisedRoutes.size ()) * (2 + 1 + 4 + 2 + 1);
-    return 2 + 2 + 1 + 2 + 1 + 1 + 1 + 1
+    /*return 2 + 2 + 1 + 2 + 1 + 1 + 1 + 1
       + static_cast<uint32_t> (m_advertisedRoutes.size ())
+        * (2 + 1 + 4 + 2 + 1);*/
+      return 2 + 2 + 1 + 2 + 1 + 1 + 1 + 2 + 1
+       + static_cast<uint32_t> (m_advertisedRoutes.size ())
         * (2 + 1 + 4 + 2 + 1);
   }
 
@@ -88,6 +103,7 @@ namespace ns3 {
     i.WriteU8 (m_activeNodes);
     i.WriteU8 (m_arlRouteMsgType);
     i.WriteU8 (m_neighborCheckType);
+    i.WriteHtonU16 (m_neighborCheckTarget);
 
     uint8_t count = static_cast<uint8_t> (
         std::min<size_t> (m_advertisedRoutes.size (), MAX_ADVERTISED_ROUTES));
@@ -116,6 +132,7 @@ namespace ns3 {
     m_activeNodes = i.ReadU8 ();
     m_arlRouteMsgType = i.ReadU8 ();
     m_neighborCheckType = i.ReadU8 ();
+    m_neighborCheckTarget = i.ReadNtohU16 ();
 
     m_advertisedRoutes.clear ();
 
@@ -150,7 +167,8 @@ namespace ns3 {
       << " activeNodes=" << unsigned (m_activeNodes)
       << " arlType=" << unsigned (m_arlRouteMsgType)
       << " neighborCheckType=" << unsigned (m_neighborCheckType)
-      << " advRoutes=" << unsigned (GetAdvertisedRouteCount ());
+      << " advRoutes=" << unsigned (GetAdvertisedRouteCount ())
+      << " neighborCheckTarget=" << m_neighborCheckTarget;
   }
 
   void
