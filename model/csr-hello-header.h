@@ -23,6 +23,14 @@ enum class CsrNeighborCheckType : uint8_t
   Verify    = 4,  // CHECK_VERIFY
   None      = 0xFF
 };
+
+enum class CsrDiscoverType : uint8_t
+{
+  Broadcast = 0,  // DISCOVER_BROADCAST
+  Chirp     = 1,  // DISCOVER_CHIRP
+  None      = 0xFF
+};
+
 class CsrHelloHeader : public Header
 {
 public:
