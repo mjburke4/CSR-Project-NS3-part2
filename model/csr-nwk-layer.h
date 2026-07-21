@@ -104,9 +104,27 @@ public:
   }
 
   void
-  NoteNeighborCheckSuccess (uint16_t neighbor)
+  NoteNeighborCheckSuccess (
+    uint16_t neighbor,
+    CsrNeighborCheckType type,
+    uint32_t discoverySequence)
   {
     auto it = m_nwkNeighbors.find (neighbor);
+
+    if (type == CsrNeighborCheckType::Verify &&
+        discoverySequence != m_discoverySequence)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Ignoring stale Verify completion"
+                  << " neighbor=" << neighbor
+                  << " completedSequence="
+                  << discoverySequence
+                  << " currentSequence="
+                  << m_discoverySequence
+                  << std::endl;
+
+        return;
+      }
 
     if (it == m_nwkNeighbors.end ())
       {
@@ -133,8 +151,14 @@ public:
       }
 
     std::cout << "[NWK " << m_nodeId
-              << "] NeighborCheck success neighbor=" << neighbor
-              << " stale=" << (wasStale ? 1 : 0) << "->0"
+              << "] NeighborCheck success"
+              << " neighbor=" << neighbor
+              << " subtype="
+              << NeighborCheckTypeName (type)
+              << " discoverySequence="
+              << discoverySequence
+              << " stale=" << (wasStale ? 1 : 0)
+              << "->0"
               << " numFailures=" << oldFailures
               << "->" << ne.numFailures
               << std::endl;

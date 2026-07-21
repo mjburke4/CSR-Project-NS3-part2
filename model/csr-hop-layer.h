@@ -1,5 +1,6 @@
 #pragma once
 #include "csr-common.h"
+#include "csr-hello-header.h"
 
 class CsrHopLayer : public Object
 {
@@ -64,7 +65,11 @@ public:
     m_linkFailureCb = cb;
   }
 
-  void SetNeighborCheckSuccessCallback (Callback<void, uint16_t> cb)
+  void SetNeighborCheckSuccessCallback (
+    Callback<void,
+            uint16_t,
+            CsrNeighborCheckType,
+            uint32_t> cb)
   {
     m_neighborCheckSuccessCb = cb;
   }
@@ -151,7 +156,12 @@ private:
 
   Callback<void, uint16_t> m_linkFailureCb;
 
-  Callback<void, uint16_t> m_neighborCheckSuccessCb;
+  //Callback<void, uint16_t> m_neighborCheckSuccessCb;
+
+  Callback<void,
+         uint16_t,
+         CsrNeighborCheckType,
+         uint32_t> m_neighborCheckSuccessCb;
 
   void NotifyNsdpFromFrame (Ptr<Packet> frame)
   {
@@ -561,17 +571,43 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
                           << " from " << src);
       return;
     }
-
   bool neighborCheckCompleted = false;
+
+  CsrNeighborCheckType completedType =
+    CsrNeighborCheckType::None;
+
+  uint32_t completedDiscoverySequence = 0;
 
   if (entry->frame != nullptr)
     {
+      Ptr<Packet> originalFrame = entry->frame->Copy ();
+
       CsrHeader originalHdr;
 
-      if (entry->frame->PeekHeader (originalHdr) &&
+      if (originalFrame->RemoveHeader (originalHdr) &&
           originalHdr.GetType () == CSR_PKT_NEIGHBOR_CHECK)
         {
           neighborCheckCompleted = true;
+
+          CsrHelloHeader neighborCheckHeader;
+
+          if (originalFrame->RemoveHeader (neighborCheckHeader))
+            {
+              completedType =
+                neighborCheckHeader.GetNeighborCheckType ();
+
+              completedDiscoverySequence =
+                neighborCheckHeader.GetDiscoverySequence ();
+            }
+          else
+            {
+              std::cout << "[HOP " << m_nodeId
+                        << "] Completed NeighborCheck missing "
+                        << "CsrHelloHeader"
+                        << " neighbor=" << src
+                        << " seq=" << seq
+                        << std::endl;
+            }
         }
     }
 
@@ -591,11 +627,19 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
                 << "] Reliable NeighborCheck completed with "
                 << src
                 << " seq=" << seq
+                << " subtype="
+                << unsigned (
+                    static_cast<uint8_t> (completedType))
+                << " discoverySequence="
+                << completedDiscoverySequence
                 << std::endl;
 
       if (!m_neighborCheckSuccessCb.IsNull ())
         {
-          m_neighborCheckSuccessCb (src);
+          m_neighborCheckSuccessCb (
+            src,
+            completedType,
+            completedDiscoverySequence);
         }
     }
 
