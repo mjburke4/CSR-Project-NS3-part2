@@ -111,9 +111,9 @@ private:
 
   uint8_t m_discoverType {
   static_cast<uint8_t> (CsrDiscoverType::None)
-};
+  };
 
-uint32_t m_discoverySequence {0};
+  uint32_t m_discoverySequence {0};
 
   uint16_t m_neighborCheckTarget {0xFFFF};
 };
