@@ -666,6 +666,9 @@ private:
     // OPNET BrT_Neighbor_Entry::num_failures
     uint32_t numFailures {0};
     bool stale {false};
+
+    bool discoverySequenceValid {false};
+    uint32_t discoverySequence {0};
   };
 
   // NSDP: Network Source–Destination Pair entry
@@ -938,7 +941,9 @@ private:
 
   void SendHelloBroadcast (
     CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover,
-      CsrNeighborCheckType checkType = CsrNeighborCheckType::None);
+    CsrNeighborCheckType checkType = CsrNeighborCheckType::None,
+    CsrDiscoverType discoverType = CsrDiscoverType::None,
+    uint32_t discoverySequence = 0);
 
   void EnsureDiscoveryForTx ();
 
@@ -997,6 +1002,7 @@ private:
   Time m_neighborFreshnessCheckPeriod { Seconds (2.0) };
 
   uint16_t m_neighborCheckSeq {0};
+  uint32_t m_discoverySequence {0};
 };
 
 
@@ -1531,40 +1537,97 @@ CsrNetLayer::InvalidateRoutesViaNextHop (uint16_t nextHop, const char *reason)
 
 void
 CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
-                                uint16_t helloSrc,
-                                double pathlossDb,
-                                double snrDb,
-                                uint32_t linkCost)
+                              uint16_t helloSrc,
+                              double pathlossDb,
+                              double snrDb,
+                              uint32_t linkCost)
 {
+  CsrDiscoverType discoverType = hh.GetDiscoverType ();
+
   std::cout << "[NWK " << m_nodeId
             << "] ProcessDiscover from " << helloSrc
-            << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+            << " subtype="
+            << (discoverType == CsrDiscoverType::Broadcast
+                  ? "Broadcast"
+                  : discoverType == CsrDiscoverType::Chirp
+                      ? "Chirp"
+                      : "None")
+            << " sequence=" << hh.GetDiscoverySequence ()
             << std::endl;
 
-    if (hh.GetAdvertisedRouteCount () > 0)
+  switch (discoverType)
+    {
+    case CsrDiscoverType::Broadcast:
       {
-        std::cout << "[NWK " << m_nodeId
-                  << "] Ignoring Routes_PAYLOAD carried inside Discover from "
-                  << helloSrc
-                  << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
-                  << " ; routes are only processed from RoutingUpdate"
-                  << std::endl;
+        auto neighborIt = m_nwkNeighbors.find (helloSrc);
+        if (neighborIt == m_nwkNeighbors.end ())
+          {
+            break;
+          }
+
+        NwkNeighborEntry &neighbor = neighborIt->second;
+        uint32_t receivedSequence = hh.GetDiscoverySequence ();
+
+        bool isNewSequence =
+          !neighbor.discoverySequenceValid ||
+          static_cast<int32_t> (
+            receivedSequence - neighbor.discoverySequence) > 0;
+
+        if (isNewSequence)
+          {
+            uint32_t oldSequence = neighbor.discoverySequence;
+
+            neighbor.discoverySequence = receivedSequence;
+            neighbor.discoverySequenceValid = true;
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] New discovery sequence from "
+                      << helloSrc
+                      << " old=" << oldSequence
+                      << " new=" << receivedSequence
+                      << std::endl;
+          }
+        else
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Duplicate/old discovery sequence from "
+                      << helloSrc
+                      << " received=" << receivedSequence
+                      << " current=" << neighbor.discoverySequence
+                      << std::endl;
+          }
+
+        break;
       }
 
-    // Discovery has already updated neighbor state and the direct route in
-    // ProcessHello(). Do not process advertised routes here.
-    (void) pathlossDb;
-    (void) snrDb;
-    (void) linkCost;
-    /*std::cout << "[NWK " << m_nodeId
-              << "] ProcessDiscover from " << helloSrc
-              << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
-              << std::endl;
+    case CsrDiscoverType::Chirp:
+      std::cout << "[NWK " << m_nodeId
+                << "] Discover Chirp received from "
+                << helloSrc
+                << "; active-neighbor list handling is next"
+                << std::endl;
+      break;
 
-    // In current NS-3 approximation, Discover may still carry route info.
-    // Legacy ARL routes.c treats Discover as part of discovery state; we keep
-    // route payload processing here for now to preserve behavior.
-    ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);*/
+    case CsrDiscoverType::None:
+    default:
+      std::cout << "[NWK " << m_nodeId
+                << "] Discover missing subtype from "
+                << helloSrc
+                << std::endl;
+      break;
+    }
+
+  if (hh.GetAdvertisedRouteCount () > 0)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring Routes_PAYLOAD inside Discover"
+                << std::endl;
+    }
+
+  // ProcessHello() already refreshed the direct neighbor route.
+  (void) pathlossDb;
+  (void) snrDb;
+  (void) linkCost;
 }
 
 /*void
@@ -1768,15 +1831,25 @@ CsrNetLayer::DiscoveryStart ()
   m_discState = DiscoveryState::ACTIVE;
   m_discoveryActive = true;
 
+  ++m_discoverySequence;
+
+  // Avoid using zero after uint32 wrap.
+  if (m_discoverySequence == 0)
+    {
+      ++m_discoverySequence;
+    }
+
   std::cout << "[NWK " << m_nodeId
-              << "] DiscoveryStart: sending HELLO advertisement"
-              << std::endl;
+            << "] DiscoveryStart Broadcast sequence="
+            << m_discoverySequence
+            << std::endl;
 
-    // OPNET-style behavior: send one HELLO at discovery start
-  SendHelloBroadcast (CsrArlRouteMsgType::Discover);
-    //SendHelloBroadcast ();
+  SendHelloBroadcast (
+    CsrArlRouteMsgType::Discover,
+    CsrNeighborCheckType::None,
+    CsrDiscoverType::Broadcast,
+    m_discoverySequence);
 
-    // Optional NS-3 robustness mode, disabled by default
   if (m_repeatDiscoveryHello)
     {
       ScheduleDiscoveryHello ();
@@ -1838,10 +1911,15 @@ CsrNetLayer::DiscoveryHelloTick ()
     }
 
   std::cout << "[NWK " << m_nodeId
-              << "] Discovery HELLO repeat"
-              << std::endl;
+            << "] Discovery Broadcast repeat sequence="
+            << m_discoverySequence
+            << std::endl;
 
-  SendHelloBroadcast ();
+  SendHelloBroadcast (
+    CsrArlRouteMsgType::Discover,
+    CsrNeighborCheckType::None,
+    CsrDiscoverType::Broadcast,
+    m_discoverySequence);
 
   ScheduleDiscoveryHello ();
 }
@@ -1849,7 +1927,9 @@ CsrNetLayer::DiscoveryHelloTick ()
 void
 CsrNetLayer::SendHelloBroadcast (
   CsrArlRouteMsgType type,
-  CsrNeighborCheckType checkType)
+  CsrNeighborCheckType checkType,
+  CsrDiscoverType discoverType,
+  uint32_t discoverySequence)
 {
   if (!m_hop) return;
 
@@ -1878,6 +1958,8 @@ CsrNetLayer::SendHelloBroadcast (
   hh.SetArlRouteMsgType (type);
 
   hh.SetNeighborCheckType (checkType);
+  hh.SetDiscoverType (discoverType);
+  hh.SetDiscoverySequence (discoverySequence);
 
   uint8_t added = 0;
 

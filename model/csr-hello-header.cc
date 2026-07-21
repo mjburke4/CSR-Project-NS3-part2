@@ -54,6 +54,30 @@ namespace ns3 {
     return m_neighborCheckTarget;
   }
 
+  void
+  CsrHelloHeader::SetDiscoverType (CsrDiscoverType type)
+  {
+    m_discoverType = static_cast<uint8_t> (type);
+  }
+
+  CsrDiscoverType
+  CsrHelloHeader::GetDiscoverType () const
+  {
+    return static_cast<CsrDiscoverType> (m_discoverType);
+  }
+
+  void
+  CsrHelloHeader::SetDiscoverySequence (uint32_t sequence)
+  {
+    m_discoverySequence = sequence;
+  }
+
+  uint32_t
+  CsrHelloHeader::GetDiscoverySequence () const
+  {
+    return m_discoverySequence;
+  }
+
   CsrArlRouteMsgType
   CsrHelloHeader::GetArlRouteMsgType () const
   {
@@ -78,19 +102,19 @@ namespace ns3 {
   uint32_t
   CsrHelloHeader::GetSerializedSize () const
   {
-    // base:
-    // nodeId(2), helloSeq(2), speedKey(1), rxPowerDbmX10(2), activeNodes(1)
-    // routeCount(1)
-    // each advertised route:
-    // dst(2), hops(1), cost(4), pathlossDbX10(2), capability(1)
-   // return 2 + 2 + 1 + 2 + 1 + 1 + 1
-    //    + static_cast<uint32_t> (m_advertisedRoutes.size ()) * (2 + 1 + 4 + 2 + 1);
-    /*return 2 + 2 + 1 + 2 + 1 + 1 + 1 + 1
-      + static_cast<uint32_t> (m_advertisedRoutes.size ())
-        * (2 + 1 + 4 + 2 + 1);*/
-      return 2 + 2 + 1 + 2 + 1 + 1 + 1 + 2 + 1
-       + static_cast<uint32_t> (m_advertisedRoutes.size ())
-        * (2 + 1 + 4 + 2 + 1);
+       return 2  // nodeId
+            + 2  // helloSeq
+            + 1  // speedKey
+            + 2  // rxPowerDbmX10
+            + 1  // activeNodes
+            + 1  // arlRouteMsgType
+            + 1  // neighborCheckType
+            + 2  // neighborCheckTarget
+            + 1  // discoverType
+            + 4  // discoverySequence
+            + 1  // routeCount
+            + static_cast<uint32_t> (m_advertisedRoutes.size ())
+                * (2 + 1 + 4 + 2 + 1);
   }
 
   void
@@ -104,6 +128,8 @@ namespace ns3 {
     i.WriteU8 (m_arlRouteMsgType);
     i.WriteU8 (m_neighborCheckType);
     i.WriteHtonU16 (m_neighborCheckTarget);
+    i.WriteU8 (m_discoverType);
+    i.WriteHtonU32 (m_discoverySequence);
 
     uint8_t count = static_cast<uint8_t> (
         std::min<size_t> (m_advertisedRoutes.size (), MAX_ADVERTISED_ROUTES));
@@ -133,6 +159,9 @@ namespace ns3 {
     m_arlRouteMsgType = i.ReadU8 ();
     m_neighborCheckType = i.ReadU8 ();
     m_neighborCheckTarget = i.ReadNtohU16 ();
+
+    m_discoverType = i.ReadU8 ();
+    m_discoverySequence = i.ReadNtohU32 ();
 
     m_advertisedRoutes.clear ();
 
@@ -167,8 +196,10 @@ namespace ns3 {
       << " activeNodes=" << unsigned (m_activeNodes)
       << " arlType=" << unsigned (m_arlRouteMsgType)
       << " neighborCheckType=" << unsigned (m_neighborCheckType)
-      << " advRoutes=" << unsigned (GetAdvertisedRouteCount ())
-      << " neighborCheckTarget=" << m_neighborCheckTarget;
+      << " neighborCheckTarget=" << m_neighborCheckTarget
+      << " discoverType=" << unsigned (m_discoverType)
+      << " discoverySequence=" << m_discoverySequence
+      << " advRoutes=" << unsigned (GetAdvertisedRouteCount ());
   }
 
   void
