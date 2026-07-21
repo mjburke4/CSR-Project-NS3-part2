@@ -61,6 +61,12 @@ public:
   void SetNeighborCheckType (CsrNeighborCheckType t);
   CsrNeighborCheckType GetNeighborCheckType () const;
 
+  void SetDiscoverType (CsrDiscoverType type);
+  CsrDiscoverType GetDiscoverType () const;
+
+  void SetDiscoverySequence (uint32_t sequence);
+  uint32_t GetDiscoverySequence () const;
+
   // Header overrides
   uint32_t GetSerializedSize () const override;
   void Serialize (Buffer::Iterator start) const override;
@@ -102,6 +108,12 @@ private:
   uint8_t m_neighborCheckType {
   static_cast<uint8_t> (CsrNeighborCheckType::None)
   };
+
+  uint8_t m_discoverType {
+  static_cast<uint8_t> (CsrDiscoverType::None)
+};
+
+uint32_t m_discoverySequence {0};
 
   uint16_t m_neighborCheckTarget {0xFFFF};
 };
