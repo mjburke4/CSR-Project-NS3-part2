@@ -669,6 +669,8 @@ private:
 
     bool discoverySequenceValid {false};
     uint32_t discoverySequence {0};
+
+    bool discoveryVerified {false};
   };
 
   // NSDP: Network Source–Destination Pair entry
@@ -1586,6 +1588,20 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
                       << " old=" << oldSequence
                       << " new=" << receivedSequence
                       << std::endl;
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Scheduling Discovery NeighborCheck response to "
+                      << helloSrc
+                      << " for sequence=" << receivedSequence
+                      << std::endl;
+
+            Simulator::Schedule (
+              MilliSeconds (20),
+              &CsrNetLayer::SendNeighborCheck,
+              this,
+              helloSrc,
+              CsrNeighborCheckType::Discovery,
+              CSR_BROADCAST_ID);
           }
         else
           {
@@ -1630,35 +1646,6 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
   (void) linkCost;
 }
 
-/*void
-CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
-                                   uint16_t helloSrc,
-                                   double pathlossDb,
-                                   double snrDb,
-                                   uint32_t linkCost)
-{
-  std::cout << "[NWK " << m_nodeId
-            << "] ProcessNeighborCheck from " << helloSrc
-            << " pathloss=" << pathlossDb
-            << " snr=" << snrDb
-            << " linkCost=" << linkCost
-            << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
-            << std::endl;
-
-  if (hh.GetAdvertisedRouteCount () > 0)
-    {
-      std::cout << "[NWK " << m_nodeId
-                << "] Ignoring Routes_PAYLOAD carried inside NeighborCheck from "
-                << helloSrc
-                << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
-                << " ; routes are only processed from RoutingUpdate"
-                << std::endl;
-    }
-
-  // Neighbor state and direct-route refresh already happened in ProcessHello().
-  // NeighborCheck is a liveness/link-quality probe for now.
-}*/
-
 void
 CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
                                    uint16_t helloSrc,
@@ -1680,11 +1667,38 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
   switch (type)
     {
     case CsrNeighborCheckType::Discovery:
-      std::cout << "[NWK " << m_nodeId
-                << "] NeighborCheck Discovery confirms discovery reception from "
-                << helloSrc
-                << std::endl;
-      break;
+      {
+        auto neighborIt = m_nwkNeighbors.find (helloSrc);
+
+        if (neighborIt == m_nwkNeighbors.end ())
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Discovery NeighborCheck from unknown neighbor="
+                      << helloSrc
+                      << std::endl;
+            break;
+          }
+
+        NwkNeighborEntry &neighbor = neighborIt->second;
+        bool wasVerified = neighbor.discoveryVerified;
+
+        neighbor.discoveryVerified = true;
+        neighbor.stale = false;
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Discovery response from neighbor="
+                  << helloSrc
+                  << " verified="
+                  << (wasVerified ? 1 : 0)
+                  << "->1"
+                  << " localDiscoverySequence="
+                  << m_discoverySequence
+                  << " reportedActiveNodes="
+                  << unsigned (hh.GetActiveNodes ())
+                  << std::endl;
+
+        break;
+      }
 
     case CsrNeighborCheckType::Message:
       std::cout << "[NWK " << m_nodeId
@@ -1839,9 +1853,16 @@ CsrNetLayer::DiscoveryStart ()
       ++m_discoverySequence;
     }
 
+  for (auto &kv : m_nwkNeighbors)
+    {
+      kv.second.discoveryVerified = false;
+    }
+
   std::cout << "[NWK " << m_nodeId
             << "] DiscoveryStart Broadcast sequence="
             << m_discoverySequence
+            << " resetVerifiedNeighbors="
+            << m_nwkNeighbors.size ()
             << std::endl;
 
   SendHelloBroadcast (
