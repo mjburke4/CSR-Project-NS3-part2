@@ -288,6 +288,15 @@ main (int argc, char *argv[])
   Simulator::Schedule (Seconds (38.0), [net0]() {
     net0->StartDiscovery (Seconds (0.0), Seconds (5.0));
   });
+
+  Simulator::Schedule (Seconds (39.0), [net1]() {
+  net1->SendNeighborCheck (
+    0,
+    CsrNeighborCheckType::Discovery,
+    CSR_BROADCAST_ID,
+    1);  // deliberately stale
+  });
+
   // Print neighbor tables shortly after discovery ends (~40s)
   Simulator::Schedule (Seconds (40.5),
                       &CsrHopLayer::PrintNeighbors,

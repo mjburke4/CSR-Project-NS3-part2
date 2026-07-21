@@ -38,17 +38,13 @@ public:
   void SetRepeatDiscoveryHello (bool enable);
   void SetDiscoveryResponseEnabled (bool enable);
   void SendRoutingUpdate ();
-  //void SendNeighborCheck ();
-  //void SendNeighborCheck (
-  //  CsrNeighborCheckType type = CsrNeighborCheckType::Message);
-  /*void SendNeighborCheck (
-   uint16_t neighbor,
-    CsrNeighborCheckType type = CsrNeighborCheckType::Message);*/
 
   void SendNeighborCheck (
     uint16_t neighbor,
     CsrNeighborCheckType type = CsrNeighborCheckType::Message,
-    uint16_t target = CSR_BROADCAST_ID);
+    uint16_t target = CSR_BROADCAST_ID,
+    uint32_t discoverySequence = 0);
+
   const char* NeighborCheckTypeName (CsrNeighborCheckType t) const;
   void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
                                     Time period = Seconds (2.0));
@@ -1593,12 +1589,6 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
                       << " new=" << receivedSequence
                       << std::endl;
 
-            /*std::cout << "[NWK " << m_nodeId
-                      << "] Scheduling Discovery NeighborCheck response to "
-                      << helloSrc
-                      << " for sequence=" << receivedSequence
-                      << std::endl;*/
-
             if (m_discoveryResponseEnabled)
               {
                 std::cout << "[NWK " << m_nodeId
@@ -1613,7 +1603,8 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
                   this,
                   helloSrc,
                   CsrNeighborCheckType::Discovery,
-                  CSR_BROADCAST_ID);
+                  CSR_BROADCAST_ID,
+                  receivedSequence);
               }
             else
               {
@@ -1701,12 +1692,42 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
     {
     case CsrNeighborCheckType::Discovery:
       {
+        uint32_t responseSequence = hh.GetDiscoverySequence ();
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Discovery response from neighbor="
+                  << helloSrc
+                  << " responseSequence=" << responseSequence
+                  << " localDiscoverySequence=" << m_discoverySequence
+                  << std::endl;
+
+        if (!m_discoveryActive)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Ignoring Discovery response from "
+                      << helloSrc
+                      << " because discovery is not active"
+                      << std::endl;
+            break;
+          }
+
+        if (responseSequence != m_discoverySequence)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Ignoring stale/mismatched Discovery response"
+                      << " neighbor=" << helloSrc
+                      << " responseSequence=" << responseSequence
+                      << " expectedSequence=" << m_discoverySequence
+                      << std::endl;
+            break;
+          }
+
         auto neighborIt = m_nwkNeighbors.find (helloSrc);
 
         if (neighborIt == m_nwkNeighbors.end ())
           {
             std::cout << "[NWK " << m_nodeId
-                      << "] Discovery NeighborCheck from unknown neighbor="
+                      << "] Discovery response from unknown neighbor="
                       << helloSrc
                       << std::endl;
             break;
@@ -1719,13 +1740,12 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
         neighbor.stale = false;
 
         std::cout << "[NWK " << m_nodeId
-                  << "] Discovery response from neighbor="
+                  << "] Discovery response accepted neighbor="
                   << helloSrc
                   << " verified="
                   << (wasVerified ? 1 : 0)
                   << "->1"
-                  << " localDiscoverySequence="
-                  << m_discoverySequence
+                  << " sequence=" << responseSequence
                   << " reportedActiveNodes="
                   << unsigned (hh.GetActiveNodes ())
                   << std::endl;
@@ -1742,6 +1762,8 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
 
     case CsrNeighborCheckType::Verify:
       {
+        uint32_t verifySequence = hh.GetDiscoverySequence ();
+
         auto neighborIt = m_nwkNeighbors.find (helloSrc);
 
         if (neighborIt == m_nwkNeighbors.end ())
@@ -1761,6 +1783,7 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
         std::cout << "[NWK " << m_nodeId
                   << "] Verify received from neighbor="
                   << helloSrc
+                  << " discoverySequence=" << verifySequence
                   << " link confirmed"
                   << std::endl;
 
@@ -2003,7 +2026,8 @@ CsrNetLayer::VerifyUnresponsiveDiscoveryNeighbors ()
         this,
         neighborId,
         CsrNeighborCheckType::Verify,
-        CSR_BROADCAST_ID);
+        CSR_BROADCAST_ID,
+        m_discoverySequence);
 
       verifyScheduledCount++;
     }
@@ -2201,9 +2225,11 @@ CsrNetLayer::SendNeighborCheck (CsrNeighborCheckType type)
 }*/
 
 void
-CsrNetLayer::SendNeighborCheck (uint16_t neighbor,
-                                CsrNeighborCheckType type,
-                                uint16_t target)
+CsrNetLayer::SendNeighborCheck (
+  uint16_t neighbor,
+  CsrNeighborCheckType type,
+  uint16_t target,
+  uint32_t discoverySequence)
 {
   if (m_hop == nullptr)
     {
@@ -2229,10 +2255,10 @@ CsrNetLayer::SendNeighborCheck (uint16_t neighbor,
 
   hh.SetNeighborCheckType (type);
   hh.SetNeighborCheckTarget (target);
+  hh.SetDiscoverySequence (discoverySequence);
   hh.ClearAdvertisedRoutes ();
 
   p->AddHeader (hh);
-
   std::cout << "[NWK " << m_nodeId
             << "] Sending targeted ARL NeighborCheck"
             << " neighbor=" << neighbor
@@ -2241,6 +2267,12 @@ CsrNetLayer::SendNeighborCheck (uint16_t neighbor,
   if (type == CsrNeighborCheckType::NoPath)
     {
       std::cout << " unreachableDest=" << target;
+    }
+
+  if (type == CsrNeighborCheckType::Discovery ||
+      type == CsrNeighborCheckType::Verify)
+    {
+      std::cout << " discoverySequence=" << discoverySequence;
     }
 
   std::cout << std::endl;
