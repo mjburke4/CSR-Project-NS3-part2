@@ -36,6 +36,7 @@ public:
 
   void StartDiscovery (Time startDelay, Time duration);
   void SetRepeatDiscoveryHello (bool enable);
+  void SetDiscoveryResponseEnabled (bool enable);
   void SendRoutingUpdate ();
   //void SendNeighborCheck ();
   //void SendNeighborCheck (
@@ -919,6 +920,8 @@ private:
 
   bool    m_discoveryActive { false };
 
+  bool m_discoveryResponseEnabled {true};
+
   uint32_t GetNeighborCount () const;
   uint32_t GetActiveNodeCount () const;
 
@@ -990,6 +993,7 @@ private:
 
   void ScheduleDiscoveryHello ();
   void DiscoveryHelloTick ();
+  void VerifyUnresponsiveDiscoveryNeighbors ();
   // Experimental NS-3 robustness mode.
   // Legacy bare OPNET start_discovery() sends one HELLO.
   // Do not enable for strict OPNET parity tests unless modeling routing-module-driven repeats.
@@ -1184,8 +1188,8 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
     ScheduleCheckNwkQueue ();
 }
 
-  const char*
-  CsrNetLayer::ArlRouteMsgTypeName (CsrArlRouteMsgType t) const
+const char*
+CsrNetLayer::ArlRouteMsgTypeName (CsrArlRouteMsgType t) const
 {
   switch (t)
     {
@@ -1589,19 +1593,37 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
                       << " new=" << receivedSequence
                       << std::endl;
 
-            std::cout << "[NWK " << m_nodeId
+            /*std::cout << "[NWK " << m_nodeId
                       << "] Scheduling Discovery NeighborCheck response to "
                       << helloSrc
                       << " for sequence=" << receivedSequence
-                      << std::endl;
+                      << std::endl;*/
 
-            Simulator::Schedule (
-              MilliSeconds (20),
-              &CsrNetLayer::SendNeighborCheck,
-              this,
-              helloSrc,
-              CsrNeighborCheckType::Discovery,
-              CSR_BROADCAST_ID);
+            if (m_discoveryResponseEnabled)
+              {
+                std::cout << "[NWK " << m_nodeId
+                          << "] Scheduling Discovery NeighborCheck response to "
+                          << helloSrc
+                          << " for sequence=" << receivedSequence
+                          << std::endl;
+
+                Simulator::Schedule (
+                  MilliSeconds (20),
+                  &CsrNetLayer::SendNeighborCheck,
+                  this,
+                  helloSrc,
+                  CsrNeighborCheckType::Discovery,
+                  CSR_BROADCAST_ID);
+              }
+            else
+              {
+                std::cout << "[NWK " << m_nodeId
+                          << "] Suppressing Discovery response to "
+                          << helloSrc
+                          << " for sequence=" << receivedSequence
+                          << " testMode=true"
+                          << std::endl;
+              }
           }
         else
           {
@@ -1644,6 +1666,17 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
   (void) pathlossDb;
   (void) snrDb;
   (void) linkCost;
+}
+
+void
+CsrNetLayer::SetDiscoveryResponseEnabled (bool enable)
+{
+  m_discoveryResponseEnabled = enable;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] discovery_response_enabled="
+            << (enable ? "true" : "false")
+            << std::endl;
 }
 
 void
@@ -1708,11 +1741,31 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
       break;
 
     case CsrNeighborCheckType::Verify:
-      std::cout << "[NWK " << m_nodeId
-                << "] NeighborCheck Verify received from "
-                << helloSrc
-                << std::endl;
-      break;
+      {
+        auto neighborIt = m_nwkNeighbors.find (helloSrc);
+
+        if (neighborIt == m_nwkNeighbors.end ())
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Verify received from unknown neighbor="
+                      << helloSrc
+                      << std::endl;
+            break;
+          }
+
+        NwkNeighborEntry &neighbor = neighborIt->second;
+
+        neighbor.stale = false;
+        neighbor.lastHeardSec = Simulator::Now ().GetSeconds ();
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Verify received from neighbor="
+                  << helloSrc
+                  << " link confirmed"
+                  << std::endl;
+
+        break;
+      }
 
     case CsrNeighborCheckType::Overheard:
       std::cout << "[NWK " << m_nodeId
@@ -1877,27 +1930,93 @@ CsrNetLayer::DiscoveryStart ()
     }
 }
 
-  void
-  CsrNetLayer::DiscoveryStop ()
-  {
-    if (m_discoveryHelloEvent.IsPending ())
-      {
-        Simulator::Cancel (m_discoveryHelloEvent);
-      }
+void
+CsrNetLayer::DiscoveryStop ()
+{
+  if (m_discoveryHelloEvent.IsPending ())
+    {
+      Simulator::Cancel (m_discoveryHelloEvent);
+    }
 
-    m_discState = DiscoveryState::COOLDOWN;
-    m_discoveryActive = false;
+  m_discState = DiscoveryState::COOLDOWN;
+  m_discoveryActive = false;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] DiscoveryStop sequence="
+            << m_discoverySequence
+            << std::endl;
+
+  VerifyUnresponsiveDiscoveryNeighbors ();
+
+  Simulator::Schedule (
+    m_discoveryCooldown,
+    &CsrNetLayer::DiscoveryCooldownOver,
+    this);
+
+  TryDrainQueueAfterDiscovery ();
+}
+
+void
+CsrNetLayer::VerifyUnresponsiveDiscoveryNeighbors ()
+{
+  uint32_t verifiedCount = 0;
+  uint32_t verifyScheduledCount = 0;
+  uint32_t staleVerifyCount = 0;
+
+  Time verifyDelay = MilliSeconds (20);
+
+  for (auto &kv : m_nwkNeighbors)
+    {
+      NwkNeighborEntry &neighbor = kv.second;
+
+      if (neighbor.discoveryVerified)
+        {
+          verifiedCount++;
+          continue;
+        }
+
+      if (neighbor.stale)
+        {
+          staleVerifyCount++;
+
+          std::cout << "[NWK " << m_nodeId
+                    << "] Discovery completion includes stale neighbor="
+                    << neighbor.nodeId
+                    << " for Verify"
+                    << std::endl;
+        }
+
+      uint16_t neighborId = neighbor.nodeId;
+      Time thisDelay =
+        verifyDelay * static_cast<int64_t> (verifyScheduledCount + 1);
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Scheduling Verify for unresponsive neighbor="
+                << neighborId
+                << " sequence=" << m_discoverySequence
+                << " delayMs=" << thisDelay.GetMilliSeconds ()
+                << std::endl;
+
+      Simulator::Schedule (
+        thisDelay,
+        &CsrNetLayer::SendNeighborCheck,
+        this,
+        neighborId,
+        CsrNeighborCheckType::Verify,
+        CSR_BROADCAST_ID);
+
+      verifyScheduledCount++;
+    }
 
     std::cout << "[NWK " << m_nodeId
-              << "] DiscoveryStop"
+              << "] Discovery verification summary"
+              << " sequence=" << m_discoverySequence
+              << " known=" << m_nwkNeighbors.size ()
+              << " verified=" << verifiedCount
+              << " verifyScheduled=" << verifyScheduledCount
+              << " staleIncluded=" << staleVerifyCount
               << std::endl;
-
-    Simulator::Schedule (m_discoveryCooldown,
-                        &CsrNetLayer::DiscoveryCooldownOver,
-                        this);
-
-    TryDrainQueueAfterDiscovery ();
-  }
+}
 
 void
 CsrNetLayer::TryDrainQueueAfterDiscovery ()

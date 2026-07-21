@@ -280,15 +280,14 @@ main (int argc, char *argv[])
   // node 2 currently learned source 0 through node 1.
   net1->SendNoPath (2, 0);
   });
-  // OPNET-style bounded discovery window
-  /*dev0->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
-  dev1->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
-  dev2->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));*/
 
-  /*dev0->GetNwk ().StartDiscovery (Seconds (10.0), Seconds (30.0));
-  dev1->GetNwk ().StartDiscovery (Seconds (10.0), Seconds (30.0));
-  dev2->GetNwk ().StartDiscovery (Seconds (10.0), Seconds (30.0));*/
+  /*Simulator::Schedule (Seconds (37.5), [net1]() {
+    net1->SetDiscoveryResponseEnabled (false);
+  });*/
 
+  Simulator::Schedule (Seconds (38.0), [net0]() {
+    net0->StartDiscovery (Seconds (0.0), Seconds (5.0));
+  });
   // Print neighbor tables shortly after discovery ends (~40s)
   Simulator::Schedule (Seconds (40.5),
                       &CsrHopLayer::PrintNeighbors,
@@ -303,7 +302,9 @@ main (int argc, char *argv[])
                       &CsrHopLayer::PrintNeighbors,
                       hop3);
 
-
+  Simulator::Schedule (Seconds (45.0), [net1]() {
+    net1->SetDiscoveryResponseEnabled (true);
+  });
   // Traffic pattern similar to your earlier log
 
   // Burst 1 at t=1 s
