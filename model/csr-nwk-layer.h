@@ -403,6 +403,7 @@ public:
     uint16_t nwkSrc = nh.GetSrc ();
     uint16_t nwkDst = nh.GetDst ();
     uint8_t  dscp   = nh.GetDscp ();
+    UpdateReverseRoute (nwkSrc, hopSrc);
 
     if (nwkDst == m_nodeId)
       {
@@ -633,6 +634,14 @@ private:
     uint32_t advertisedCost {0};
 
     uint16_t learnedFrom {CSR_BROADCAST_ID}; // node that taught us this route
+  };
+
+  struct ReverseRouteEntry
+  {
+    uint16_t netSrc {CSR_BROADCAST_ID};
+    uint16_t reverseHop {CSR_BROADCAST_ID};
+    Time lastUpdated {Seconds (0.0)};
+    bool valid {false};
   };
 
   struct NwkQueueEntry
@@ -899,6 +908,7 @@ private:
   std::deque<NwkQueueEntry>             m_nwkQueue;
   EventId                               m_checkNwkQueueEvent;
   std::vector<RouteEntry>               m_routes;
+  std::map<uint16_t, ReverseRouteEntry> m_reverseRoutes;
   std::map<uint16_t, NwkNeighborEntry>  m_nwkNeighbors;
   std::map<std::pair<uint16_t,uint16_t>, NsdpEntry> m_nsdp;
 
@@ -961,6 +971,9 @@ private:
                            double pathlossDb,
                            double snrDb,
                            uint32_t linkCost);
+
+  void UpdateReverseRoute (uint16_t netSrc, uint16_t hopSrc);
+  bool RemoveReverseRouteFromReporter (uint16_t netSrc, uint16_t reporter);
 
   const char* ArlRouteMsgTypeName (CsrArlRouteMsgType t) const;
 
@@ -1324,6 +1337,89 @@ CsrNetLayer::ProcessRoutingUpdate (const CsrHelloHeader &hh,
 }
 
 void
+CsrNetLayer::UpdateReverseRoute (uint16_t netSrc, uint16_t hopSrc)
+{
+  if (netSrc == m_nodeId ||
+      netSrc == CSR_BROADCAST_ID ||
+      hopSrc == CSR_BROADCAST_ID)
+    {
+      return;
+    }
+
+  // Legacy ARL only accepts a reverse path through a known neighbor.
+  auto nit = m_nwkNeighbors.find (hopSrc);
+  if (nit == m_nwkNeighbors.end ())
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring reverse path for netSrc=" << netSrc
+                << " via unknown hop=" << hopSrc
+                << std::endl;
+      return;
+    }
+
+  ReverseRouteEntry &rr = m_reverseRoutes[netSrc];
+  bool wasValid = rr.valid;
+  uint16_t oldHop = rr.reverseHop;
+
+  rr.netSrc = netSrc;
+  rr.reverseHop = hopSrc;
+  rr.lastUpdated = Simulator::Now ();
+  rr.valid = true;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] " << (wasValid ? "Updated" : "Added")
+            << " reverse path netSrc=" << netSrc
+            << " reverseHop=" << hopSrc;
+
+  if (wasValid && oldHop != hopSrc)
+    {
+      std::cout << " oldReverseHop=" << oldHop;
+    }
+
+  std::cout << std::endl;
+}
+
+bool
+CsrNetLayer::RemoveReverseRouteFromReporter (uint16_t netSrc,
+                                uint16_t reporter)
+{
+  auto it = m_reverseRoutes.find (netSrc);
+
+  if (it == m_reverseRoutes.end () || !it->second.valid)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] NoPath found no valid reverse path for netSrc="
+                << netSrc
+                << std::endl;
+      return false;
+    }
+
+  ReverseRouteEntry &rr = it->second;
+
+  if (rr.reverseHop != reporter)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] NoPath reporter=" << reporter
+                << " does not match reverseHop=" << rr.reverseHop
+                << " for netSrc=" << netSrc
+                << "; treating NoPath as stale or informational"
+                << std::endl;
+      return false;
+    }
+
+  rr.valid = false;
+  rr.lastUpdated = Simulator::Now ();
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Removed reverse path netSrc=" << netSrc
+            << " reverseHop=" << reporter
+            << " reason=NoPath"
+            << std::endl;
+
+  return true;
+}
+
+void
 CsrNetLayer::StartNeighborFreshnessMonitor (Time timeout, Time period)
 {
   m_neighborFreshnessTimeout = timeout;
@@ -1574,6 +1670,11 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
             break;
           }
 
+        // ----------------------------------------------------------
+        // Forward-route check:
+        // Is the NoPath reporter currently our next hop to this
+        // destination?
+        // ----------------------------------------------------------
         bool matchingForwardRoute = false;
 
         for (const auto &re : m_routes)
@@ -1599,9 +1700,26 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
           {
             std::cout << "[NWK " << m_nodeId
                       << "] NoPath from " << helloSrc
-                      << " does not match current route for dst="
+                      << " does not match current forward route for dst="
                       << unreachableDest
                       << "; treating report as stale or informational"
+                      << std::endl;
+          }
+
+        // ----------------------------------------------------------
+        // Reverse-route check:
+        // Remove the reverse path only when the NoPath reporter
+        // matches the neighbor through which that source was learned.
+        // ----------------------------------------------------------
+        bool reverseRemoved =
+          RemoveReverseRouteFromReporter (unreachableDest, helloSrc);
+
+        if (!reverseRemoved)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] No matching reverse path removed for dst="
+                      << unreachableDest
+                      << " reporter=" << helloSrc
                       << std::endl;
           }
 
@@ -1760,43 +1878,6 @@ CsrNetLayer::SendHelloBroadcast (
   hh.SetArlRouteMsgType (type);
 
   hh.SetNeighborCheckType (checkType);
-
-  /*for (const auto &re : m_routes)
-    {
-      if (!ShouldAdvertiseRoute (re))
-        {
-          continue;
-        }
-
-      int16_t plX10 = 0;
-      if (!std::isnan (re.pathlossDb))
-        {
-          plX10 = static_cast<int16_t> (std::round (re.pathlossDb * 10.0));
-         }
-
-      if (hh.AddAdvertisedRoute (re.nwkDst,
-                                  re.numHop,
-                                  re.cost,
-                                  plX10,
-                                  re.capability))
-        {
-          added++;
-
-          std::cout << "[NWK " << m_nodeId
-                      << "] HELLO add route adv dst=" << re.nwkDst
-                      << " hops=" << unsigned (re.numHop)
-                      << " cost=" << re.cost
-                      << " linkCost=" << re.linkCostToNextHop
-                      << " advCost=" << re.advertisedCost
-                      << " learnedFrom=" << re.learnedFrom
-                      << std::endl;
-        }
-
-      if (added >= 8)
-        {
-           break;
-        }
-    }*/
 
   uint8_t added = 0;
 

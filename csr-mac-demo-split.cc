@@ -274,6 +274,12 @@ main (int argc, char *argv[])
   Simulator::Schedule (Seconds (12.0), [net2]() {
   net2->SendNoPath (1, 3);
   });
+
+  Simulator::Schedule (Seconds (14.0), [net1]() {
+  // Synthetic reverse-path removal test:
+  // node 2 currently learned source 0 through node 1.
+  net1->SendNoPath (2, 0);
+  });
   // OPNET-style bounded discovery window
   /*dev0->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
   dev1->GetMac ().StartDiscovery (Seconds (10.0), Seconds (30.0));
