@@ -281,6 +281,11 @@ main (int argc, char *argv[])
   net1->SendNoPath (2, 0);
   });
 
+  Simulator::Schedule (Seconds (6.0), [net0]() {
+  // Node 1 is fresh at node 0, so it should appear in the Chirp.
+  net0->SendDiscoveryChirp ();
+  });
+
  /* Simulator::Schedule (Seconds (37.5), [net1]() {
     net1->SetDiscoveryResponseEnabled (false);
   });
@@ -322,6 +327,17 @@ main (int argc, char *argv[])
   Simulator::Schedule (Seconds (45.0), [net1]() {
     net1->SetDiscoveryResponseEnabled (true);
   });*/
+
+  Simulator::Schedule (Seconds (29.0), [net0]() {
+    // Refresh node 1's view of node 0 without refreshing
+    // node 0's stale view of node 1.
+    net0->SendRoutingUpdate ();
+  });
+
+  Simulator::Schedule (Seconds (31.0), [net0]() {
+    // Node 1 should now be omitted from node 0's active-neighbor list.
+    net0->SendDiscoveryChirp ();
+  });
 
   // Sequence-aware discovery verification regression test.
   Simulator::Schedule (Seconds (37.5), [net1]() {

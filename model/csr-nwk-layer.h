@@ -39,6 +39,8 @@ public:
   void SetDiscoveryResponseEnabled (bool enable);
   void SendRoutingUpdate ();
 
+  void SendDiscoveryChirp ();
+
   void SendNeighborCheck (
     uint16_t neighbor,
     CsrNeighborCheckType type = CsrNeighborCheckType::Message,
@@ -112,10 +114,11 @@ public:
     auto it = m_nwkNeighbors.find (neighbor);
 
     if (type == CsrNeighborCheckType::Verify &&
-        discoverySequence != m_discoverySequence)
+      discoverySequence != 0 &&
+      discoverySequence != m_discoverySequence)
       {
         std::cout << "[NWK " << m_nodeId
-                  << "] Ignoring stale Verify completion"
+                  << "] Ignoring stale discovery Verify completion"
                   << " neighbor=" << neighbor
                   << " completedSequence="
                   << discoverySequence
@@ -683,6 +686,7 @@ private:
     uint8_t speedKey {0};
     int16_t rxPowerDbmX10 {0};
     uint8_t activeNodes {0};
+    bool wasActiveBeforeLastHello {false};
 
     // OPNET BrT_Neighbor_Entry::num_failures
     uint32_t numFailures {0};
@@ -1110,6 +1114,9 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   auto &ne = m_nwkNeighbors[src];
   bool isNew = (ne.lastHeardSec < 0.0);
   bool wasStale = ne.stale;
+
+  ne.wasActiveBeforeLastHello =
+    !isNew && !wasStale;
 
   ne.nodeId = src;
   ne.lastHeardSec = now;
@@ -1654,12 +1661,61 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
       }
 
     case CsrDiscoverType::Chirp:
-      std::cout << "[NWK " << m_nodeId
-                << "] Discover Chirp received from "
-                << helloSrc
-                << "; active-neighbor list handling is next"
-                << std::endl;
-      break;
+      {
+        bool selfListed = false;
+
+        for (uint8_t index = 0;
+            index < hh.GetChirpNeighborCount ();
+            ++index)
+          {
+            if (hh.GetChirpNeighbor (index) == m_nodeId)
+              {
+                selfListed = true;
+                break;
+              }
+          }
+
+        auto neighborIt = m_nwkNeighbors.find (helloSrc);
+
+        bool senderWasActive =
+          neighborIt != m_nwkNeighbors.end () &&
+          neighborIt->second.wasActiveBeforeLastHello;
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Discover Chirp from " << helloSrc
+                  << " listedNeighbors="
+                  << unsigned (hh.GetChirpNeighborCount ())
+                  << " selfListed=" << (selfListed ? 1 : 0)
+                  << " senderWasActive="
+                  << (senderWasActive ? 1 : 0)
+                  << std::endl;
+
+        if (!selfListed && senderWasActive)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Chirp from " << helloSrc
+                      << " omitted local node; scheduling Verify"
+                      << std::endl;
+
+            Simulator::Schedule (
+              MilliSeconds (20),
+              &CsrNetLayer::SendNeighborCheck,
+              this,
+              helloSrc,
+              CsrNeighborCheckType::Verify,
+              CSR_BROADCAST_ID,
+              0);
+          }
+        else if (!selfListed)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Chirp omitted local node, but sender was not"
+                      << " previously considered active; no Verify"
+                      << std::endl;
+          }
+
+        break;
+      }
 
     case CsrDiscoverType::None:
     default:
@@ -2113,6 +2169,20 @@ CsrNetLayer::DiscoveryHelloTick ()
 }
 
 void
+CsrNetLayer::SendDiscoveryChirp ()
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending ARL Discover Chirp"
+            << std::endl;
+
+  SendHelloBroadcast (
+    CsrArlRouteMsgType::Discover,
+    CsrNeighborCheckType::None,
+    CsrDiscoverType::Chirp,
+    0);
+}
+
+void
 CsrNetLayer::SendHelloBroadcast (
   CsrArlRouteMsgType type,
   CsrNeighborCheckType checkType,
@@ -2148,6 +2218,36 @@ CsrNetLayer::SendHelloBroadcast (
   hh.SetNeighborCheckType (checkType);
   hh.SetDiscoverType (discoverType);
   hh.SetDiscoverySequence (discoverySequence);
+
+  hh.ClearChirpNeighbors ();
+
+  if (type == CsrArlRouteMsgType::Discover &&
+      discoverType == CsrDiscoverType::Chirp)
+    {
+      for (const auto &kv : m_nwkNeighbors)
+        {
+          const NwkNeighborEntry &neighbor = kv.second;
+
+          // "Fresh" is the current NS-3 proxy for legacy NEIGHBOR_ACTIVE.
+          if (neighbor.lastHeardSec < 0.0 || neighbor.stale)
+            {
+              continue;
+            }
+
+          if (hh.AddChirpNeighbor (neighbor.nodeId))
+            {
+              std::cout << "[NWK " << m_nodeId
+                        << "] Chirp includes active neighbor="
+                        << neighbor.nodeId
+                        << std::endl;
+            }
+        }
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Chirp activeNeighborCount="
+                << unsigned (hh.GetChirpNeighborCount ())
+                << std::endl;
+    }
 
   uint8_t added = 0;
 

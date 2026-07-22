@@ -76,6 +76,11 @@ public:
   void SetNeighborCheckTarget (uint16_t target);
   uint16_t GetNeighborCheckTarget () const;
 
+  void ClearChirpNeighbors ();
+  bool AddChirpNeighbor (uint16_t nodeId);
+  uint8_t GetChirpNeighborCount () const;
+  uint16_t GetChirpNeighbor (uint8_t index) const;
+
   struct AdvertisedRoute
   {
     uint16_t dst {0xFFFF};
@@ -104,6 +109,9 @@ private:
   uint8_t  m_arlRouteMsgType {static_cast<uint8_t> (CsrArlRouteMsgType::None)};
   static constexpr uint8_t MAX_ADVERTISED_ROUTES = 8;
   std::vector<AdvertisedRoute> m_advertisedRoutes;
+
+  static constexpr uint16_t MAX_CHIRP_NEIGHBORS = 255;
+  std::vector<uint16_t> m_chirpNeighbors;
 
   uint8_t m_neighborCheckType {
   static_cast<uint8_t> (CsrNeighborCheckType::None)

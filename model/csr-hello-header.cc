@@ -112,6 +112,8 @@ namespace ns3 {
             + 2  // neighborCheckTarget
             + 1  // discoverType
             + 4  // discoverySequence
+            + 1  // chirpNeighborCount
+            + static_cast<uint32_t> (m_chirpNeighbors.size ()) * 2
             + 1  // routeCount
             + static_cast<uint32_t> (m_advertisedRoutes.size ())
                 * (2 + 1 + 4 + 2 + 1);
@@ -130,6 +132,17 @@ namespace ns3 {
     i.WriteHtonU16 (m_neighborCheckTarget);
     i.WriteU8 (m_discoverType);
     i.WriteHtonU32 (m_discoverySequence);
+
+    uint8_t chirpCount = static_cast<uint8_t> (
+    std::min<size_t> (m_chirpNeighbors.size (),
+                    MAX_CHIRP_NEIGHBORS));
+
+    i.WriteU8 (chirpCount);
+
+    for (uint8_t index = 0; index < chirpCount; ++index)
+      {
+        i.WriteHtonU16 (m_chirpNeighbors[index]);
+      }
 
     uint8_t count = static_cast<uint8_t> (
         std::min<size_t> (m_advertisedRoutes.size (), MAX_ADVERTISED_ROUTES));
@@ -162,6 +175,15 @@ namespace ns3 {
 
     m_discoverType = i.ReadU8 ();
     m_discoverySequence = i.ReadNtohU32 ();
+
+    m_chirpNeighbors.clear ();
+
+    uint8_t chirpCount = i.ReadU8 ();
+
+    for (uint8_t index = 0; index < chirpCount; ++index)
+      {
+        m_chirpNeighbors.push_back (i.ReadNtohU16 ());
+      }
 
     m_advertisedRoutes.clear ();
 
@@ -199,6 +221,7 @@ namespace ns3 {
       << " neighborCheckTarget=" << m_neighborCheckTarget
       << " discoverType=" << unsigned (m_discoverType)
       << " discoverySequence=" << m_discoverySequence
+      << " chirpNeighbors=" << unsigned (GetChirpNeighborCount ())
       << " advRoutes=" << unsigned (GetAdvertisedRouteCount ());
   }
 
@@ -251,6 +274,49 @@ namespace ns3 {
       }
 
     return m_advertisedRoutes[index];
+  }
+
+  void
+  CsrHelloHeader::ClearChirpNeighbors ()
+  {
+    m_chirpNeighbors.clear ();
+  }
+
+  bool
+  CsrHelloHeader::AddChirpNeighbor (uint16_t nodeId)
+  {
+    if (nodeId == 0xFFFF ||
+        m_chirpNeighbors.size () >= MAX_CHIRP_NEIGHBORS)
+      {
+        return false;
+      }
+
+    if (std::find (m_chirpNeighbors.begin (),
+                  m_chirpNeighbors.end (),
+                  nodeId) != m_chirpNeighbors.end ())
+      {
+        return false;
+      }
+
+    m_chirpNeighbors.push_back (nodeId);
+    return true;
+  }
+
+  uint8_t
+  CsrHelloHeader::GetChirpNeighborCount () const
+  {
+    return static_cast<uint8_t> (m_chirpNeighbors.size ());
+  }
+
+  uint16_t
+  CsrHelloHeader::GetChirpNeighbor (uint8_t index) const
+  {
+    if (index >= m_chirpNeighbors.size ())
+      {
+        return 0xFFFF;
+      }
+
+    return m_chirpNeighbors[index];
   }
 
 } // namespace ns3
