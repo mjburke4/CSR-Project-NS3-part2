@@ -281,7 +281,7 @@ main (int argc, char *argv[])
   net1->SendNoPath (2, 0);
   });
 
-  Simulator::Schedule (Seconds (37.5), [net1]() {
+ /* Simulator::Schedule (Seconds (37.5), [net1]() {
     net1->SetDiscoveryResponseEnabled (false);
   });
 
@@ -318,9 +318,32 @@ main (int argc, char *argv[])
       CSR_BROADCAST_ID,
       1);  // deliberately stale
   });
+
+  Simulator::Schedule (Seconds (45.0), [net1]() {
+    net1->SetDiscoveryResponseEnabled (true);
+  });*/
+
+  // Sequence-aware discovery verification regression test.
+  Simulator::Schedule (Seconds (37.5), [net1]() {
+    net1->SetDiscoveryResponseEnabled (false);
+  });
+
+  Simulator::Schedule (Seconds (38.0), [net0]() {
+    net0->StartDiscovery (Seconds (0.0), Seconds (5.0));
+  });
+
+  Simulator::Schedule (Seconds (42.5), [net0]() {
+    net0->SendNeighborCheck (
+      1,
+      CsrNeighborCheckType::Verify,
+      CSR_BROADCAST_ID,
+      1);  // stale response from the previous cycle
+  });
+
   Simulator::Schedule (Seconds (45.0), [net1]() {
     net1->SetDiscoveryResponseEnabled (true);
   });
+
   // Traffic pattern similar to your earlier log
 
   // Burst 1 at t=1 s
