@@ -1488,6 +1488,8 @@ CsrNetLayer::CheckNeighborFreshness ()
 {
   double now = Simulator::Now ().GetSeconds ();
   double timeoutSec = m_neighborFreshnessTimeout.GetSeconds ();
+  bool chirpNeeded = false;
+  uint32_t newlyStaleCount = 0;
 
   for (auto &kv : m_nwkNeighbors)
     {
@@ -1503,6 +1505,9 @@ CsrNetLayer::CheckNeighborFreshness ()
       if (!ne.stale && ageSec > timeoutSec)
         {
           ne.stale = true;
+
+          chirpNeeded = true;
+          newlyStaleCount++;
 
           std::cout << "[NWK " << m_nodeId
                     << "] Neighbor stale nextHop=" << ne.nodeId
@@ -1524,6 +1529,18 @@ CsrNetLayer::CheckNeighborFreshness ()
                         << std::endl;
             }
         }
+    }
+  if (chirpNeeded)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Neighbor transitions to stale="
+                << newlyStaleCount
+                << "; scheduling automatic Discover Chirp"
+                << std::endl;
+
+      Simulator::ScheduleNow (
+        &CsrNetLayer::SendDiscoveryChirp,
+        this);
     }
 
   m_neighborFreshnessEvent =

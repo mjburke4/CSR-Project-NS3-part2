@@ -328,7 +328,7 @@ main (int argc, char *argv[])
     net1->SetDiscoveryResponseEnabled (true);
   });*/
 
-  Simulator::Schedule (Seconds (29.0), [net0]() {
+  /*Simulator::Schedule (Seconds (29.0), [net0]() {
     // Refresh node 1's view of node 0 without refreshing
     // node 0's stale view of node 1.
     net0->SendRoutingUpdate ();
@@ -337,8 +337,14 @@ main (int argc, char *argv[])
   Simulator::Schedule (Seconds (31.0), [net0]() {
     // Node 1 should now be omitted from node 0's active-neighbor list.
     net0->SendDiscoveryChirp ();
-  });
+  });*/
 
+  Simulator::Schedule (Seconds (18.0), [net0]() {
+    // Keep node 0 fresh in node 1's table without refreshing
+    // node 1 in node 0's table. When node 1 later becomes stale
+    // at node 0, the automatic Chirp should omit node 1.
+    net0->SendRoutingUpdate ();
+  });
   // Sequence-aware discovery verification regression test.
   Simulator::Schedule (Seconds (37.5), [net1]() {
     net1->SetDiscoveryResponseEnabled (false);
