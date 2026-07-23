@@ -259,8 +259,21 @@ main (int argc, char *argv[])
   // 4) Node 1 advertises route to 3.
   // 5) Node 0 learns route to 3 via 1 and drains queue.
 
- // net2->StartDiscovery (Seconds (1.4), Seconds (5.0));
- // net1->StartDiscovery (Seconds (2.8), Seconds (5.0));
+  // Use a short delay/window for the regression test.
+  // Production defaults remain the legacy 10 s / 30 s.
+  net0->ScheduleGatewayStartupDiscovery (
+    Seconds (0.25),
+    Seconds (5.0));
+
+  // Confirm that non-Gateway roles cannot schedule automatic
+  // startup discovery.
+  net1->ScheduleGatewayStartupDiscovery (
+    Seconds (0.25),
+    Seconds (5.0));
+
+  net3->ScheduleGatewayStartupDiscovery (
+    Seconds (0.25),
+    Seconds (5.0));
 
   Simulator::Schedule (Seconds (1.4), [net2]() {
   net2->SendRoutingUpdate ();

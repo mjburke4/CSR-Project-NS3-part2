@@ -35,6 +35,9 @@ public:
   }
 
   void StartDiscovery (Time startDelay, Time duration);
+  void ScheduleGatewayStartupDiscovery (
+    Time delay = Seconds (10.0),
+    Time duration = Seconds (30.0));
   void SetRepeatDiscoveryHello (bool enable);
   void SetDiscoveryResponseEnabled (bool enable);
   void SendRoutingUpdate ();
@@ -951,6 +954,17 @@ public:
   {
     m_nodeType = type;
 
+    if (m_nodeType != CsrNodeType::Gateway &&
+        m_gatewayStartupDiscoveryEvent.IsPending ())
+      {
+        Simulator::Cancel (m_gatewayStartupDiscoveryEvent);
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Canceled pending Gateway startup discovery"
+                  << " after role change"
+                  << std::endl;
+      }
+
     std::cout << "[NWK " << m_nodeId
               << "] nodeType=" << NodeTypeName (m_nodeType)
               << std::endl;
@@ -1088,6 +1102,10 @@ private:
   bool m_transitForwardingEnabled {true};
 
   uint16_t m_gatewayNodeId {CSR_BROADCAST_ID};
+  EventId m_gatewayStartupDiscoveryEvent;
+  Time m_gatewayStartupDiscoveryDuration {Seconds (30.0)};
+
+  void GatewayStartupDiscoveryFire ();
 
   const char*
   NodeTypeName (CsrNodeType type) const
@@ -1155,6 +1173,75 @@ CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 
     m_discoveryStopEvent =
       Simulator::Schedule (startDelay + duration, &CsrNetLayer::DiscoveryStop, this);
+}
+
+void
+CsrNetLayer::ScheduleGatewayStartupDiscovery (
+  Time delay,
+  Time duration)
+{
+  if (m_nodeType != CsrNodeType::Gateway)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Gateway startup discovery not scheduled"
+                << " role=" << NodeTypeName (m_nodeType)
+                << std::endl;
+      return;
+    }
+
+  if (m_gatewayStartupDiscoveryEvent.IsPending ())
+    {
+      Simulator::Cancel (m_gatewayStartupDiscoveryEvent);
+    }
+
+  m_gatewayStartupDiscoveryDuration = duration;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Scheduling Gateway startup discovery"
+            << " delay=" << delay.GetSeconds ()
+            << "s duration=" << duration.GetSeconds ()
+            << "s"
+            << std::endl;
+
+  m_gatewayStartupDiscoveryEvent =
+    Simulator::Schedule (
+      delay,
+      &CsrNetLayer::GatewayStartupDiscoveryFire,
+      this);
+}
+
+void
+CsrNetLayer::GatewayStartupDiscoveryFire ()
+{
+  if (m_nodeType != CsrNodeType::Gateway)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Gateway startup discovery canceled"
+                << " because current role="
+                << NodeTypeName (m_nodeType)
+                << std::endl;
+      return;
+    }
+
+  if (m_discState != DiscoveryState::IDLE)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Gateway startup discovery skipped"
+                << " because discovery state is not IDLE"
+                << std::endl;
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Gateway startup discovery firing"
+            << " duration="
+            << m_gatewayStartupDiscoveryDuration.GetSeconds ()
+            << "s"
+            << std::endl;
+
+  StartDiscovery (
+    Seconds (0.0),
+    m_gatewayStartupDiscoveryDuration);
 }
 
 void
