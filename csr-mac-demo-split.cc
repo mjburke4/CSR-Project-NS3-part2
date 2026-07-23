@@ -238,6 +238,11 @@ main (int argc, char *argv[])
   net2->SetInvalidateRoutesOnStaleNeighbor (true);
   net3->SetInvalidateRoutesOnStaleNeighbor (true);
 
+  net0->SetNodeType (CsrNodeType::Gateway);
+  net1->SetNodeType (CsrNodeType::Routable);
+  net2->SetNodeType (CsrNodeType::Routable);
+  net3->ConfigureAsLeaf ();
+
   // Discovery assist for direct 0->1 no-route test.
   // Node 0 will trigger on-demand discovery at t=1.
   // Node 1 sends HELLO shortly after so node 0 can learn route dst=1 -> nextHop=1.
@@ -271,6 +276,10 @@ main (int argc, char *argv[])
     CsrNeighborCheckType::Message);
   });
 
+  Simulator::Schedule (Seconds (10.0), [net3]() {
+  net3->SendRoutingUpdate ();
+  });
+
   Simulator::Schedule (Seconds (12.0), [net2]() {
   net2->SendNoPath (1, 3);
   });
@@ -279,6 +288,17 @@ main (int argc, char *argv[])
   // Synthetic reverse-path removal test:
   // node 2 currently learned source 0 through node 1.
   net1->SendNoPath (2, 0);
+  });
+
+  Simulator::Schedule (Seconds (16.0), [hop2]() {
+  Ptr<Packet> payload = Create<Packet> (40);
+
+  // This packet reaches node 3 at HOP, but its network
+  // destination is node 0. Node 3 is configured as a leaf.
+  CsrNetHeader nh (2, 0, 5);
+  payload->AddHeader (nh);
+
+  hop2->SendData (3, 5, payload, true);
   });
 
   Simulator::Schedule (Seconds (6.0), [net0]() {

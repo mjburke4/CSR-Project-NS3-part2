@@ -31,6 +31,13 @@ enum class CsrDiscoverType : uint8_t
   None      = 0xFF
 };
 
+enum class CsrNodeType : uint8_t
+{
+  Ordinary = 0,  // NodeTypeORDINARY
+  Routable = 1,  // NodeTypeROUTABLE
+  Gateway  = 2   // NodeTypeGATEWAY
+};
+
 class CsrHelloHeader : public Header
 {
 public:
@@ -81,6 +88,9 @@ public:
   uint8_t GetChirpNeighborCount () const;
   uint16_t GetChirpNeighbor (uint8_t index) const;
 
+  void SetNodeType (CsrNodeType type);
+  CsrNodeType GetNodeType () const;
+
   struct AdvertisedRoute
   {
     uint16_t dst {0xFFFF};
@@ -124,6 +134,10 @@ private:
   uint32_t m_discoverySequence {0};
 
   uint16_t m_neighborCheckTarget {0xFFFF};
+
+  uint8_t m_nodeType {
+  static_cast<uint8_t> (CsrNodeType::Ordinary)
+  };
 };
 
 } // namespace ns3

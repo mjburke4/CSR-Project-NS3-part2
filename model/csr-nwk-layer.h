@@ -441,6 +441,20 @@ public:
       }
     else
       {
+
+        if (!m_transitForwardingEnabled)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Refusing transit packet"
+                      << " role=" << NodeTypeName (m_nodeType)
+                      << " nwkSrc=" << nwkSrc
+                      << " nwkDst=" << nwkDst
+                      << " arrivedVia=" << hopSrc
+                      << std::endl;
+
+            SendNoPath (hopSrc, nwkDst);
+            return;
+          }
         // Not for us: enqueue as a relay and bump NSDP,
         // similar to br_nwk.proc_hop_pk() for br_Network. 
 
@@ -696,6 +710,8 @@ private:
     uint32_t discoverySequence {0};
 
     bool discoveryVerified {false};
+
+    CsrNodeType nodeType {CsrNodeType::Ordinary};
   };
 
   // NSDP: Network Source–Destination Pair entry
@@ -930,6 +946,37 @@ private:
     return std::max<uint32_t> (1, cost);
   }
 
+public:
+  void SetNodeType (CsrNodeType type)
+  {
+    m_nodeType = type;
+
+    std::cout << "[NWK " << m_nodeId
+              << "] nodeType=" << NodeTypeName (m_nodeType)
+              << std::endl;
+  }
+
+  CsrNodeType GetNodeType () const
+  {
+    return m_nodeType;
+  }
+
+  void SetTransitForwardingEnabled (bool enable)
+  {
+    m_transitForwardingEnabled = enable;
+
+    std::cout << "[NWK " << m_nodeId
+              << "] transitForwarding="
+              << (enable ? "enabled" : "disabled")
+              << std::endl;
+  }
+
+  void ConfigureAsLeaf ()
+  {
+    SetNodeType (CsrNodeType::Ordinary);
+    SetTransitForwardingEnabled (false);
+  }
+
 private:
   uint16_t                              m_nodeId;
   Ptr<CsrHopLayer>                      m_hop;
@@ -1033,6 +1080,33 @@ private:
 
   uint16_t m_neighborCheckSeq {0};
   uint32_t m_discoverySequence {0};
+
+  CsrNodeType m_nodeType {CsrNodeType::Routable};
+
+  // Independent from legacy capability. This provides a guaranteed
+  // non-relaying node for UAV/mobile-leaf experiments.
+  bool m_transitForwardingEnabled {true};
+
+  uint16_t m_gatewayNodeId {CSR_BROADCAST_ID};
+
+  const char*
+  NodeTypeName (CsrNodeType type) const
+  {
+    switch (type)
+      {
+      case CsrNodeType::Ordinary:
+        return "Ordinary";
+
+      case CsrNodeType::Routable:
+        return "Routable";
+
+      case CsrNodeType::Gateway:
+        return "Gateway";
+
+      default:
+        return "Unknown";
+      }
+  }
 };
 
 
@@ -1089,21 +1163,35 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
                             double pathlossDb,
                             double snrDb)
 {
-    CsrHelloHeader hh;
-    if (!helloPayload->RemoveHeader (hh))
-      {
-        std::cout << "[NWK " << m_nodeId
+  CsrHelloHeader hh;
+  if (!helloPayload->RemoveHeader (hh))
+    {
+      std::cout << "[NWK " << m_nodeId
                   << "] RX HELLO from hopSrc=" << hopSrc
                   << " but missing CsrHelloHeader"
                   << std::endl;
-        return;
-      }
+      return;
+    }
 
-    uint16_t src = hh.GetNodeId ();
+  uint16_t src = hh.GetNodeId ();
 
   if (src == m_nodeId)
     {
         return;
+    }
+
+  CsrNodeType senderType = hh.GetNodeType ();
+
+  if (senderType == CsrNodeType::Gateway)
+    {
+      if (m_gatewayNodeId != src)
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Gateway learned node=" << src
+                    << std::endl;
+        }
+
+      m_gatewayNodeId = src;
     }
 
   double now = Simulator::Now ().GetSeconds ();
@@ -1114,6 +1202,7 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   auto &ne = m_nwkNeighbors[src];
   bool isNew = (ne.lastHeardSec < 0.0);
   bool wasStale = ne.stale;
+  ne.nodeType = senderType;
 
   ne.wasActiveBeforeLastHello =
     !isNew && !wasStale;
@@ -1300,6 +1389,19 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
                                     uint32_t linkCost)
 {
     uint8_t advCount = hh.GetAdvertisedRouteCount ();
+
+    auto neighborIt = m_nwkNeighbors.find (helloSrc);
+
+    if (neighborIt != m_nwkNeighbors.end () &&
+        neighborIt->second.nodeType == CsrNodeType::Ordinary)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Ignoring transit route advertisements from "
+                  << "Ordinary neighbor=" << helloSrc
+                  << std::endl;
+
+        return;
+      }
 
     if (advCount == 0)
       {
@@ -2216,6 +2318,8 @@ CsrNetLayer::SendHelloBroadcast (
   hh.SetNodeId (m_nodeId);
   hh.SetHelloSeq (++helloSeq);
 
+  hh.SetNodeType (m_nodeType);
+
     // Keep it simple: speedKey is what you actually use in CSR headers anyway
   hh.SetSpeedKey (m_minSpeedKey);   // define m_minSpeedKey or hardcode 8 temporarily
 
@@ -2351,19 +2455,15 @@ CsrNetLayer::SendRoutingUpdate ()
             << "] Sending ARL RoutingUpdate"
             << std::endl;
 
+  if (m_nodeType == CsrNodeType::Ordinary)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ordinary node sends no transit route advertisements"
+                << std::endl;
+    }
+
   SendHelloBroadcast (CsrArlRouteMsgType::RoutingUpdate);
 }
-
-/*void
-CsrNetLayer::SendNeighborCheck (CsrNeighborCheckType type)
-{
-  std::cout << "[NWK " << m_nodeId
-            << "] Sending ARL NeighborCheck subtype="
-            << unsigned (static_cast<uint8_t> (type))
-            << std::endl;
-
-  SendHelloBroadcast (CsrArlRouteMsgType::NeighborCheck, type);
-}*/
 
 void
 CsrNetLayer::SendNeighborCheck (
@@ -2383,6 +2483,8 @@ CsrNetLayer::SendNeighborCheck (
   hh.SetNodeId (m_nodeId);
   hh.SetHelloSeq (++m_neighborCheckSeq);
   hh.SetSpeedKey (m_minSpeedKey);
+
+  hh.SetNodeType (m_nodeType);
 
   double s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
   hh.SetRxPowerDbmX10 (
@@ -2439,6 +2541,10 @@ CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
 {
   static constexpr uint8_t MAX_ADVERTISED_HOPS = 8;
 
+  if (m_nodeType == CsrNodeType::Ordinary)
+    {
+      return false;
+    }
   if (!re.valid)
     {
       return false;

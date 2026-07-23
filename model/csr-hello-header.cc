@@ -78,6 +78,18 @@ namespace ns3 {
     return m_discoverySequence;
   }
 
+  void
+  CsrHelloHeader::SetNodeType (CsrNodeType type)
+  {
+    m_nodeType = static_cast<uint8_t> (type);
+  }
+
+  CsrNodeType
+  CsrHelloHeader::GetNodeType () const
+  {
+    return static_cast<CsrNodeType> (m_nodeType);
+  }
+
   CsrArlRouteMsgType
   CsrHelloHeader::GetArlRouteMsgType () const
   {
@@ -107,6 +119,7 @@ namespace ns3 {
             + 1  // speedKey
             + 2  // rxPowerDbmX10
             + 1  // activeNodes
+            + 1   //Node Type
             + 1  // arlRouteMsgType
             + 1  // neighborCheckType
             + 2  // neighborCheckTarget
@@ -127,6 +140,7 @@ namespace ns3 {
     i.WriteU8 (m_speedKey);
     i.WriteHtonU16 (static_cast<uint16_t> (m_rxPowerDbmX10));
     i.WriteU8 (m_activeNodes);
+    i.WriteU8 (m_nodeType);
     i.WriteU8 (m_arlRouteMsgType);
     i.WriteU8 (m_neighborCheckType);
     i.WriteHtonU16 (m_neighborCheckTarget);
@@ -169,6 +183,7 @@ namespace ns3 {
     m_speedKey = i.ReadU8 ();
     m_rxPowerDbmX10 = static_cast<int16_t> (i.ReadNtohU16 ());
     m_activeNodes = i.ReadU8 ();
+    m_nodeType = i.ReadU8 ();
     m_arlRouteMsgType = i.ReadU8 ();
     m_neighborCheckType = i.ReadU8 ();
     m_neighborCheckTarget = i.ReadNtohU16 ();
@@ -216,6 +231,7 @@ namespace ns3 {
       << " speedKey=" << unsigned (m_speedKey)
       << " rxPwr(dBm*10)=" << m_rxPowerDbmX10
       << " activeNodes=" << unsigned (m_activeNodes)
+      << " nodeType=" << unsigned (m_nodeType)
       << " arlType=" << unsigned (m_arlRouteMsgType)
       << " neighborCheckType=" << unsigned (m_neighborCheckType)
       << " neighborCheckTarget=" << m_neighborCheckTarget
