@@ -170,7 +170,7 @@ main (int argc, char *argv[])
   net0->SetHop (hop0);
   net1->SetHop (hop1);
   net2->SetHop (hop2);
-
+  net3->SetHop (hop3);
 
  // ------------------------------------------------------------
   // Static seed routes for 4-node propagation test:
