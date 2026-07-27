@@ -46,12 +46,13 @@ OpenNsdpCsv (const std::string& path)
 
 enum CsrPktType : uint8_t
 {
-  CSR_PKT_DATA    = 0,
-  CSR_PKT_ACK     = 1,
-  CSR_PKT_DACK    = 2,
-  CSR_PKT_HELLO   = 3,
-  CSR_PKT_DISCOVER= 4,
-  CSR_PKT_NEIGHBOR_CHECK = 5
+  CSR_PKT_DATA            = 0,
+  CSR_PKT_ACK             = 1,
+  CSR_PKT_DACK            = 2,
+  CSR_PKT_HELLO           = 3,
+  CSR_PKT_DISCOVER        = 4,
+  CSR_PKT_NEIGHBOR_CHECK  = 5,
+  CSR_PKT_ROUTING_CONTROL = 6
 };
 
 enum CsrDestType : uint8_t

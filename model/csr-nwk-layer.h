@@ -15,7 +15,8 @@ public:
   EventId m_discoveryStartEvent, m_discoveryStopEvent, m_discoveryCooldownEvent;
   Time m_discoveryCooldown { Seconds(5) }; // tune later
   EventId m_discoveryHelloEvent;
-  Time    m_discoveryHelloInterval { Seconds (2.0) };
+  Time m_discoveryHelloInterval { Seconds (1.0) };
+  uint32_t m_routingSequence {0};
 
   static TypeId GetTypeId (void)
   {
@@ -41,6 +42,7 @@ public:
   void SetRepeatDiscoveryHello (bool enable);
   void SetDiscoveryResponseEnabled (bool enable);
   void SendRoutingUpdate ();
+  void SendRoutingUpdateWithSequenceForTest (uint32_t sequence);
 
   void SendDiscoveryChirp ();
 
@@ -267,13 +269,108 @@ public:
                   << std::endl;
       }
   }
-  void ClearRoutes ()
+
+  /*void ClearRoutes ()
   {
     m_routes.clear ();
 
     std::cout << "[NWK " << m_nodeId
               << "] Cleared route table"
               << std::endl;
+  }*/
+
+  void
+  ClearRoutes ()
+  {
+    Time now = Simulator::Now ();
+
+    uint32_t activeNeighborsCleared = 0;
+    uint32_t routesInvalidated = 0;
+    uint32_t reverseRoutesInvalidated = 0;
+
+    bool chirpNeeded = false;
+
+    // Legacy routesClearTable() makes every known neighbor inactive.
+    // Keep the entries and measurements so later discovery can rebuild them.
+    for (auto &kv : m_nwkNeighbors)
+      {
+        NwkNeighborEntry &neighbor = kv.second;
+
+        bool wasActive =
+          neighbor.lastHeardSec >= 0.0 &&
+          !neighbor.stale;
+
+        if (wasActive)
+          {
+            activeNeighborsCleared++;
+            chirpNeeded = true;
+          }
+
+        neighbor.stale = true;
+        neighbor.wasActiveBeforeLastHello = false;
+
+        // Legacy routesMakeNeighborInactive() increments failures,
+        // capped below an effectively unreachable upper bound.
+        if (neighbor.numFailures < 200)
+          {
+            neighbor.numFailures++;
+          }
+      }
+
+    // Preserve route records but mark them unusable. This allows later
+    // discovery, Verify, or RoutingUpdate traffic to rebuild them.
+    for (auto &route : m_routes)
+      {
+        if (route.valid)
+          {
+            route.valid = false;
+            route.lastUpdated = now;
+            routesInvalidated++;
+          }
+      }
+
+    // Legacy routesClearTable() explicitly invalidates reverse routes.
+    for (auto &kv : m_reverseRoutes)
+      {
+        ReverseRouteEntry &reverse = kv.second;
+
+        if (reverse.valid)
+          {
+            reverse.valid = false;
+            reverse.lastUpdated = now;
+            reverseRoutesInvalidated++;
+          }
+      }
+
+    UpdateMacActiveNodes ();
+
+    std::cout << "[NWK " << m_nodeId
+              << "] routesClearTable parity reset"
+              << " activeNeighborsCleared="
+              << activeNeighborsCleared
+              << " routesInvalidated="
+              << routesInvalidated
+              << " reverseRoutesInvalidated="
+              << reverseRoutesInvalidated
+              << std::endl;
+
+    DumpRoutes ();
+
+    // Legacy code collapses multiple active-to-inactive transitions into
+    // one pending Chirp.
+    if (chirpNeeded && m_hop != nullptr)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] routesClearTable scheduling consolidated Chirp"
+                  << std::endl;
+
+        Simulator::ScheduleNow (
+          &CsrNetLayer::SendDiscoveryChirp,
+          this);
+      }
+
+    // Any queued packet must be reevaluated against the now-invalid routes.
+    ScheduleCheckNwkQueue ();
   }
 
   void
@@ -333,7 +430,13 @@ public:
 
         m_hop->SetNeighborCheckSuccessCallback (
           MakeCallback (&CsrNetLayer::NoteNeighborCheckSuccess, this));
-      }
+
+        m_hop->SetRoutingControlSuccessCallback (
+          MakeCallback (
+            &CsrNetLayer::
+              NoteRoutingControlSuccess,
+            this));
+              }
   }
 
   // Net -> App callback: payload + network source node ID
@@ -715,6 +818,9 @@ private:
     bool discoveryVerified {false};
 
     CsrNodeType nodeType {CsrNodeType::Ordinary};
+
+    bool routingSequenceValid {false};
+    uint32_t routingSequence {0};
   };
 
   // NSDP: Network Source–Destination Pair entry
@@ -949,6 +1055,24 @@ private:
     return std::max<uint32_t> (1, cost);
   }
 
+  static int
+  CompareRoutingSequence (uint32_t first, uint32_t second)
+  {
+    uint32_t diff = first - second;
+
+    if (diff == 0)
+      {
+        return 0;
+      }
+
+    if (diff > 0x80000000u)
+      {
+        return -1;
+      }
+
+    return 1;
+  }
+
 public:
   void SetNodeType (CsrNodeType type)
   {
@@ -991,6 +1115,75 @@ public:
     SetTransitForwardingEnabled (false);
   }
 
+  void
+  NoteRoutingControlSuccess (
+    uint16_t neighbor,
+    uint32_t routingSequence)
+  {
+    std::cout << "[NWK " << m_nodeId
+              << "] Reliable RoutingUpdate ACKed"
+              << " neighbor=" << neighbor
+              << " routingSequence="
+              << routingSequence
+              << std::endl;
+  }
+
+  void
+  SendReliableRoutingUpdate (
+    uint16_t neighbor)
+  {
+    if (m_hop == nullptr)
+      {
+        return;
+      }
+
+    auto neighborIt =
+      m_nwkNeighbors.find (neighbor);
+
+    if (neighborIt ==
+        m_nwkNeighbors.end ())
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Reliable RoutingUpdate rejected"
+                  << " unknownNeighbor="
+                  << neighbor
+                  << std::endl;
+        return;
+      }
+
+    if (neighborIt->second.stale)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Reliable RoutingUpdate rejected"
+                  << " staleNeighbor="
+                  << neighbor
+                  << std::endl;
+        return;
+      }
+
+    ++m_routingSequence;
+
+    if (m_routingSequence == 0)
+      {
+        ++m_routingSequence;
+      }
+
+    Ptr<Packet> payload =
+      BuildRoutingUpdatePayload (
+        m_routingSequence);
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Sending reliable RoutingUpdate"
+              << " neighbor=" << neighbor
+              << " routingSequence="
+              << m_routingSequence
+              << std::endl;
+
+    m_hop->SendRoutingControl (
+      neighbor,
+      payload);
+  }
+
 private:
   uint16_t                              m_nodeId;
   Ptr<CsrHopLayer>                      m_hop;
@@ -1027,13 +1220,12 @@ private:
   void DiscoveryStop ();
   void DiscoveryCooldownOver ();
 
-  //void SendHelloBroadcast (CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover);
-
   void SendHelloBroadcast (
     CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover,
     CsrNeighborCheckType checkType = CsrNeighborCheckType::None,
     CsrDiscoverType discoverType = CsrDiscoverType::None,
-    uint32_t discoverySequence = 0);
+    uint32_t discoverySequence = 0,
+    uint32_t routingSequence = 0);
 
   void EnsureDiscoveryForTx ();
 
@@ -1125,6 +1317,11 @@ private:
         return "Unknown";
       }
   }
+
+  Ptr<Packet> BuildRoutingUpdatePayload (
+  uint32_t routingSequence);
+
+  uint16_t m_routingControlHeaderSeq {0};
 };
 
 
@@ -1550,18 +1747,73 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
 }
 
 void
-CsrNetLayer::ProcessRoutingUpdate (const CsrHelloHeader &hh,
-                                   uint16_t helloSrc,
-                                   double pathlossDb,
-                                   double snrDb,
-                                   uint32_t linkCost)
+CsrNetLayer::ProcessRoutingUpdate (
+  const CsrHelloHeader &hh,
+  uint16_t helloSrc,
+  double pathlossDb,
+  double snrDb,
+  uint32_t linkCost)
 {
+  auto neighborIt = m_nwkNeighbors.find (helloSrc);
+
+  if (neighborIt == m_nwkNeighbors.end ())
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingUpdate from unknown neighbor="
+                << helloSrc
+                << std::endl;
+      return;
+    }
+
+  NwkNeighborEntry &neighbor = neighborIt->second;
+  uint32_t incomingSequence = hh.GetRoutingSequence ();
+
+  if (neighbor.routingSequenceValid)
+    {
+      int comparison =
+        CompareRoutingSequence (
+          neighbor.routingSequence,
+          incomingSequence);
+
+      // Existing sequence is equal to or newer than the incoming one.
+      if (comparison >= 0)
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Ignoring stale/duplicate RoutingUpdate"
+                    << " from=" << helloSrc
+                    << " incomingSequence=" << incomingSequence
+                    << " lastSequence=" << neighbor.routingSequence
+                    << std::endl;
+
+          return;
+        }
+    }
+
+  uint32_t previousSequence = neighbor.routingSequence;
+
+  neighbor.routingSequence = incomingSequence;
+  neighbor.routingSequenceValid = true;
+
   std::cout << "[NWK " << m_nodeId
-            << "] ProcessRoutingUpdate from " << helloSrc
-            << " advCount=" << unsigned (hh.GetAdvertisedRouteCount ())
+            << "] Accepted RoutingUpdate"
+            << " from=" << helloSrc
+            << " routingSequence=" << incomingSequence;
+
+  if (previousSequence != incomingSequence)
+    {
+      std::cout << " previousSequence=" << previousSequence;
+    }
+
+  std::cout << " advCount="
+            << unsigned (hh.GetAdvertisedRouteCount ())
             << std::endl;
 
-  ProcessRoutesPayload (hh, helloSrc, pathlossDb, snrDb, linkCost);
+  ProcessRoutesPayload (
+    hh,
+    helloSrc,
+    pathlossDb,
+    snrDb,
+    linkCost);
 }
 
 void
@@ -2393,7 +2645,8 @@ CsrNetLayer::SendHelloBroadcast (
   CsrArlRouteMsgType type,
   CsrNeighborCheckType checkType,
   CsrDiscoverType discoverType,
-  uint32_t discoverySequence)
+  uint32_t discoverySequence,
+  uint32_t routingSequence)
 {
   if (!m_hop) return;
 
@@ -2426,6 +2679,7 @@ CsrNetLayer::SendHelloBroadcast (
   hh.SetNeighborCheckType (checkType);
   hh.SetDiscoverType (discoverType);
   hh.SetDiscoverySequence (discoverySequence);
+  hh.SetRoutingSequence (routingSequence);
 
   hh.ClearChirpNeighbors ();
 
@@ -2526,7 +2780,20 @@ CsrNetLayer::SendHelloBroadcast (
 uint32_t
 CsrNetLayer::GetActiveNodeCount () const
 {
-  return static_cast<uint32_t> (m_nwkNeighbors.size () + 1);
+  uint32_t activeCount = 1; // local node
+
+  for (const auto &kv : m_nwkNeighbors)
+    {
+      const NwkNeighborEntry &neighbor = kv.second;
+
+      if (neighbor.lastHeardSec >= 0.0 &&
+          !neighbor.stale)
+        {
+          activeCount++;
+        }
+    }
+
+  return activeCount;
 }
 
 uint32_t
@@ -2538,8 +2805,18 @@ CsrNetLayer::GetNeighborCount () const
 void
 CsrNetLayer::SendRoutingUpdate ()
 {
+  ++m_routingSequence;
+
+  // Avoid zero after wrap so zero remains useful for
+  // non-routing control packets.
+  if (m_routingSequence == 0)
+    {
+      ++m_routingSequence;
+    }
+
   std::cout << "[NWK " << m_nodeId
             << "] Sending ARL RoutingUpdate"
+            << " routingSequence=" << m_routingSequence
             << std::endl;
 
   if (m_nodeType == CsrNodeType::Ordinary)
@@ -2549,7 +2826,28 @@ CsrNetLayer::SendRoutingUpdate ()
                 << std::endl;
     }
 
-  SendHelloBroadcast (CsrArlRouteMsgType::RoutingUpdate);
+  SendHelloBroadcast (
+    CsrArlRouteMsgType::RoutingUpdate,
+    CsrNeighborCheckType::None,
+    CsrDiscoverType::None,
+    0,
+    m_routingSequence);
+}
+
+void
+CsrNetLayer::SendRoutingUpdateWithSequenceForTest (uint32_t sequence)
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending test RoutingUpdate"
+            << " routingSequence=" << sequence
+            << std::endl;
+
+  SendHelloBroadcast (
+    CsrArlRouteMsgType::RoutingUpdate,
+    CsrNeighborCheckType::None,
+    CsrDiscoverType::None,
+    0,
+    sequence);
 }
 
 void
@@ -2684,5 +2982,100 @@ CsrNetLayer::NeighborCheckTypeName (CsrNeighborCheckType t) const
     default:
       return "None";
     }
+}
+
+Ptr<Packet>
+CsrNetLayer::BuildRoutingUpdatePayload (
+  uint32_t routingSequence)
+{
+  Ptr<Packet> packet =
+    Create<Packet> ();
+
+  CsrHelloHeader hh;
+
+  hh.SetNodeId (m_nodeId);
+  hh.SetHelloSeq (
+    ++m_routingControlHeaderSeq);
+  hh.SetNodeType (m_nodeType);
+  hh.SetSpeedKey (m_minSpeedKey);
+
+  double s0PowerDbm =
+    m_rxS0BaseLevelDbm +
+    m_linkMarginDb;
+
+  hh.SetRxPowerDbmX10 (
+    static_cast<int16_t> (
+      std::round (
+        s0PowerDbm * 10.0)));
+
+  hh.SetActiveNodes (
+    static_cast<uint8_t> (
+      GetActiveNodeCount ()));
+
+  hh.SetArlRouteMsgType (
+    CsrArlRouteMsgType::
+      RoutingUpdate);
+
+  hh.SetNeighborCheckType (
+    CsrNeighborCheckType::None);
+
+  hh.SetDiscoverType (
+    CsrDiscoverType::None);
+
+  hh.SetDiscoverySequence (0);
+  hh.SetRoutingSequence (
+    routingSequence);
+
+  hh.ClearChirpNeighbors ();
+  hh.ClearAdvertisedRoutes ();
+
+  uint8_t added = 0;
+
+  for (const auto &route : m_routes)
+    {
+      if (!ShouldAdvertiseRoute (route))
+        {
+          continue;
+        }
+
+      int16_t pathlossX10 = 0;
+
+      if (!std::isnan (
+            route.pathlossDb))
+        {
+          pathlossX10 =
+            static_cast<int16_t> (
+              std::round (
+                route.pathlossDb *
+                10.0));
+        }
+
+      if (hh.AddAdvertisedRoute (
+            route.nwkDst,
+            route.numHop,
+            route.cost,
+            pathlossX10,
+            route.capability))
+        {
+          added++;
+        }
+
+      if (added >= 8)
+        {
+          break;
+        }
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Built reliable RoutingUpdate"
+            << " routingSequence="
+            << routingSequence
+            << " advertisedRoutes="
+            << unsigned (added)
+            << std::endl;
+
+  packet->AddHeader (hh);
+
+  return packet;
 }
 // ------------------------------------------------------------

@@ -91,6 +91,9 @@ public:
   void SetNodeType (CsrNodeType type);
   CsrNodeType GetNodeType () const;
 
+  void SetRoutingSequence (uint32_t sequence);
+  uint32_t GetRoutingSequence () const;
+
   struct AdvertisedRoute
   {
     uint16_t dst {0xFFFF};
@@ -116,6 +119,7 @@ private:
   uint8_t  m_speedKey {0};
   int16_t  m_rxPowerDbmX10 {0};
   uint8_t  m_activeNodes {0};
+  uint32_t m_routingSequence {0};
   uint8_t  m_arlRouteMsgType {static_cast<uint8_t> (CsrArlRouteMsgType::None)};
   static constexpr uint8_t MAX_ADVERTISED_ROUTES = 8;
   std::vector<AdvertisedRoute> m_advertisedRoutes;

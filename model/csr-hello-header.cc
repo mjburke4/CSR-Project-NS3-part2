@@ -125,6 +125,7 @@ namespace ns3 {
             + 2  // neighborCheckTarget
             + 1  // discoverType
             + 4  // discoverySequence
+            + 4  // routingSequence
             + 1  // chirpNeighborCount
             + static_cast<uint32_t> (m_chirpNeighbors.size ()) * 2
             + 1  // routeCount
@@ -146,6 +147,7 @@ namespace ns3 {
     i.WriteHtonU16 (m_neighborCheckTarget);
     i.WriteU8 (m_discoverType);
     i.WriteHtonU32 (m_discoverySequence);
+    i.WriteHtonU32 (m_routingSequence);
 
     uint8_t chirpCount = static_cast<uint8_t> (
     std::min<size_t> (m_chirpNeighbors.size (),
@@ -190,6 +192,7 @@ namespace ns3 {
 
     m_discoverType = i.ReadU8 ();
     m_discoverySequence = i.ReadNtohU32 ();
+    m_routingSequence = i.ReadNtohU32 ();
 
     m_chirpNeighbors.clear ();
 
@@ -237,6 +240,7 @@ namespace ns3 {
       << " neighborCheckTarget=" << m_neighborCheckTarget
       << " discoverType=" << unsigned (m_discoverType)
       << " discoverySequence=" << m_discoverySequence
+      << " routingSequence=" << m_routingSequence
       << " chirpNeighbors=" << unsigned (GetChirpNeighborCount ())
       << " advRoutes=" << unsigned (GetAdvertisedRouteCount ());
   }
@@ -273,6 +277,18 @@ namespace ns3 {
 
     m_advertisedRoutes.push_back (ar);
     return true;
+  }
+
+  void
+  CsrHelloHeader::SetRoutingSequence (uint32_t sequence)
+  {
+    m_routingSequence = sequence;
+  }
+
+  uint32_t
+  CsrHelloHeader::GetRoutingSequence () const
+  {
+    return m_routingSequence;
   }
 
   uint8_t

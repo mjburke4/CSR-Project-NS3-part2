@@ -289,6 +289,23 @@ main (int argc, char *argv[])
     CsrNeighborCheckType::Message);
   });
 
+  Simulator::Schedule (Seconds (7.0), [net2]() {
+    // Produces routing sequence 2.
+    net2->SendRoutingUpdate ();
+  });
+
+  Simulator::Schedule (Seconds (8.5), [net2]() {
+    // Replay the old sequence. Receivers should refresh their direct
+    // link to node 2 but reject its stale route vector.
+    net2->SendRoutingUpdateWithSequenceForTest (1);
+  });
+
+  Simulator::Schedule (
+    Seconds (9.75),
+    [net1]() {
+      net1->SendReliableRoutingUpdate (2);
+  });
+
   Simulator::Schedule (Seconds (10.0), [net3]() {
   net3->SendRoutingUpdate ();
   });
@@ -312,6 +329,18 @@ main (int argc, char *argv[])
   payload->AddHeader (nh);
 
   hop2->SendData (3, 5, payload, true);
+  });
+
+  Simulator::Schedule (Seconds (19.5), [net2]() {
+    std::cout
+      << "\n=== routesClearTable parity test on node 2 ==="
+      << std::endl;
+
+    net2->ClearRoutes ();
+    });
+
+  Simulator::Schedule (Seconds (19.55), [net2]() {
+    net2->DumpRoutes ();
   });
 
   Simulator::Schedule (Seconds (6.0), [net0]() {

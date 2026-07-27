@@ -90,6 +90,16 @@ public:
 
   void PrintNeighbors () const;
 
+  void SendRoutingControl (
+  uint16_t dst,
+  Ptr<Packet> payload);
+
+  void SetRoutingControlSuccessCallback (
+    Callback<void, uint16_t, uint32_t> cb)
+  {
+    m_routingControlSuccessCb = cb;
+  }
+
 private:
   struct FlowCtrlEntry
   {
@@ -147,7 +157,7 @@ private:
   ResendEntry* FindResendEntry (uint16_t dst, uint16_t seq);
   bool CheckReceivedSeq (uint16_t src, uint16_t seq);
   static int32_t SeqDiff (uint16_t seq1, uint16_t seq2);
-  
+
   Callback<void, uint16_t, uint16_t> m_nsdpDecrCb;
 
   Callback<void, Ptr<Packet>, uint16_t, double, double> m_rxHelloFromHopCb;
@@ -264,6 +274,9 @@ private:
   std::map<uint16_t, FlowCtrlEntry> m_flowCtrlByDest;
 
   std::map<uint16_t, RxSeqState>                m_rxStateBySrc;
+
+  Callback<void, uint16_t, uint32_t>
+    m_routingControlSuccessCb;
 };
 
 void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
@@ -387,6 +400,59 @@ CsrHopLayer::SendNeighborCheck (uint16_t dst, Ptr<Packet> payload)
 }
 
 void
+CsrHopLayer::SendRoutingControl (
+  uint16_t dst,
+  Ptr<Packet> payload)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  uint16_t &lastSeq = m_lastSentSeqByDest[dst];
+
+  uint16_t seq =
+    static_cast<uint16_t> (
+      (lastSeq + 1) & 0xFFFF);
+
+  lastSeq = seq;
+
+  CsrHeader hdr (
+    m_nodeId,
+    dst,
+    seq,
+    7,      // robust control priority
+    true,   // ACKable
+    false);
+
+  hdr.SetType (CSR_PKT_ROUTING_CONTROL);
+  hdr.SetDestType (CSR_DEST_UNICAST);
+  hdr.SetSpeedKey (8);
+
+  Ptr<Packet> frame = payload->Copy ();
+  frame->AddHeader (hdr);
+
+  FlowCtrlEntry &fc =
+    GetFlowCtrlEntry (dst);
+
+  fc.outstanding++;
+
+  EnqueueResend (
+    dst,
+    seq,
+    frame->Copy ());
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX reliable RoutingControl to "
+            << dst
+            << " seq=" << seq
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (
+    frame,
+    dst,
+    7,
+    true);
+}
+
+void
 CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 {
   CsrHeader hdr;
@@ -400,7 +466,7 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
   UpdateNeighborHeard (hdr.GetSrc (), pathlossDb, snrDb);
   //UpdateNeighborHeard (hdr.GetSrc ());
-  
+
   // HELLO is discovery/control; no further processing needed yet
   /*if (hdr.GetType () == CSR_PKT_HELLO)
     {
@@ -498,6 +564,74 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
       return;
     }
+
+  if (hdr.GetType () == CSR_PKT_ROUTING_CONTROL)
+    {
+      if (hdr.GetDst () != m_nodeId)
+        {
+          return;
+        }
+
+      bool firstReception =
+        CheckReceivedSeq (
+          hdr.GetSrc (),
+          hdr.GetSeq ());
+
+      std::cout << "[HOP " << m_nodeId
+                << "] RX reliable RoutingControl from "
+                << hdr.GetSrc ()
+                << " seq=" << hdr.GetSeq ()
+                << " firstReception="
+                << (firstReception ? 1 : 0)
+                << std::endl;
+
+      // Deliver the routing payload only once.
+      // Duplicates still receive another ACK.
+      if (firstReception &&
+          !m_rxHelloFromHopCb.IsNull ())
+        {
+          m_rxHelloFromHopCb (
+            frame,
+            hdr.GetSrc (),
+            pathlossDb,
+            snrDb);
+        }
+
+      if (hdr.IsAckable ())
+        {
+          CsrHeader ackHdr (
+            m_nodeId,
+            hdr.GetSrc (),
+            hdr.GetSeq (),
+            7,
+            false,
+            true);
+
+          ackHdr.SetType (CSR_PKT_ACK);
+          ackHdr.SetDestType (
+            CSR_DEST_UNICAST);
+          ackHdr.SetSpeedKey (8);
+
+          Ptr<Packet> ackPkt =
+            Create<Packet> ();
+
+          ackPkt->AddHeader (ackHdr);
+
+          std::cout << "[HOP " << m_nodeId
+                    << "] ACK RoutingControl to "
+                    << hdr.GetSrc ()
+                    << " seq=" << hdr.GetSeq ()
+                    << std::endl;
+
+          m_mac->EnqueueTxFrame (
+            ackPkt,
+            hdr.GetSrc (),
+            7,
+            false);
+        }
+
+      return;
+    }
   // Duplicate suppression: check if this (src, seq) has been seen before
   bool firstReception = CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq ());
 
@@ -571,7 +705,10 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
                           << " from " << src);
       return;
     }
+
   bool neighborCheckCompleted = false;
+  bool routingControlCompleted = false;
+  uint32_t completedRoutingSequence = 0;
 
   CsrNeighborCheckType completedType =
     CsrNeighborCheckType::None;
@@ -580,33 +717,58 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
 
   if (entry->frame != nullptr)
     {
-      Ptr<Packet> originalFrame = entry->frame->Copy ();
+      Ptr<Packet> originalFrame =
+        entry->frame->Copy ();
 
       CsrHeader originalHdr;
 
-      if (originalFrame->RemoveHeader (originalHdr) &&
-          originalHdr.GetType () == CSR_PKT_NEIGHBOR_CHECK)
+      if (originalFrame->RemoveHeader (
+            originalHdr))
         {
-          neighborCheckCompleted = true;
-
-          CsrHelloHeader neighborCheckHeader;
-
-          if (originalFrame->RemoveHeader (neighborCheckHeader))
+          if (originalHdr.GetType () ==
+              CSR_PKT_NEIGHBOR_CHECK)
             {
-              completedType =
-                neighborCheckHeader.GetNeighborCheckType ();
+              neighborCheckCompleted = true;
 
-              completedDiscoverySequence =
-                neighborCheckHeader.GetDiscoverySequence ();
+              CsrHelloHeader controlHeader;
+
+              if (originalFrame->RemoveHeader (
+                    controlHeader))
+                {
+                  completedType =
+                    controlHeader
+                      .GetNeighborCheckType ();
+
+                  completedDiscoverySequence =
+                    controlHeader
+                      .GetDiscoverySequence ();
+                }
             }
-          else
+          else if (
+            originalHdr.GetType () ==
+            CSR_PKT_ROUTING_CONTROL)
             {
-              std::cout << "[HOP " << m_nodeId
-                        << "] Completed NeighborCheck missing "
-                        << "CsrHelloHeader"
-                        << " neighbor=" << src
-                        << " seq=" << seq
-                        << std::endl;
+              routingControlCompleted = true;
+
+              CsrHelloHeader controlHeader;
+
+              if (originalFrame->RemoveHeader (
+                    controlHeader))
+                {
+                  completedRoutingSequence =
+                    controlHeader
+                      .GetRoutingSequence ();
+                }
+              else
+                {
+                  std::cout
+                    << "[HOP " << m_nodeId
+                    << "] Completed RoutingControl"
+                    << " missing CsrHelloHeader"
+                    << " neighbor=" << src
+                    << " seq=" << seq
+                    << std::endl;
+                }
             }
         }
     }
@@ -640,6 +802,24 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
             src,
             completedType,
             completedDiscoverySequence);
+        }
+    }
+
+  if (routingControlCompleted)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Reliable RoutingControl completed with "
+                << src
+                << " seq=" << seq
+                << " routingSequence="
+                << completedRoutingSequence
+                << std::endl;
+
+      if (!m_routingControlSuccessCb.IsNull ())
+        {
+          m_routingControlSuccessCb (
+            src,
+            completedRoutingSequence);
         }
     }
 
