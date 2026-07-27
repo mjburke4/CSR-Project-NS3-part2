@@ -758,6 +758,67 @@ public:
               << std::endl;
   }
 
+  void
+  SendRoutingRequest (uint16_t neighbor)
+  {
+    if (m_hop == nullptr)
+      {
+        return;
+      }
+
+    auto neighborIt =
+      m_nwkNeighbors.find (neighbor);
+
+    if (neighborIt == m_nwkNeighbors.end ())
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingRequest rejected"
+                  << " unknownNeighbor="
+                  << neighbor
+                  << std::endl;
+        return;
+      }
+
+    if (neighborIt->second.stale)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingRequest rejected"
+                  << " staleNeighbor="
+                  << neighbor
+                  << std::endl;
+        return;
+      }
+
+    ++m_routingSequence;
+
+    if (m_routingSequence == 0)
+      {
+        ++m_routingSequence;
+      }
+
+    NwkNeighborEntry &neighborEntry =
+      neighborIt->second;
+
+    neighborEntry.routingRequestPending = true;
+    neighborEntry.routingRequestSequence =
+      m_routingSequence;
+
+    Ptr<Packet> payload =
+      BuildRoutingRequestPayload (
+        m_routingSequence);
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Sending reliable RoutingRequest"
+              << " neighbor=" << neighbor
+              << " routingSequence="
+              << m_routingSequence
+              << std::endl;
+
+    m_hop->SendRoutingControl (
+      neighbor,
+      payload);
+  }
+
 private:
 
   struct RouteEntry
@@ -821,7 +882,13 @@ private:
 
     bool routingSequenceValid {false};
     uint32_t routingSequence {0};
+
+    bool routingRequestPending {false};
+    uint32_t routingRequestSequence {0};
   };
+
+  Ptr<Packet> BuildRoutingRequestPayload (
+    uint32_t routingSequence);
 
   // NSDP: Network Source–Destination Pair entry
   struct NsdpEntry
@@ -1118,14 +1185,44 @@ public:
   void
   NoteRoutingControlSuccess (
     uint16_t neighbor,
-    uint32_t routingSequence)
+    uint32_t routingSequence,
+    CsrRoutingOperation operation)
   {
     std::cout << "[NWK " << m_nodeId
-              << "] Reliable RoutingUpdate ACKed"
+              << "] Reliable RoutingControl ACKed"
               << " neighbor=" << neighbor
               << " routingSequence="
               << routingSequence
+              << " operation="
+              << RoutingOperationName (operation)
               << std::endl;
+  }
+
+  const char*
+  RoutingOperationName (
+    CsrRoutingOperation operation) const
+  {
+    switch (operation)
+      {
+      case CsrRoutingOperation::Flush:
+        return "Flush";
+
+      case CsrRoutingOperation::Delete:
+        return "Delete";
+
+      case CsrRoutingOperation::Update:
+        return "Update";
+
+      case CsrRoutingOperation::Request:
+        return "Request";
+
+      case CsrRoutingOperation::Info:
+        return "Info";
+
+      case CsrRoutingOperation::None:
+      default:
+        return "None";
+      }
   }
 
   void
@@ -1754,20 +1851,25 @@ CsrNetLayer::ProcessRoutingUpdate (
   double snrDb,
   uint32_t linkCost)
 {
-  auto neighborIt = m_nwkNeighbors.find (helloSrc);
+  auto neighborIt =
+    m_nwkNeighbors.find (helloSrc);
 
   if (neighborIt == m_nwkNeighbors.end ())
     {
       std::cout << "[NWK " << m_nodeId
-                << "] RoutingUpdate from unknown neighbor="
+                << "] RoutingControl from unknown neighbor="
                 << helloSrc
                 << std::endl;
       return;
     }
 
-  NwkNeighborEntry &neighbor = neighborIt->second;
-  uint32_t incomingSequence = hh.GetRoutingSequence ();
+  NwkNeighborEntry &neighbor =
+    neighborIt->second;
 
+  uint32_t incomingSequence =
+    hh.GetRoutingSequence ();
+
+  // Reject duplicate or older routing-control messages.
   if (neighbor.routingSequenceValid)
     {
       int comparison =
@@ -1779,41 +1881,131 @@ CsrNetLayer::ProcessRoutingUpdate (
       if (comparison >= 0)
         {
           std::cout << "[NWK " << m_nodeId
-                    << "] Ignoring stale/duplicate RoutingUpdate"
+                    << "] Ignoring stale/duplicate RoutingControl"
                     << " from=" << helloSrc
-                    << " incomingSequence=" << incomingSequence
-                    << " lastSequence=" << neighbor.routingSequence
+                    << " incomingSequence="
+                    << incomingSequence
+                    << " lastSequence="
+                    << neighbor.routingSequence
                     << std::endl;
 
           return;
         }
     }
 
-  uint32_t previousSequence = neighbor.routingSequence;
+  uint32_t previousSequence =
+    neighbor.routingSequence;
 
-  neighbor.routingSequence = incomingSequence;
-  neighbor.routingSequenceValid = true;
+  CsrRoutingOperation operation =
+    hh.GetRoutingOperation ();
 
-  std::cout << "[NWK " << m_nodeId
-            << "] Accepted RoutingUpdate"
-            << " from=" << helloSrc
-            << " routingSequence=" << incomingSequence;
-
-  if (previousSequence != incomingSequence)
+  // Backward compatibility: old route-vector builders may not
+  // explicitly identify themselves as Update operations.
+  if (operation == CsrRoutingOperation::None &&
+      hh.GetAdvertisedRouteCount () > 0)
     {
-      std::cout << " previousSequence=" << previousSequence;
+      operation =
+        CsrRoutingOperation::Update;
     }
 
-  std::cout << " advCount="
-            << unsigned (hh.GetAdvertisedRouteCount ())
-            << std::endl;
+  // Record this sequence before handling the operation.
+  neighbor.routingSequence =
+    incomingSequence;
 
-  ProcessRoutesPayload (
-    hh,
-    helloSrc,
-    pathlossDb,
-    snrDb,
-    linkCost);
+  neighbor.routingSequenceValid = true;
+
+  switch (operation)
+    {
+    case CsrRoutingOperation::Request:
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Received RoutingRequest"
+                  << " from=" << helloSrc
+                  << " routingSequence="
+                  << incomingSequence
+                  << "; scheduling reliable full update"
+                  << std::endl;
+
+        // Reply specifically to the requesting neighbor.
+        Simulator::Schedule (
+          MilliSeconds (20),
+          &CsrNetLayer::SendReliableRoutingUpdate,
+          this,
+          helloSrc);
+
+        return;
+      }
+
+    case CsrRoutingOperation::Update:
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Accepted RoutingUpdate"
+                  << " from=" << helloSrc
+                  << " routingSequence="
+                  << incomingSequence
+                  << " previousSequence="
+                  << previousSequence
+                  << " advCount="
+                  << unsigned (
+                       hh.GetAdvertisedRouteCount ())
+                  << std::endl;
+
+        // An ACK only proved that our Request arrived.
+        // Receiving this Update proves that the requested
+        // routing state came back.
+        if (neighbor.routingRequestPending)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingRequest fulfilled"
+                      << " neighbor=" << helloSrc
+                      << " requestSequence="
+                      << neighbor.routingRequestSequence
+                      << " responseSequence="
+                      << incomingSequence
+                      << std::endl;
+
+            neighbor.routingRequestPending = false;
+          }
+
+        ProcessRoutesPayload (
+          hh,
+          helloSrc,
+          pathlossDb,
+          snrDb,
+          linkCost);
+
+        return;
+      }
+
+    case CsrRoutingOperation::Info:
+    case CsrRoutingOperation::Delete:
+    case CsrRoutingOperation::Flush:
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Routing operation not implemented yet"
+                  << " operation="
+                  << RoutingOperationName (operation)
+                  << " from=" << helloSrc
+                  << " routingSequence="
+                  << incomingSequence
+                  << std::endl;
+
+        return;
+      }
+
+    case CsrRoutingOperation::None:
+    default:
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Ignoring RoutingControl with no operation"
+                  << " from=" << helloSrc
+                  << " routingSequence="
+                  << incomingSequence
+                  << std::endl;
+
+        return;
+      }
+    }
 }
 
 void
@@ -3073,6 +3265,58 @@ CsrNetLayer::BuildRoutingUpdatePayload (
             << " advertisedRoutes="
             << unsigned (added)
             << std::endl;
+
+  packet->AddHeader (hh);
+
+  return packet;
+}
+
+Ptr<Packet>
+CsrNetLayer::BuildRoutingRequestPayload (
+  uint32_t routingSequence)
+{
+  Ptr<Packet> packet =
+    Create<Packet> ();
+
+  CsrHelloHeader hh;
+
+  hh.SetNodeId (m_nodeId);
+  hh.SetHelloSeq (
+    ++m_routingControlHeaderSeq);
+  hh.SetNodeType (m_nodeType);
+  hh.SetSpeedKey (m_minSpeedKey);
+
+  double s0PowerDbm =
+    m_rxS0BaseLevelDbm +
+    m_linkMarginDb;
+
+  hh.SetRxPowerDbmX10 (
+    static_cast<int16_t> (
+      std::round (
+        s0PowerDbm * 10.0)));
+
+  hh.SetActiveNodes (
+    static_cast<uint8_t> (
+      GetActiveNodeCount ()));
+
+  hh.SetArlRouteMsgType (
+    CsrArlRouteMsgType::RoutingUpdate);
+
+  hh.SetNeighborCheckType (
+    CsrNeighborCheckType::None);
+
+  hh.SetDiscoverType (
+    CsrDiscoverType::None);
+
+  hh.SetDiscoverySequence (0);
+  hh.SetRoutingSequence (
+    routingSequence);
+
+  hh.SetRoutingOperation (
+    CsrRoutingOperation::Request);
+
+  hh.ClearChirpNeighbors ();
+  hh.ClearAdvertisedRoutes ();
 
   packet->AddHeader (hh);
 

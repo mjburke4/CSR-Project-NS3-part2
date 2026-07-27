@@ -343,6 +343,16 @@ main (int argc, char *argv[])
     net2->DumpRoutes ();
   });
 
+  Simulator::Schedule (
+    Seconds (22.5),
+    [net2]() {
+      std::cout
+        << "\n=== reliable RoutingRequest test ==="
+        << std::endl;
+
+      net2->SendRoutingRequest (1);
+    });
+
   Simulator::Schedule (Seconds (6.0), [net0]() {
   // Node 1 is fresh at node 0, so it should appear in the Chirp.
   net0->SendDiscoveryChirp ();

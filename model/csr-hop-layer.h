@@ -95,7 +95,10 @@ public:
   Ptr<Packet> payload);
 
   void SetRoutingControlSuccessCallback (
-    Callback<void, uint16_t, uint32_t> cb)
+    Callback<void,
+            uint16_t,
+            uint32_t,
+            CsrRoutingOperation> cb)
   {
     m_routingControlSuccessCb = cb;
   }
@@ -275,8 +278,12 @@ private:
 
   std::map<uint16_t, RxSeqState>                m_rxStateBySrc;
 
-  Callback<void, uint16_t, uint32_t>
+  Callback<void,
+          uint16_t,
+          uint32_t,
+          CsrRoutingOperation>
     m_routingControlSuccessCb;
+
 };
 
 void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
@@ -710,6 +717,9 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
   bool routingControlCompleted = false;
   uint32_t completedRoutingSequence = 0;
 
+  CsrRoutingOperation completedRoutingOperation =
+    CsrRoutingOperation::None;
+
   CsrNeighborCheckType completedType =
     CsrNeighborCheckType::None;
 
@@ -758,16 +768,22 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
                   completedRoutingSequence =
                     controlHeader
                       .GetRoutingSequence ();
+                  completedRoutingOperation =
+                    controlHeader.GetRoutingOperation ();
                 }
               else
                 {
-                  std::cout
-                    << "[HOP " << m_nodeId
-                    << "] Completed RoutingControl"
-                    << " missing CsrHelloHeader"
-                    << " neighbor=" << src
-                    << " seq=" << seq
-                    << std::endl;
+                  std::cout << "[HOP " << m_nodeId
+                            << "] Reliable RoutingControl completed with "
+                            << src
+                            << " seq=" << seq
+                            << " routingSequence="
+                            << completedRoutingSequence
+                            << " operation="
+                            << unsigned (
+                                static_cast<uint8_t> (
+                                  completedRoutingOperation))
+                            << std::endl;
                 }
             }
         }
@@ -819,7 +835,8 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
         {
           m_routingControlSuccessCb (
             src,
-            completedRoutingSequence);
+            completedRoutingSequence,
+            completedRoutingOperation);
         }
     }
 

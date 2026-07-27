@@ -38,6 +38,16 @@ enum class CsrNodeType : uint8_t
   Gateway  = 2   // NodeTypeGATEWAY
 };
 
+enum class CsrRoutingOperation : uint8_t
+{
+  Flush   = 0,  // ROUTING_FLUSH
+  Delete  = 1,  // ROUTING_DELETE
+  Update  = 2,  // ROUTING_UPDATE
+  Request = 3,  // ROUTING_REQUEST
+  Info    = 4,  // ROUTING_INFO
+  None    = 0xFF
+};
+
 class CsrHelloHeader : public Header
 {
 public:
@@ -94,6 +104,9 @@ public:
   void SetRoutingSequence (uint32_t sequence);
   uint32_t GetRoutingSequence () const;
 
+  void SetRoutingOperation (CsrRoutingOperation operation);
+  CsrRoutingOperation GetRoutingOperation () const;
+
   struct AdvertisedRoute
   {
     uint16_t dst {0xFFFF};
@@ -141,6 +154,10 @@ private:
 
   uint8_t m_nodeType {
   static_cast<uint8_t> (CsrNodeType::Ordinary)
+  };
+
+  uint8_t m_routingOperation {
+    static_cast<uint8_t> (CsrRoutingOperation::None)
   };
 };
 
