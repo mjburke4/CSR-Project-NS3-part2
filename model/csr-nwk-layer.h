@@ -628,6 +628,10 @@ public:
         return false;
       }
 
+    SelectedRouteState selectedBefore =
+      CaptureSelectedRouteState (
+        nwkDst);
+
     uint32_t totalCost =
       linkCostToNextHop +
       advertisedCost;
@@ -719,6 +723,18 @@ public:
                   << (best == &route ? 1 : 0)
                   << std::endl;
 
+        SelectedRouteState selectedAfter =
+          CaptureSelectedRouteState (
+            nwkDst);
+
+        if (!SameSelectedRouteState (
+              selectedBefore,
+              selectedAfter))
+          {
+            MarkSelectedRouteChanged (
+              nwkDst,
+              "candidate update");
+          }
         return true;
       }
 
@@ -787,6 +803,19 @@ public:
               << " selected="
               << (best == stored ? 1 : 0)
               << std::endl;
+
+    SelectedRouteState selectedAfter =
+      CaptureSelectedRouteState (
+        nwkDst);
+
+    if (!SameSelectedRouteState (
+          selectedBefore,
+          selectedAfter))
+      {
+        MarkSelectedRouteChanged (
+          nwkDst,
+          "candidate update");
+      }
 
     return true;
   }
@@ -1011,9 +1040,42 @@ private:
     std::vector<uint16_t> path;
   };
 
+  struct SelectedRouteState
+  {
+    bool available {false};
+
+    uint16_t nextHop {
+      CSR_BROADCAST_ID
+    };
+
+    uint32_t cost {0};
+    uint8_t numHop {0};
+    bool immediate {false};
+    uint8_t capability {0};
+
+    std::vector<uint16_t> path;
+  };
+
   const RouteEntry*
   FindBestRoute (
     uint16_t destination) const;
+
+  SelectedRouteState
+  CaptureSelectedRouteState (
+    uint16_t destination) const;
+
+  static bool
+  SameSelectedRouteState (
+    const SelectedRouteState &first,
+    const SelectedRouteState &second);
+
+  void
+  MarkSelectedRouteChanged (
+    uint16_t destination,
+    const char *reason);
+
+  void
+  ReportPendingSelectedRouteChanges ();
 
   struct ReverseRouteEntry
   {
@@ -1159,7 +1221,7 @@ private:
                     << std::endl;
           break;
         }
-        
+
       // Existing Hop flow-control gating (per-next-hop)
       if (!m_hop->CanSendToHop (hopDest))
         {
@@ -1574,6 +1636,14 @@ private:
   std::map<uint16_t, ReverseRouteEntry> m_reverseRoutes;
   std::map<uint16_t, NwkNeighborEntry>  m_nwkNeighbors;
   std::map<std::pair<uint16_t,uint16_t>, NsdpEntry> m_nsdp;
+  std::set<uint16_t>
+  m_pendingSelectedRouteChanges;
+
+  EventId m_selectedRouteChangeEvent;
+
+  Time m_selectedRouteChangeDelay {
+    MilliSeconds (25)
+  };
 
   bool    m_discoveryActive { false };
 
@@ -2412,6 +2482,10 @@ CsrNetLayer::ProcessRoutingUpdate (
             return;
           }
 
+        SelectedRouteState selectedBefore =
+            CaptureSelectedRouteState (
+               destination);
+
         bool matchingRouteFound = false;
         bool routeInvalidated = false;
         bool directRouteProtected = false;
@@ -2499,6 +2573,19 @@ CsrNetLayer::ProcessRoutingUpdate (
                   << " invalidated="
                   << (routeInvalidated ? 1 : 0)
                   << std::endl;
+
+        SelectedRouteState selectedAfter =
+          CaptureSelectedRouteState (
+            destination);
+
+        if (!SameSelectedRouteState (
+              selectedBefore,
+              selectedAfter))
+          {
+            MarkSelectedRouteChanged (
+              destination,
+              "RoutingDelete");
+          }
 
         DumpRoutes ();
         ScheduleCheckNwkQueue ();
@@ -4333,6 +4420,102 @@ CsrNetLayer::FindBestRoute (
     }
 
   return best;
+}
+
+CsrNetLayer::SelectedRouteState
+CsrNetLayer::CaptureSelectedRouteState (
+  uint16_t destination) const
+{
+  SelectedRouteState state;
+
+  const RouteEntry *best =
+    FindBestRoute (destination);
+
+  if (best == nullptr)
+    {
+      return state;
+    }
+
+  state.available = true;
+  state.nextHop = best->nextHop;
+  state.cost = best->cost;
+  state.numHop = best->numHop;
+  state.immediate = best->immediate;
+  state.capability = best->capability;
+  state.path = best->path;
+
+  return state;
+}
+
+bool
+CsrNetLayer::SameSelectedRouteState (
+  const SelectedRouteState &first,
+  const SelectedRouteState &second)
+{
+  return
+    first.available ==
+      second.available &&
+    first.nextHop ==
+      second.nextHop &&
+    first.cost ==
+      second.cost &&
+    first.numHop ==
+      second.numHop &&
+    first.immediate ==
+      second.immediate &&
+    first.capability ==
+      second.capability &&
+    first.path ==
+      second.path;
+}
+
+void
+CsrNetLayer::MarkSelectedRouteChanged (
+  uint16_t destination,
+  const char *reason)
+{
+  m_pendingSelectedRouteChanges.insert (
+    destination);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Selected route changed"
+            << " dst=" << destination
+            << " reason=" << reason
+            << " pendingDestinations="
+            << m_pendingSelectedRouteChanges.size ()
+            << std::endl;
+
+  if (!m_selectedRouteChangeEvent.IsPending ())
+    {
+      m_selectedRouteChangeEvent =
+        Simulator::Schedule (
+          m_selectedRouteChangeDelay,
+          &CsrNetLayer::
+            ReportPendingSelectedRouteChanges,
+          this);
+    }
+}
+
+void
+CsrNetLayer::
+ReportPendingSelectedRouteChanges ()
+{
+  std::set<uint16_t> destinations;
+
+  destinations.swap (
+    m_pendingSelectedRouteChanges);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Consolidated selected-route changes"
+            << " count="
+            << destinations.size ()
+            << std::endl;
+
+  for (uint16_t destination :
+       destinations)
+    {
+      DumpBestRoute (destination);
+    }
 }
 
 void
