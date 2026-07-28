@@ -429,10 +429,27 @@ Simulator::Schedule (
 
   Simulator::Schedule (
   Seconds (33.0),
-  [net2]() {
+  [net1, net2]() {
     std::cout
       << "\n=== route path loop-rejection setup ==="
       << std::endl;
+
+    // Pretend node 1 previously accepted destination 96
+    // from node 2. The new snapshot advertises 96 with a
+    // loop, so it must be rejected and then flushed.
+    net1->AddOrUpdateRoute (
+      96,
+      2,
+      false,
+      3,
+      115.742,
+      64,
+      25,
+      2,
+      1,
+      std::vector<uint16_t> {
+        2, 96
+      });
 
     // Valid route: node 2 reaches 95
     // through node 3.
@@ -467,12 +484,12 @@ Simulator::Schedule (
         3, 1, 96
       });
 
-    net2->SendReliableRoutingUpdate (
+    net2->StartReliableRoutingSnapshot (
       1);
   });
 
 Simulator::Schedule (
-  Seconds (34.75),
+  Seconds (35.0),
   [net1]() {
     std::cout
       << "\n=== route path loop-rejection result ==="
@@ -494,7 +511,7 @@ Simulator::Schedule (
   });
 
 Simulator::Schedule (
-  Seconds (35.0),
+  Seconds (35.5),
   [net1]() {
     std::cout
       << "\n=== alternate route candidate setup ==="
@@ -566,6 +583,16 @@ Simulator::Schedule (
 
   Simulator::Schedule (Seconds (38.0), [net0]() {
     net0->StartDiscovery (Seconds (0.0), Seconds (5.0));
+  });
+
+  Simulator::Schedule (
+  Seconds (42.0),
+  [net1]() {
+    std::cout
+      << "\n=== confirmed alternate route failover ==="
+      << std::endl;
+
+    net1->DumpBestRoute (97);
   });
 
   Simulator::Schedule (Seconds (42.5), [net0]() {

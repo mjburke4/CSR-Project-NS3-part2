@@ -1608,11 +1608,13 @@ private:
 
   void EnsureDiscoveryForTx ();
 
-  void ProcessRoutesPayload (const CsrHelloHeader &hh,
-                             uint16_t helloSrc,
-                             double pathlossDb,
-                             double snrDb,
-                             uint32_t linkCost);
+  std::set<uint16_t>
+  ProcessRoutesPayload (
+    const CsrHelloHeader &hh,
+    uint16_t helloSrc,
+    double pathlossDb,
+    double snrDb,
+    uint32_t linkCost);
 
   void ProcessArlRouteMessage (const CsrHelloHeader &hh,
                               uint16_t helloSrc,
@@ -2083,13 +2085,16 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
       }
 }
 
-void
+std::set<uint16_t>
 CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
                                     uint16_t helloSrc,
                                     double pathlossDb,
                                     double snrDb,
                                     uint32_t linkCost)
 {
+    std::set<uint16_t>
+      acceptedDestinations;
+
     uint8_t advCount = hh.GetAdvertisedRouteCount ();
 
     auto neighborIt = m_nwkNeighbors.find (helloSrc);
@@ -2102,12 +2107,12 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
                   << "Ordinary neighbor=" << helloSrc
                   << std::endl;
 
-        return;
+        return acceptedDestinations;
       }
 
     if (advCount == 0)
       {
-        return;
+        return acceptedDestinations;
       }
 
     std::cout << "[NWK " << m_nodeId
@@ -2187,6 +2192,9 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
 
         if (accepted)
           {
+            acceptedDestinations.insert (
+              ar.dst);
+
             std::cout << "[NWK " << m_nodeId
                       << "] Accepted advertised route dst=" << ar.dst
                       << " via nextHop=" << helloSrc
@@ -2206,6 +2214,7 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
                       << std::endl;
           }
       }
+  return acceptedDestinations;
 }
 
 void
@@ -2331,61 +2340,35 @@ CsrNetLayer::ProcessRoutingUpdate (
         // An ACK only proved that our Request arrived.
         // Receiving this Update proves that the requested
         // routing state came back.
-        /*if (neighbor.routingRequestPending)
+
+        std::set<uint16_t>
+          acceptedDestinations =
+            ProcessRoutesPayload (
+              hh,
+              helloSrc,
+              pathlossDb,
+              snrDb,
+              linkCost);
+
+        if (neighbor.routingSnapshotActive)
           {
-            std::cout << "[NWK " << m_nodeId
-                      << "] RoutingRequest fulfilled"
-                      << " neighbor=" << helloSrc
-                      << " requestSequence="
-                      << neighbor.routingRequestSequence
-                      << " responseSequence="
-                      << incomingSequence
-                      << std::endl;
-
-            neighbor.routingRequestPending = false;
-          }*/
-         if (neighbor.routingSnapshotActive)
-          {
-            for (uint8_t index = 0;
-                index <
-                  hh.GetAdvertisedRouteCount ();
-                ++index)
-              {
-                auto advertised =
-                  hh.GetAdvertisedRoute (
-                    index);
-
-                if (advertised.dst ==
-                      CSR_BROADCAST_ID ||
-                    advertised.dst ==
-                      m_nodeId ||
-                    advertised.dst ==
-                      helloSrc)
-                  {
-                    continue;
-                  }
-
-                neighbor
-                  .routingSnapshotSeenDestinations
-                  .insert (advertised.dst);
-              }
+            neighbor
+              .routingSnapshotSeenDestinations
+              .insert (
+                acceptedDestinations.begin (),
+                acceptedDestinations.end ());
 
             std::cout << "[NWK " << m_nodeId
                       << "] RoutingSnapshot UPDATE"
                       << " from=" << helloSrc
-                      << " seenDestinations="
+                      << " acceptedDestinations="
+                      << acceptedDestinations.size ()
+                      << " cumulativeSeenDestinations="
                       << neighbor
                           .routingSnapshotSeenDestinations
                           .size ()
                       << std::endl;
           }
-
-        ProcessRoutesPayload (
-          hh,
-          helloSrc,
-          pathlossDb,
-          snrDb,
-          linkCost);
 
         return;
       }
