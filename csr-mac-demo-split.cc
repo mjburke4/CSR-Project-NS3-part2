@@ -99,7 +99,7 @@ main (int argc, char *argv[])
   dev1->SetActiveNodesForPostTx (1);
   dev2->SetActiveNodesForPostTx (1);
   dev3->SetActiveNodesForPostTx (1);
-  
+
   setAllLinkDistances(dev0);
   setAllLinkDistances(dev1);
   setAllLinkDistances(dev2);
@@ -118,7 +118,7 @@ main (int argc, char *argv[])
   auto perFn = [perTable](int rateKbps, double snrDb, uint32_t nBits) -> double {
     return perTable->GetPer (rateKbps, snrDb, nBits);
   };
-  
+
 
   dev0->GetPhy().SetPerModel (perFn);
   dev1->GetPhy().SetPerModel (perFn);
@@ -358,8 +358,6 @@ main (int argc, char *argv[])
   net0->SendDiscoveryChirp ();
   });
 
-
-
   Simulator::Schedule (Seconds (18.0), [net0]() {
     // Keep node 0 fresh in node 1's table without refreshing
     // node 1 in node 0's table. When node 1 later becomes stale
@@ -399,6 +397,45 @@ main (int argc, char *argv[])
 
         net2->DumpRoutes ();
       });
+
+  Simulator::Schedule (
+  Seconds (31.0),
+  [net2]() {
+    std::cout
+      << "\n=== targeted RoutingDelete setup ==="
+      << std::endl;
+
+    // Simulate an active route that node 2
+    // previously learned from node 1.
+    net2->AddOrUpdateRoute (
+      98,       // destination
+      1,        // next hop
+      false,    // not immediate
+      2,        // hops
+      115.742,  // test path loss
+      64,       // link cost
+      20,       // advertised cost
+      1,        // learned from node 1
+      1);       // capability
+  });
+
+Simulator::Schedule (
+  Seconds (31.25),
+  [net1]() {
+    net1->SendReliableRoutingDelete (
+      2,   // neighbor
+      98); // deleted destination
+  });
+
+Simulator::Schedule (
+  Seconds (34.0),
+  [net2]() {
+    std::cout
+      << "\n=== post-RoutingDelete route table ==="
+      << std::endl;
+
+    net2->DumpRoutes ();
+  });
 
   // Sequence-aware discovery verification regression test.
   Simulator::Schedule (Seconds (37.5), [net1]() {

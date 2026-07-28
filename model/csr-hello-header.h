@@ -126,6 +126,9 @@ public:
   uint8_t GetAdvertisedRouteCount () const;
   AdvertisedRoute GetAdvertisedRoute (uint8_t index) const;
 
+  void SetRoutingTarget (uint16_t target);
+  uint16_t GetRoutingTarget () const;
+
 private:
   uint16_t m_nodeId {0};
   uint16_t m_helloSeq {0};
@@ -159,6 +162,8 @@ private:
   uint8_t m_routingOperation {
     static_cast<uint8_t> (CsrRoutingOperation::None)
   };
+
+  uint16_t m_routingTarget {0xFFFF};
 };
 
 } // namespace ns3

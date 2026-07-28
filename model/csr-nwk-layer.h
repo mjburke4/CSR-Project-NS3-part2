@@ -823,6 +823,73 @@ public:
       payload);
   }
 
+  void
+  SendReliableRoutingDelete (
+    uint16_t neighbor,
+    uint16_t destination)
+  {
+    if (m_hop == nullptr)
+      {
+        return;
+      }
+
+    if (destination == CSR_BROADCAST_ID ||
+        destination == m_nodeId)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingDelete rejected"
+                  << " invalidDestination="
+                  << destination
+                  << std::endl;
+        return;
+      }
+
+    auto neighborIt =
+      m_nwkNeighbors.find (neighbor);
+
+    if (neighborIt == m_nwkNeighbors.end ())
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingDelete rejected"
+                  << " unknownNeighbor="
+                  << neighbor
+                  << std::endl;
+        return;
+      }
+
+    if (neighborIt->second.stale)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingDelete rejected"
+                  << " staleNeighbor="
+                  << neighbor
+                  << std::endl;
+        return;
+      }
+
+    uint32_t sequence =
+      NextRoutingSequence ();
+
+    Ptr<Packet> payload =
+      BuildRoutingMarkerPayload (
+        CsrRoutingOperation::Delete,
+        sequence,
+        destination);
+
+    std::cout << "[NWK " << m_nodeId
+              << "] Sending reliable RoutingDelete"
+              << " neighbor=" << neighbor
+              << " destination="
+              << destination
+              << " routingSequence="
+              << sequence
+              << std::endl;
+
+    m_hop->SendRoutingControl (
+      neighbor,
+      payload);
+  }
+
 private:
 
   struct RouteEntry
@@ -1515,7 +1582,9 @@ private:
 
   Ptr<Packet> BuildRoutingMarkerPayload (
     CsrRoutingOperation operation,
-    uint32_t routingSequence);
+    uint32_t routingSequence,
+    uint16_t routingTarget =
+      CSR_BROADCAST_ID);
 
   struct OutboundRoutingSnapshot
   {
@@ -2156,7 +2225,118 @@ CsrNetLayer::ProcessRoutingUpdate (
 
         return;
       }
+
     case CsrRoutingOperation::Delete:
+      {
+        uint16_t destination =
+          hh.GetRoutingTarget ();
+
+        if (destination ==
+            CSR_BROADCAST_ID)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Ignoring malformed RoutingDelete"
+                      << " from=" << helloSrc
+                      << " with no destination"
+                      << std::endl;
+
+            return;
+          }
+
+        bool matchingRouteFound = false;
+        bool routeInvalidated = false;
+        bool directRouteProtected = false;
+
+        for (auto &route : m_routes)
+          {
+            if (route.nwkDst != destination)
+              {
+                continue;
+              }
+
+            // Hearing the packet itself proves that the direct
+            // route to the reporting neighbor still exists.
+            if (route.immediate)
+              {
+                if (destination == helloSrc)
+                  {
+                    directRouteProtected = true;
+                  }
+
+                continue;
+              }
+
+            // A neighbor may delete only the route state that
+            // was previously learned from that same neighbor.
+            if (route.learnedFrom != helloSrc)
+              {
+                continue;
+              }
+
+            matchingRouteFound = true;
+            route.lastUpdated =
+              Simulator::Now ();
+
+            if (route.valid)
+              {
+                route.valid = false;
+                routeInvalidated = true;
+
+                std::cout << "[NWK " << m_nodeId
+                          << "] RoutingDelete invalidated"
+                          << " dst=" << destination
+                          << " learnedFrom="
+                          << helloSrc
+                          << " routingSequence="
+                          << incomingSequence
+                          << std::endl;
+              }
+            else
+              {
+                std::cout << "[NWK " << m_nodeId
+                          << "] RoutingDelete refreshed"
+                          << " already-invalid route"
+                          << " dst=" << destination
+                          << " learnedFrom="
+                          << helloSrc
+                          << std::endl;
+              }
+          }
+
+        if (directRouteProtected)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingDelete ignored for direct neighbor"
+                      << " neighbor=" << helloSrc
+                      << std::endl;
+          }
+
+        if (!matchingRouteFound &&
+            !directRouteProtected)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingDelete found no matching route"
+                      << " dst=" << destination
+                      << " learnedFrom="
+                      << helloSrc
+                      << std::endl;
+          }
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingDelete completed"
+                  << " from=" << helloSrc
+                  << " destination="
+                  << destination
+                  << " invalidated="
+                  << (routeInvalidated ? 1 : 0)
+                  << std::endl;
+
+        DumpRoutes ();
+        ScheduleCheckNwkQueue ();
+
+        return;
+      }
+
     case CsrRoutingOperation::Flush:
       {
         if (!neighbor.routingSnapshotActive)
@@ -3586,7 +3766,8 @@ CsrNetLayer::BuildRoutingRequestPayload (
 Ptr<Packet>
 CsrNetLayer::BuildRoutingMarkerPayload (
   CsrRoutingOperation operation,
-  uint32_t routingSequence)
+  uint32_t routingSequence,
+  uint16_t routingTarget)
 {
   Ptr<Packet> packet =
     Create<Packet> ();
@@ -3630,6 +3811,9 @@ CsrNetLayer::BuildRoutingMarkerPayload (
 
   hh.SetRoutingOperation (
     operation);
+
+  hh.SetRoutingTarget (
+    routingTarget);
 
   hh.ClearChirpNeighbors ();
   hh.ClearAdvertisedRoutes ();
