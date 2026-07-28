@@ -763,7 +763,8 @@ public:
   }
 
   void
-  SendRoutingRequest (uint16_t neighbor)
+  SendRoutingRequest (
+    uint16_t neighbor)
   {
     if (m_hop == nullptr)
       {
@@ -773,7 +774,8 @@ public:
     auto neighborIt =
       m_nwkNeighbors.find (neighbor);
 
-    if (neighborIt == m_nwkNeighbors.end ())
+    if (neighborIt ==
+        m_nwkNeighbors.end ())
       {
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingRequest rejected"
@@ -783,7 +785,10 @@ public:
         return;
       }
 
-    if (neighborIt->second.stale)
+    NwkNeighborEntry &entry =
+      neighborIt->second;
+
+    if (entry.stale)
       {
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingRequest rejected"
@@ -793,34 +798,28 @@ public:
         return;
       }
 
-    ++m_routingSequence;
-
-    if (m_routingSequence == 0)
+    if (entry.routingRequestPending)
       {
-        ++m_routingSequence;
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingRequest already pending"
+                  << " neighbor=" << neighbor
+                  << " requestSequence="
+                  << entry.routingRequestSequence
+                  << std::endl;
+        return;
       }
 
-    NwkNeighborEntry &neighborEntry =
-      neighborIt->second;
+    entry.routingRequestPending = true;
+    entry.routingRequestRetryCount = 0;
 
-    neighborEntry.routingRequestPending = true;
-    neighborEntry.routingRequestSequence =
-      m_routingSequence;
+    // Remove any residue from an older incomplete snapshot.
+    entry.routingSnapshotActive = false;
+    entry.routingSnapshotInfoSequence = 0;
+    entry.routingSnapshotSeenDestinations.clear ();
 
-    Ptr<Packet> payload =
-      BuildRoutingRequestPayload (
-        m_routingSequence);
-
-    std::cout << "[NWK " << m_nodeId
-              << "] Sending reliable RoutingRequest"
-              << " neighbor=" << neighbor
-              << " routingSequence="
-              << m_routingSequence
-              << std::endl;
-
-    m_hop->SendRoutingControl (
+    SendRoutingRequestAttempt (
       neighbor,
-      payload);
+      false);
   }
 
   void
@@ -957,6 +956,9 @@ private:
     bool routingRequestPending {false};
     uint32_t routingRequestSequence {0};
 
+    uint32_t routingRequestRetryCount {0};
+    EventId routingRequestTimeoutEvent;
+
     bool routingSnapshotActive {false};
 
     uint32_t routingSnapshotInfoSequence {0};
@@ -967,6 +969,14 @@ private:
 
   Ptr<Packet> BuildRoutingRequestPayload (
     uint32_t routingSequence);
+
+  void SendRoutingRequestAttempt (
+    uint16_t neighbor,
+    bool retry);
+
+  void RoutingRequestTimeout (
+    uint16_t neighbor,
+    uint32_t expectedSequence);
 
   // NSDP: Network Source–Destination Pair entry
   struct NsdpEntry
@@ -1441,6 +1451,19 @@ public:
       payload);
   }
 
+  void
+  SetRoutingSnapshotResponseEnabled (
+    bool enable)
+  {
+    m_routingSnapshotResponseEnabled =
+      enable;
+
+    std::cout << "[NWK " << m_nodeId
+              << "] routing_snapshot_response_enabled="
+              << (enable ? "true" : "false")
+              << std::endl;
+  }
+
 private:
   uint16_t                              m_nodeId;
   Ptr<CsrHopLayer>                      m_hop;
@@ -1610,6 +1633,14 @@ private:
 
     return m_routingSequence;
   }
+
+  Time m_routingRequestTimeout {
+    Seconds (8.0)
+  };
+
+  uint32_t m_maxRoutingRequestRetries {2};
+
+  bool m_routingSnapshotResponseEnabled {true};
 };
 
 
@@ -2117,6 +2148,18 @@ CsrNetLayer::ProcessRoutingUpdate (
                   << "; scheduling reliable INFO/UPDATE/FLUSH snapshot"
                   << std::endl;
 
+        if (!m_routingSnapshotResponseEnabled)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Suppressing RoutingSnapshot response"
+                      << " requester=" << helloSrc
+                      << " requestSequence="
+                      << incomingSequence
+                      << " testMode=true"
+                      << std::endl;
+
+            return;
+          }
         // Reply specifically to the requesting neighbor.
         Simulator::Schedule (
           MilliSeconds (20),
@@ -2409,18 +2452,29 @@ CsrNetLayer::ProcessRoutingUpdate (
 
         if (neighbor.routingRequestPending)
           {
+            if (neighbor
+                  .routingRequestTimeoutEvent
+                  .IsPending ())
+              {
+                Simulator::Cancel (
+                  neighbor
+                    .routingRequestTimeoutEvent);
+              }
+
             std::cout << "[NWK " << m_nodeId
                       << "] RoutingRequest fulfilled"
                       << " neighbor=" << helloSrc
                       << " requestSequence="
-                      << neighbor
-                          .routingRequestSequence
+                      << neighbor.routingRequestSequence
                       << " flushSequence="
                       << incomingSequence
+                      << " retries="
+                      << neighbor.routingRequestRetryCount
                       << std::endl;
 
-            neighbor.routingRequestPending =
-              false;
+            neighbor.routingRequestPending = false;
+            neighbor.routingRequestSequence = 0;
+            neighbor.routingRequestRetryCount = 0;
           }
 
         DumpRoutes ();
@@ -3905,5 +3959,179 @@ CsrNetLayer::StartReliableRoutingSnapshot (
   m_hop->SendRoutingControl (
     neighbor,
     infoPayload);
+}
+
+void
+CsrNetLayer::SendRoutingRequestAttempt (
+  uint16_t neighbor,
+  bool retry)
+{
+  if (m_hop == nullptr)
+    {
+      return;
+    }
+
+  auto neighborIt =
+    m_nwkNeighbors.find (neighbor);
+
+  if (neighborIt ==
+      m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry =
+    neighborIt->second;
+
+  if (!entry.routingRequestPending)
+    {
+      return;
+    }
+
+  if (entry.stale)
+    {
+      entry.routingRequestPending = false;
+      entry.routingRequestRetryCount = 0;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingRequest aborted"
+                << " neighbor became stale="
+                << neighbor
+                << std::endl;
+      return;
+    }
+
+  uint32_t sequence =
+    NextRoutingSequence ();
+
+  entry.routingRequestSequence =
+    sequence;
+
+  Ptr<Packet> payload =
+    BuildRoutingRequestPayload (
+      sequence);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending reliable RoutingRequest"
+            << " neighbor=" << neighbor
+            << " routingSequence="
+            << sequence
+            << " attempt="
+            << (entry.routingRequestRetryCount + 1)
+            << " retry="
+            << (retry ? 1 : 0)
+            << std::endl;
+
+  m_hop->SendRoutingControl (
+    neighbor,
+    payload);
+
+  if (entry.routingRequestTimeoutEvent.IsPending ())
+    {
+      Simulator::Cancel (
+        entry.routingRequestTimeoutEvent);
+    }
+
+  entry.routingRequestTimeoutEvent =
+    Simulator::Schedule (
+      m_routingRequestTimeout,
+      &CsrNetLayer::RoutingRequestTimeout,
+      this,
+      neighbor,
+      sequence);
+}
+
+void
+CsrNetLayer::RoutingRequestTimeout (
+  uint16_t neighbor,
+  uint32_t expectedSequence)
+{
+  auto neighborIt =
+    m_nwkNeighbors.find (neighbor);
+
+  if (neighborIt ==
+      m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry =
+    neighborIt->second;
+
+  if (!entry.routingRequestPending)
+    {
+      return;
+    }
+
+  // Ignore an old timer left behind by a newer attempt.
+  if (entry.routingRequestSequence !=
+      expectedSequence)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring stale RoutingRequest timeout"
+                << " neighbor=" << neighbor
+                << " expectedSequence="
+                << expectedSequence
+                << " currentSequence="
+                << entry.routingRequestSequence
+                << std::endl;
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] RoutingRequest timeout"
+            << " neighbor=" << neighbor
+            << " requestSequence="
+            << expectedSequence
+            << " retryCount="
+            << entry.routingRequestRetryCount
+            << std::endl;
+
+  // Discard any partial INFO/UPDATE transaction.
+  entry.routingSnapshotActive = false;
+  entry.routingSnapshotInfoSequence = 0;
+  entry.routingSnapshotSeenDestinations.clear ();
+
+  if (entry.stale)
+    {
+      entry.routingRequestPending = false;
+      entry.routingRequestRetryCount = 0;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingRequest failed"
+                << " neighbor is stale="
+                << neighbor
+                << std::endl;
+      return;
+    }
+
+  if (entry.routingRequestRetryCount >=
+      m_maxRoutingRequestRetries)
+    {
+      entry.routingRequestPending = false;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingRequest failed"
+                << " neighbor=" << neighbor
+                << " retriesExhausted="
+                << entry.routingRequestRetryCount
+                << std::endl;
+
+      entry.routingRequestRetryCount = 0;
+      return;
+    }
+
+  entry.routingRequestRetryCount++;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Retrying RoutingRequest"
+            << " neighbor=" << neighbor
+            << " retry="
+            << entry.routingRequestRetryCount
+            << std::endl;
+
+  SendRoutingRequestAttempt (
+    neighbor,
+    true);
 }
 // ------------------------------------------------------------

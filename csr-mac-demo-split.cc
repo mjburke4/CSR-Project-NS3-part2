@@ -458,6 +458,34 @@ Simulator::Schedule (
     net1->SetDiscoveryResponseEnabled (true);
   });
 
+  Simulator::Schedule (
+  Seconds (46.0),
+  [net1]() {
+    net1->SetRoutingSnapshotResponseEnabled (
+      false);
+  });
+
+Simulator::Schedule (
+  Seconds (46.25),
+  [net2]() {
+    std::cout
+      << "\n=== RoutingRequest timeout/retry test ==="
+      << std::endl;
+
+    net2->SendRoutingRequest (1);
+  });
+
+Simulator::Schedule (
+  Seconds (53.5),
+  [net1]() {
+    // The initial request was ACKed but received
+    // no snapshot. Permit the retry to succeed.
+    net1->SetRoutingSnapshotResponseEnabled (
+      true);
+  });
+
+  Simulator::Stop (Seconds (70.0));
+
   // Traffic pattern similar to your earlier log
 
   // Burst 1 at t=1 s
