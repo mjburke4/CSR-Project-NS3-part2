@@ -247,7 +247,7 @@ main (int argc, char *argv[])
   // Node 0 will trigger on-demand discovery at t=1.
   // Node 1 sends HELLO shortly after so node 0 can learn route dst=1 -> nextHop=1.
   //net1->StartDiscovery (Seconds (1.5), Seconds (5.0));
-  
+
   //net0->StartDiscovery (Seconds (10.0), Seconds (30.0));
   //net1->StartDiscovery (Seconds (10.0), Seconds (30.0));
   //net2->StartDiscovery (Seconds (10.0), Seconds (30.0));
@@ -427,6 +427,62 @@ Simulator::Schedule (
       98); // deleted destination
   });
 
+  Simulator::Schedule (
+  Seconds (33.0),
+  [net2]() {
+    std::cout
+      << "\n=== route path loop-rejection setup ==="
+      << std::endl;
+
+    // Valid route: node 2 reaches 95
+    // through node 3.
+    net2->AddOrUpdateRoute (
+      95,
+      3,
+      false,
+      2,
+      111.868,
+      51,
+      20,
+      3,
+      1,
+      std::vector<uint16_t> {
+        3, 95
+      });
+
+    // Deliberately malformed loop:
+    // node 1 appears in the path that
+    // will be advertised to node 1.
+    net2->AddOrUpdateRoute (
+      96,
+      3,
+      false,
+      3,
+      111.868,
+      51,
+      25,
+      3,
+      1,
+      std::vector<uint16_t> {
+        3, 1, 96
+      });
+
+    net2->SendReliableRoutingUpdate (
+      1);
+  });
+
+Simulator::Schedule (
+  Seconds (34.75),
+  [net1]() {
+    std::cout
+      << "\n=== route path loop-rejection result ==="
+      << std::endl;
+
+    net1->DumpBestRoute (95);
+    net1->DumpBestRoute (96);
+    net1->DumpRoutes ();
+  });
+
 Simulator::Schedule (
   Seconds (34.0),
   [net2]() {
@@ -455,7 +511,8 @@ Simulator::Schedule (
       39,
       10,
       0,
-      1);
+      1,
+      std::vector<uint16_t> {0, 97});
 
     // Backup candidate through node 2:
     // total cost = 64 + 30 = 94.
@@ -468,7 +525,8 @@ Simulator::Schedule (
       64,
       30,
       2,
-      1);
+      1,
+      std::vector<uint16_t> {2, 97});
 
     net1->DumpRoutes ();
     net1->DumpBestRoute (97);

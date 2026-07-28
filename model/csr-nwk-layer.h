@@ -396,11 +396,26 @@ public:
                       << ",cost=" << re.cost
                       << ",linkCost=" << re.linkCostToNextHop
                       << ",advCost=" << re.advertisedCost
-                      << ",from=" << re.learnedFrom
-                      << ",imm=" << (re.immediate ? 1 : 0)
-                      << ",pl=" << re.pathlossDb
-                      << ",valid=" << (re.valid ? 1 : 0)
-                      << ")";
+	                      << ",from=" << re.learnedFrom
+	                      << ",imm=" << (re.immediate ? 1 : 0)
+	                      << ",pl=" << re.pathlossDb
+	                      << ",valid=" << (re.valid ? 1 : 0)
+	                      << ",path=[";
+
+	                      for (size_t index = 0;
+	                          index < re.path.size ();
+	                          ++index)
+                        {
+                          if (index > 0)
+                            {
+                              std::cout << "->";
+                            }
+
+                          std::cout << re.path[index];
+                        }
+
+	                      std::cout << "]";
+	                      std::cout << ")";
           }
       }
 
@@ -601,10 +616,11 @@ public:
     bool immediate,
     uint8_t numHop,
     double pathlossDb,
-    uint32_t linkCostToNextHop,
-    uint32_t advertisedCost,
-    uint16_t learnedFrom,
-    uint8_t capability = 0)
+	    uint32_t linkCostToNextHop,
+	    uint32_t advertisedCost,
+	    uint16_t learnedFrom,
+	    uint8_t capability = 0,
+	    const std::vector<uint16_t> &path = {})
   {
     if (nwkDst == m_nodeId ||
         nwkDst == CSR_BROADCAST_ID)
@@ -619,6 +635,22 @@ public:
     if (totalCost == 0)
       {
         totalCost = 1;
+      }
+
+    std::vector<uint16_t>
+      normalizedPath = path;
+
+    if (normalizedPath.empty ())
+      {
+        normalizedPath.push_back (
+          nextHop);
+      }
+
+    if (normalizedPath.size () >
+        CSR_MAX_ROUTE_PATH_HOPS)
+      {
+        normalizedPath.resize (
+          CSR_MAX_ROUTE_PATH_HOPS);
       }
 
     // A candidate is identified by destination and next hop.
@@ -661,6 +693,8 @@ public:
         route.learnedFrom =
           learnedFrom;
 
+        route.path = normalizedPath;
+
         route.lastUpdated =
           Simulator::Now ();
 
@@ -668,6 +702,7 @@ public:
 
         const RouteEntry *best =
           FindBestRoute (nwkDst);
+
 
         std::cout << "[NWK " << m_nodeId
                   << "] Updated route candidate"
@@ -718,6 +753,8 @@ public:
 
     route.learnedFrom =
       learnedFrom;
+
+    route.path = normalizedPath;
 
     route.energyLevel = 100;
 
@@ -967,8 +1004,11 @@ private:
     bool     valid {true};
     uint32_t linkCostToNextHop {0};
     uint32_t advertisedCost {0};
+    uint16_t learnedFrom {
+      CSR_BROADCAST_ID
+    }; // node that taught us this route
 
-    uint16_t learnedFrom {CSR_BROADCAST_ID}; // node that taught us this route
+    std::vector<uint16_t> path;
   };
 
   const RouteEntry*
@@ -2080,6 +2120,30 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
       {
         auto ar = hh.GetAdvertisedRoute (idx);
 
+        bool pathContainsLocalNode = false;
+
+        for (uint16_t pathNode :
+            ar.path)
+          {
+            if (pathNode == m_nodeId)
+              {
+                pathContainsLocalNode = true;
+                break;
+              }
+          }
+
+        if (pathContainsLocalNode)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Rejecting looped advertised route"
+                      << " dst=" << ar.dst
+                      << " from=" << helloSrc
+                      << " reason=local-node-in-path"
+                      << std::endl;
+
+            continue;
+          }
+
         if (ar.dst == CSR_BROADCAST_ID ||
             ar.dst == m_nodeId ||
             ar.dst == helloSrc)
@@ -2090,16 +2154,36 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
         uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
         uint32_t totalCost = linkCost + ar.cost;
 
+        std::vector<uint16_t> candidatePath;
+
+        candidatePath.push_back (
+          helloSrc);
+
+        for (uint16_t pathNode :
+            ar.path)
+          {
+            candidatePath.push_back (
+              pathNode);
+
+            if (candidatePath.size () >=
+                CSR_MAX_ROUTE_PATH_HOPS)
+              {
+                break;
+              }
+          }
+
         bool accepted =
-          AddOrUpdateRoute (ar.dst,
-                            helloSrc,
-                            false,
-                            totalHops,
-                            pathlossDb,
-                            linkCost,
-                            ar.cost,
-                            helloSrc,
-                            ar.capability);
+          AddOrUpdateRoute (
+            ar.dst,
+            helloSrc,
+            false,
+            totalHops,
+            pathlossDb,
+            linkCost,
+            ar.cost,
+            helloSrc,
+            ar.capability,
+            candidatePath);
 
         if (accepted)
           {
@@ -3809,7 +3893,8 @@ CsrNetLayer::BuildRoutingUpdatePayload (
             route.numHop,
             route.cost,
             pathlossX10,
-            route.capability))
+            route.capability,
+            route.path))
         {
           added++;
         }

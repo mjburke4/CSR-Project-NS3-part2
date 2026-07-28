@@ -114,25 +114,57 @@ namespace ns3 {
   uint32_t
   CsrHelloHeader::GetSerializedSize () const
   {
-       return 2  // nodeId
-            + 2  // helloSeq
-            + 1  // speedKey
-            + 2  // rxPowerDbmX10
-            + 1  // activeNodes
-            + 1   //Node Type
-            + 1  // arlRouteMsgType
-            + 1  // neighborCheckType
-            + 2  // neighborCheckTarget
-            + 1  // discoverType
-            + 4  // discoverySequence
-            + 4  // routingSequence
-            + 1  // routingOperation
-            + 2  // routingTarget
-            + 1  // chirpNeighborCount
-            + static_cast<uint32_t> (m_chirpNeighbors.size ()) * 2
-            + 1  // routeCount
-            + static_cast<uint32_t> (m_advertisedRoutes.size ())
-                * (2 + 1 + 4 + 2 + 1);
+    uint32_t size =
+        2  // nodeId
+      + 2  // helloSeq
+      + 1  // speedKey
+      + 2  // rxPowerDbmX10
+      + 1  // activeNodes
+      + 1  // nodeType
+      + 1  // arlRouteMsgType
+      + 1  // neighborCheckType
+      + 2  // neighborCheckTarget
+      + 1  // discoverType
+      + 4  // discoverySequence
+      + 4  // routingSequence
+      + 1  // routingOperation
+      + 2  // routingTarget
+      + 1  // chirpNeighborCount
+      + static_cast<uint32_t> (
+          m_chirpNeighbors.size ()) * 2
+      + 1; // routeCount
+
+    uint8_t routeCount =
+      static_cast<uint8_t> (
+        std::min<size_t> (
+          m_advertisedRoutes.size (),
+          MAX_ADVERTISED_ROUTES));
+
+    for (uint8_t index = 0;
+        index < routeCount;
+        ++index)
+      {
+        const AdvertisedRoute &route =
+          m_advertisedRoutes[index];
+
+        uint8_t pathCount =
+          static_cast<uint8_t> (
+            std::min<size_t> (
+              route.path.size (),
+              CSR_MAX_ROUTE_PATH_HOPS));
+
+        size +=
+            2  // destination
+          + 1  // hops
+          + 4  // cost
+          + 2  // pathloss
+          + 1  // capability
+          + 1  // pathCount
+          + static_cast<uint32_t> (
+              pathCount) * 2;
+      }
+
+    return size;
   }
 
   void
@@ -178,12 +210,30 @@ namespace ns3 {
         i.WriteHtonU32 (ar.cost);
         i.WriteHtonU16 (static_cast<uint16_t> (ar.pathlossDbX10));
         i.WriteU8 (ar.capability);
+
+        uint8_t pathCount =
+          static_cast<uint8_t> (
+            std::min<size_t> (
+              ar.path.size (),
+              CSR_MAX_ROUTE_PATH_HOPS));
+
+        i.WriteU8 (pathCount);
+
+        for (uint8_t pathIndex = 0;
+            pathIndex < pathCount;
+            ++pathIndex)
+          {
+            i.WriteHtonU16 (
+              ar.path[pathIndex]);
+          }
       }
   }
 
   uint32_t
   CsrHelloHeader::Deserialize (Buffer::Iterator i)
   {
+    Buffer::Iterator start = i;
+
     m_nodeId = i.ReadNtohU16 ();
     m_helloSeq = i.ReadNtohU16 ();
     m_speedKey = i.ReadU8 ();
@@ -211,25 +261,58 @@ namespace ns3 {
 
     m_advertisedRoutes.clear ();
 
-    uint8_t count = i.ReadU8 ();
-    if (count > MAX_ADVERTISED_ROUTES)
+    uint8_t wireRouteCount =
+      i.ReadU8 ();
+
+    for (uint8_t routeIndex = 0;
+        routeIndex < wireRouteCount;
+        ++routeIndex)
       {
-        count = MAX_ADVERTISED_ROUTES;
+        AdvertisedRoute route;
+
+        route.dst =
+          i.ReadNtohU16 ();
+
+        route.hops =
+          i.ReadU8 ();
+
+        route.cost =
+          i.ReadNtohU32 ();
+
+        route.pathlossDbX10 =
+          static_cast<int16_t> (
+            i.ReadNtohU16 ());
+
+        route.capability =
+          i.ReadU8 ();
+
+        uint8_t wirePathCount =
+          i.ReadU8 ();
+
+        for (uint8_t pathIndex = 0;
+            pathIndex < wirePathCount;
+            ++pathIndex)
+          {
+            uint16_t hop =
+              i.ReadNtohU16 ();
+
+            if (pathIndex <
+                  CSR_MAX_ROUTE_PATH_HOPS)
+              {
+                route.path.push_back (
+                  hop);
+              }
+          }
+
+        if (routeIndex <
+              MAX_ADVERTISED_ROUTES)
+          {
+            m_advertisedRoutes.push_back (
+              route);
+          }
       }
 
-    for (uint8_t idx = 0; idx < count; ++idx)
-      {
-        AdvertisedRoute ar;
-        ar.dst = i.ReadNtohU16 ();
-        ar.hops = i.ReadU8 ();
-        ar.cost = i.ReadNtohU32 ();
-        ar.pathlossDbX10 = static_cast<int16_t> (i.ReadNtohU16 ());
-        ar.capability = i.ReadU8 ();
-
-        m_advertisedRoutes.push_back (ar);
-      }
-
-    return GetSerializedSize ();
+    return i.GetDistanceFrom (start);
   }
 
   void
@@ -260,11 +343,13 @@ namespace ns3 {
   }
 
   bool
-  CsrHelloHeader::AddAdvertisedRoute (uint16_t dst,
-                                      uint8_t hops,
-                                      uint32_t cost,
-                                      int16_t pathlossDbX10,
-                                      uint8_t capability)
+  CsrHelloHeader::AddAdvertisedRoute (
+    uint16_t dst,
+    uint8_t hops,
+    uint32_t cost,
+    int16_t pathlossDbX10,
+    uint8_t capability,
+    const std::vector<uint16_t> &path)
   {
     if (m_advertisedRoutes.size () >= MAX_ADVERTISED_ROUTES)
       {
@@ -282,6 +367,14 @@ namespace ns3 {
     ar.cost = cost;
     ar.pathlossDbX10 = pathlossDbX10;
     ar.capability = capability;
+    ar.path = path;
+
+    if (ar.path.size () >
+        CSR_MAX_ROUTE_PATH_HOPS)
+      {
+        ar.path.resize (
+          CSR_MAX_ROUTE_PATH_HOPS);
+      }
 
     m_advertisedRoutes.push_back (ar);
     return true;

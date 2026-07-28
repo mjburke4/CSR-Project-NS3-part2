@@ -48,6 +48,9 @@ enum class CsrRoutingOperation : uint8_t
   None    = 0xFF
 };
 
+static constexpr uint8_t
+  CSR_MAX_ROUTE_PATH_HOPS = 32;
+
 class CsrHelloHeader : public Header
 {
 public:
@@ -114,14 +117,19 @@ public:
     uint32_t cost {0};
     int16_t  pathlossDbX10 {0};
     uint8_t  capability {0};
+
+    std::vector<uint16_t> path;
   };
 
   void ClearAdvertisedRoutes ();
-  bool AddAdvertisedRoute (uint16_t dst,
-                          uint8_t hops,
-                          uint32_t cost,
-                          int16_t pathlossDbX10,
-                          uint8_t capability);
+
+  bool AddAdvertisedRoute (
+    uint16_t dst,
+    uint8_t hops,
+    uint32_t cost,
+    int16_t pathlossDbX10,
+    uint8_t capability,
+    const std::vector<uint16_t> &path = {});
 
   uint8_t GetAdvertisedRouteCount () const;
   AdvertisedRoute GetAdvertisedRoute (uint8_t index) const;
