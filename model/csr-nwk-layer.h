@@ -3,6 +3,7 @@
 #include "csr-hello-header.h"
 #include "csr-hop-layer.h"
 #include <cmath>
+#include <set>
 
 
 class CsrNetLayer : public Object
@@ -51,6 +52,9 @@ public:
     CsrNeighborCheckType type = CsrNeighborCheckType::Message,
     uint16_t target = CSR_BROADCAST_ID,
     uint32_t discoverySequence = 0);
+
+  void StartReliableRoutingSnapshot (
+    uint16_t neighbor);
 
   const char* NeighborCheckTypeName (CsrNeighborCheckType t) const;
   void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
@@ -885,6 +889,13 @@ private:
 
     bool routingRequestPending {false};
     uint32_t routingRequestSequence {0};
+
+    bool routingSnapshotActive {false};
+
+    uint32_t routingSnapshotInfoSequence {0};
+
+    std::set<uint16_t>
+      routingSnapshotSeenDestinations;
   };
 
   Ptr<Packet> BuildRoutingRequestPayload (
@@ -1196,6 +1207,88 @@ public:
               << " operation="
               << RoutingOperationName (operation)
               << std::endl;
+
+    auto snapshotIt =
+      m_outboundRoutingSnapshots.find (
+        neighbor);
+
+    if (snapshotIt ==
+        m_outboundRoutingSnapshots.end ())
+      {
+        return;
+      }
+
+    OutboundRoutingSnapshot &snapshot =
+      snapshotIt->second;
+
+    if (!snapshot.active)
+      {
+        return;
+      }
+
+    if (operation ==
+          CsrRoutingOperation::Info &&
+        routingSequence ==
+          snapshot.infoSequence)
+      {
+        Ptr<Packet> updatePayload =
+          BuildRoutingUpdatePayload (
+            snapshot.updateSequence);
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingSnapshot INFO ACKed;"
+                  << " sending UPDATE"
+                  << " neighbor=" << neighbor
+                  << " routingSequence="
+                  << snapshot.updateSequence
+                  << std::endl;
+
+        m_hop->SendRoutingControl (
+          neighbor,
+          updatePayload);
+
+        return;
+      }
+
+    if (operation ==
+          CsrRoutingOperation::Update &&
+        routingSequence ==
+          snapshot.updateSequence)
+      {
+        Ptr<Packet> flushPayload =
+          BuildRoutingMarkerPayload (
+            CsrRoutingOperation::Flush,
+            snapshot.flushSequence);
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingSnapshot UPDATE ACKed;"
+                  << " sending FLUSH"
+                  << " neighbor=" << neighbor
+                  << " routingSequence="
+                  << snapshot.flushSequence
+                  << std::endl;
+
+        m_hop->SendRoutingControl (
+          neighbor,
+          flushPayload);
+
+        return;
+      }
+
+    if (operation ==
+          CsrRoutingOperation::Flush &&
+        routingSequence ==
+          snapshot.flushSequence)
+      {
+        snapshot.active = false;
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Reliable RoutingSnapshot completed"
+                  << " neighbor=" << neighbor
+                  << " finalSequence="
+                  << routingSequence
+                  << std::endl;
+      }
   }
 
   const char*
@@ -1419,6 +1512,35 @@ private:
   uint32_t routingSequence);
 
   uint16_t m_routingControlHeaderSeq {0};
+
+  Ptr<Packet> BuildRoutingMarkerPayload (
+    CsrRoutingOperation operation,
+    uint32_t routingSequence);
+
+  struct OutboundRoutingSnapshot
+  {
+    bool active {false};
+
+    uint32_t infoSequence {0};
+    uint32_t updateSequence {0};
+    uint32_t flushSequence {0};
+  };
+
+  std::map<uint16_t, OutboundRoutingSnapshot>
+    m_outboundRoutingSnapshots;
+
+  uint32_t
+  NextRoutingSequence ()
+  {
+    ++m_routingSequence;
+
+    if (m_routingSequence == 0)
+      {
+        ++m_routingSequence;
+      }
+
+    return m_routingSequence;
+  }
 };
 
 
@@ -1923,13 +2045,14 @@ CsrNetLayer::ProcessRoutingUpdate (
                   << " from=" << helloSrc
                   << " routingSequence="
                   << incomingSequence
-                  << "; scheduling reliable full update"
+                  << "; scheduling reliable INFO/UPDATE/FLUSH snapshot"
                   << std::endl;
 
         // Reply specifically to the requesting neighbor.
         Simulator::Schedule (
           MilliSeconds (20),
-          &CsrNetLayer::SendReliableRoutingUpdate,
+          &CsrNetLayer::
+            StartReliableRoutingSnapshot,
           this,
           helloSrc);
 
@@ -1953,7 +2076,7 @@ CsrNetLayer::ProcessRoutingUpdate (
         // An ACK only proved that our Request arrived.
         // Receiving this Update proves that the requested
         // routing state came back.
-        if (neighbor.routingRequestPending)
+        /*if (neighbor.routingRequestPending)
           {
             std::cout << "[NWK " << m_nodeId
                       << "] RoutingRequest fulfilled"
@@ -1965,6 +2088,41 @@ CsrNetLayer::ProcessRoutingUpdate (
                       << std::endl;
 
             neighbor.routingRequestPending = false;
+          }*/
+         if (neighbor.routingSnapshotActive)
+          {
+            for (uint8_t index = 0;
+                index <
+                  hh.GetAdvertisedRouteCount ();
+                ++index)
+              {
+                auto advertised =
+                  hh.GetAdvertisedRoute (
+                    index);
+
+                if (advertised.dst ==
+                      CSR_BROADCAST_ID ||
+                    advertised.dst ==
+                      m_nodeId ||
+                    advertised.dst ==
+                      helloSrc)
+                  {
+                    continue;
+                  }
+
+                neighbor
+                  .routingSnapshotSeenDestinations
+                  .insert (advertised.dst);
+              }
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingSnapshot UPDATE"
+                      << " from=" << helloSrc
+                      << " seenDestinations="
+                      << neighbor
+                          .routingSnapshotSeenDestinations
+                          .size ()
+                      << std::endl;
           }
 
         ProcessRoutesPayload (
@@ -1978,17 +2136,115 @@ CsrNetLayer::ProcessRoutingUpdate (
       }
 
     case CsrRoutingOperation::Info:
-    case CsrRoutingOperation::Delete:
-    case CsrRoutingOperation::Flush:
       {
+        neighbor.routingSnapshotActive =
+          true;
+
+        neighbor.routingSnapshotInfoSequence =
+          incomingSequence;
+
+        neighbor
+          .routingSnapshotSeenDestinations
+          .clear ();
+
         std::cout << "[NWK " << m_nodeId
-                  << "] Routing operation not implemented yet"
-                  << " operation="
-                  << RoutingOperationName (operation)
+                  << "] RoutingSnapshot INFO received"
                   << " from=" << helloSrc
                   << " routingSequence="
                   << incomingSequence
                   << std::endl;
+
+        return;
+      }
+    case CsrRoutingOperation::Delete:
+    case CsrRoutingOperation::Flush:
+      {
+        if (!neighbor.routingSnapshotActive)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingSnapshot FLUSH received"
+                      << " without active snapshot"
+                      << " from=" << helloSrc
+                      << " routingSequence="
+                      << incomingSequence
+                      << std::endl;
+
+            return;
+          }
+
+        uint32_t invalidated = 0;
+
+        for (auto &route : m_routes)
+          {
+            // The direct link to the reporting neighbor is
+            // established by hearing the packet itself and
+            // must not be flushed.
+            if (!route.valid ||
+                route.immediate ||
+                route.learnedFrom != helloSrc)
+              {
+                continue;
+              }
+
+            bool present =
+              neighbor
+                .routingSnapshotSeenDestinations
+                .find (route.nwkDst) !=
+              neighbor
+                .routingSnapshotSeenDestinations
+                .end ();
+
+            if (!present)
+              {
+                route.valid = false;
+                route.lastUpdated =
+                  Simulator::Now ();
+
+                invalidated++;
+
+                std::cout << "[NWK " << m_nodeId
+                          << "] RoutingSnapshot FLUSH invalidated"
+                          << " dst=" << route.nwkDst
+                          << " learnedFrom="
+                          << helloSrc
+                          << std::endl;
+              }
+          }
+
+        neighbor.routingSnapshotActive =
+          false;
+
+        neighbor
+          .routingSnapshotSeenDestinations
+          .clear ();
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] RoutingSnapshot FLUSH completed"
+                  << " from=" << helloSrc
+                  << " routingSequence="
+                  << incomingSequence
+                  << " routesInvalidated="
+                  << invalidated
+                  << std::endl;
+
+        if (neighbor.routingRequestPending)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingRequest fulfilled"
+                      << " neighbor=" << helloSrc
+                      << " requestSequence="
+                      << neighbor
+                          .routingRequestSequence
+                      << " flushSequence="
+                      << incomingSequence
+                      << std::endl;
+
+            neighbor.routingRequestPending =
+              false;
+          }
+
+        DumpRoutes ();
+        ScheduleCheckNwkQueue ();
 
         return;
       }
@@ -3215,8 +3471,12 @@ CsrNetLayer::BuildRoutingUpdatePayload (
     CsrDiscoverType::None);
 
   hh.SetDiscoverySequence (0);
+
   hh.SetRoutingSequence (
     routingSequence);
+
+  hh.SetRoutingOperation (
+    CsrRoutingOperation::Update);
 
   hh.ClearChirpNeighbors ();
   hh.ClearAdvertisedRoutes ();
@@ -3321,5 +3581,145 @@ CsrNetLayer::BuildRoutingRequestPayload (
   packet->AddHeader (hh);
 
   return packet;
+}
+
+Ptr<Packet>
+CsrNetLayer::BuildRoutingMarkerPayload (
+  CsrRoutingOperation operation,
+  uint32_t routingSequence)
+{
+  Ptr<Packet> packet =
+    Create<Packet> ();
+
+  CsrHelloHeader hh;
+
+  hh.SetNodeId (m_nodeId);
+
+  hh.SetHelloSeq (
+    ++m_routingControlHeaderSeq);
+
+  hh.SetNodeType (m_nodeType);
+  hh.SetSpeedKey (m_minSpeedKey);
+
+  double s0PowerDbm =
+    m_rxS0BaseLevelDbm +
+    m_linkMarginDb;
+
+  hh.SetRxPowerDbmX10 (
+    static_cast<int16_t> (
+      std::round (
+        s0PowerDbm * 10.0)));
+
+  hh.SetActiveNodes (
+    static_cast<uint8_t> (
+      GetActiveNodeCount ()));
+
+  hh.SetArlRouteMsgType (
+    CsrArlRouteMsgType::RoutingUpdate);
+
+  hh.SetNeighborCheckType (
+    CsrNeighborCheckType::None);
+
+  hh.SetDiscoverType (
+    CsrDiscoverType::None);
+
+  hh.SetDiscoverySequence (0);
+
+  hh.SetRoutingSequence (
+    routingSequence);
+
+  hh.SetRoutingOperation (
+    operation);
+
+  hh.ClearChirpNeighbors ();
+  hh.ClearAdvertisedRoutes ();
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Built RoutingSnapshot marker"
+            << " operation="
+            << RoutingOperationName (operation)
+            << " routingSequence="
+            << routingSequence
+            << std::endl;
+
+  packet->AddHeader (hh);
+
+  return packet;
+}
+
+void
+CsrNetLayer::StartReliableRoutingSnapshot (
+  uint16_t neighbor)
+{
+  if (m_hop == nullptr)
+    {
+      return;
+    }
+
+  auto neighborIt =
+    m_nwkNeighbors.find (neighbor);
+
+  if (neighborIt == m_nwkNeighbors.end ())
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingSnapshot rejected"
+                << " unknownNeighbor="
+                << neighbor
+                << std::endl;
+      return;
+    }
+
+  if (neighborIt->second.stale)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingSnapshot rejected"
+                << " staleNeighbor="
+                << neighbor
+                << std::endl;
+      return;
+    }
+
+  OutboundRoutingSnapshot &snapshot =
+    m_outboundRoutingSnapshots[neighbor];
+
+  if (snapshot.active)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingSnapshot already active"
+                << " neighbor=" << neighbor
+                << std::endl;
+      return;
+    }
+
+  snapshot.active = true;
+
+  snapshot.infoSequence =
+    NextRoutingSequence ();
+
+  snapshot.updateSequence =
+    NextRoutingSequence ();
+
+  snapshot.flushSequence =
+    NextRoutingSequence ();
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Starting reliable RoutingSnapshot"
+            << " neighbor=" << neighbor
+            << " infoSequence="
+            << snapshot.infoSequence
+            << " updateSequence="
+            << snapshot.updateSequence
+            << " flushSequence="
+            << snapshot.flushSequence
+            << std::endl;
+
+  Ptr<Packet> infoPayload =
+    BuildRoutingMarkerPayload (
+      CsrRoutingOperation::Info,
+      snapshot.infoSequence);
+
+  m_hop->SendRoutingControl (
+    neighbor,
+    infoPayload);
 }
 // ------------------------------------------------------------

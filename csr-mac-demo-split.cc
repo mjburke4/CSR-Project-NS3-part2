@@ -358,58 +358,7 @@ main (int argc, char *argv[])
   net0->SendDiscoveryChirp ();
   });
 
- /* Simulator::Schedule (Seconds (37.5), [net1]() {
-    net1->SetDiscoveryResponseEnabled (false);
-  });
 
-  Simulator::Schedule (Seconds (38.0), [net0]() {
-    net0->StartDiscovery (Seconds (0.0), Seconds (5.0));
-  });
-
-  Simulator::Schedule (Seconds (39.0), [net1]() {
-  net1->SendNeighborCheck (
-    0,
-    CsrNeighborCheckType::Discovery,
-    CSR_BROADCAST_ID,
-    1);  // deliberately stale
-  });
-
-  // Print neighbor tables shortly after discovery ends (~40s)
-  Simulator::Schedule (Seconds (40.5),
-                      &CsrHopLayer::PrintNeighbors,
-                      hop0);
-  Simulator::Schedule (Seconds (40.5),
-                      &CsrHopLayer::PrintNeighbors,
-                      hop1);
-  Simulator::Schedule (Seconds (40.5),
-                      &CsrHopLayer::PrintNeighbors,
-                      hop2);
-  Simulator::Schedule (Seconds (40.5),
-                      &CsrHopLayer::PrintNeighbors,
-                      hop3);
-
-  Simulator::Schedule (Seconds (42.5), [net0]() {
-    net0->SendNeighborCheck (
-      1,
-      CsrNeighborCheckType::Verify,
-      CSR_BROADCAST_ID,
-      1);  // deliberately stale
-  });
-
-  Simulator::Schedule (Seconds (45.0), [net1]() {
-    net1->SetDiscoveryResponseEnabled (true);
-  });*/
-
-  /*Simulator::Schedule (Seconds (29.0), [net0]() {
-    // Refresh node 1's view of node 0 without refreshing
-    // node 0's stale view of node 1.
-    net0->SendRoutingUpdate ();
-  });
-
-  Simulator::Schedule (Seconds (31.0), [net0]() {
-    // Node 1 should now be omitted from node 0's active-neighbor list.
-    net0->SendDiscoveryChirp ();
-  });*/
 
   Simulator::Schedule (Seconds (18.0), [net0]() {
     // Keep node 0 fresh in node 1's table without refreshing
@@ -417,6 +366,40 @@ main (int argc, char *argv[])
     // at node 0, the automatic Chirp should omit node 1.
     net0->SendRoutingUpdate ();
   });
+
+  Simulator::Schedule (
+    Seconds (22.25),
+    [net2]() {
+      std::cout
+        << "\n=== snapshot stale-route setup ==="
+        << std::endl;
+
+      // Pretend node 2 previously learned destination 99
+      // from node 1. Node 1 will not include destination
+      // 99 in its requested snapshot, so FLUSH must
+      // invalidate it.
+      net2->AddOrUpdateRoute (
+        99,       // destination
+        1,        // next hop
+        false,    // not immediate
+        2,        // hops
+        115.742,  // test path loss
+        64,       // link cost to node 1
+        25,       // advertised downstream cost
+        1,        // learned from node 1
+        1);       // capability
+    });
+
+    Simulator::Schedule (
+      Seconds (28.0),
+      [net2]() {
+        std::cout
+          << "\n=== post-snapshot route table ==="
+          << std::endl;
+
+        net2->DumpRoutes ();
+      });
+
   // Sequence-aware discovery verification regression test.
   Simulator::Schedule (Seconds (37.5), [net1]() {
     net1->SetDiscoveryResponseEnabled (false);
