@@ -595,103 +595,160 @@ public:
   }
 
   bool
-  AddOrUpdateRoute (uint16_t nwkDst,
-                    uint16_t nextHop,
-                    bool immediate,
-                    uint8_t numHop,
-                    double pathlossDb,
-                    uint32_t linkCostToNextHop,
-                    uint32_t advertisedCost,
-                    uint16_t learnedFrom,
-                    uint8_t capability = 0)
+  AddOrUpdateRoute (
+    uint16_t nwkDst,
+    uint16_t nextHop,
+    bool immediate,
+    uint8_t numHop,
+    double pathlossDb,
+    uint32_t linkCostToNextHop,
+    uint32_t advertisedCost,
+    uint16_t learnedFrom,
+    uint8_t capability = 0)
   {
-    if (nwkDst == m_nodeId)
+    if (nwkDst == m_nodeId ||
+        nwkDst == CSR_BROADCAST_ID)
       {
-          return false;
+        return false;
       }
 
-    uint32_t totalCost = linkCostToNextHop + advertisedCost;
+    uint32_t totalCost =
+      linkCostToNextHop +
+      advertisedCost;
+
     if (totalCost == 0)
       {
         totalCost = 1;
       }
 
-    for (auto &re : m_routes)
+    // A candidate is identified by destination and next hop.
+    // Different next hops for the same destination are retained.
+    for (auto &route : m_routes)
       {
-        if (re.nwkDst == nwkDst)
+        if (route.nwkDst != nwkDst ||
+            route.nextHop != nextHop)
           {
-            bool sameNextHop = (re.nextHop == nextHop);
-            bool betterCost  = (totalCost + 5 < re.cost);
-            bool invalid     = !re.valid;
-
-            if (sameNextHop || betterCost || invalid)
-              {
-                re.capability = capability;
-                re.immediate = immediate;
-                re.nextHop = nextHop;
-                re.pathlossDb = pathlossDb;
-                re.numHop = numHop;
-
-                re.linkCostToNextHop = linkCostToNextHop;
-                re.advertisedCost = advertisedCost;
-                re.cost = totalCost;
-
-                re.lastUpdated = Simulator::Now ();
-                re.valid = true;
-                re.learnedFrom = learnedFrom;
-
-                std::cout << "[NWK " << m_nodeId
-                          << "] Updated route dst=" << nwkDst
-                          << " nextHop=" << nextHop
-                          << " hops=" << unsigned (numHop)
-                          << " cost=" << re.cost
-                          << " linkCost=" << re.linkCostToNextHop
-                          << " advCost=" << re.advertisedCost
-                          << " pathloss=" << pathlossDb
-                          << std::endl;
-
-                return true;
-              }
-
-            std::cout << "[NWK " << m_nodeId
-            << "] Ignored route dst=" << nwkDst
-            << " via nextHop=" << nextHop
-            << " cost=" << totalCost
-            << " existingCost=" << re.cost
-            << " existingNextHop=" << re.nextHop
-            << std::endl;
-
-            return false;
+            continue;
           }
+
+        uint32_t oldCost =
+          route.cost;
+
+        bool wasValid =
+          route.valid;
+
+        route.capability =
+          capability;
+
+        route.immediate =
+          immediate;
+
+        route.pathlossDb =
+          pathlossDb;
+
+        route.numHop =
+          numHop;
+
+        route.linkCostToNextHop =
+          linkCostToNextHop;
+
+        route.advertisedCost =
+          advertisedCost;
+
+        route.cost =
+          totalCost;
+
+        route.learnedFrom =
+          learnedFrom;
+
+        route.lastUpdated =
+          Simulator::Now ();
+
+        route.valid = true;
+
+        const RouteEntry *best =
+          FindBestRoute (nwkDst);
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Updated route candidate"
+                  << " dst=" << nwkDst
+                  << " nextHop=" << nextHop
+                  << " hops="
+                  << unsigned (numHop)
+                  << " oldCost=" << oldCost
+                  << " newCost=" << totalCost
+                  << " valid="
+                  << (wasValid ? 1 : 0)
+                  << "->1"
+                  << " selected="
+                  << (best == &route ? 1 : 0)
+                  << std::endl;
+
+        return true;
       }
 
-    RouteEntry re;
-    re.nwkDst = nwkDst;
-    re.capability = capability;
-    re.immediate = immediate;
-    re.nextHop = nextHop;
-    re.pathlossDb = pathlossDb;
-    re.numHop = numHop;
+    RouteEntry route;
 
-    re.linkCostToNextHop = linkCostToNextHop;
-    re.advertisedCost = advertisedCost;
-    re.cost = totalCost;
-    re.learnedFrom = learnedFrom;
+    route.nwkDst =
+      nwkDst;
 
-    re.energyLevel = 100;
-    re.lastUpdated = Simulator::Now ();
-    re.valid = true;
+    route.capability =
+      capability;
 
-    m_routes.push_back (re);
+    route.immediate =
+      immediate;
+
+    route.nextHop =
+      nextHop;
+
+    route.pathlossDb =
+      pathlossDb;
+
+    route.numHop =
+      numHop;
+
+    route.linkCostToNextHop =
+      linkCostToNextHop;
+
+    route.advertisedCost =
+      advertisedCost;
+
+    route.cost =
+      totalCost;
+
+    route.learnedFrom =
+      learnedFrom;
+
+    route.energyLevel = 100;
+
+    route.lastUpdated =
+      Simulator::Now ();
+
+    route.valid = true;
+
+    m_routes.push_back (route);
+
+    RouteEntry *stored =
+      &m_routes.back ();
+
+    const RouteEntry *best =
+      FindBestRoute (nwkDst);
 
     std::cout << "[NWK " << m_nodeId
-              << "] Added route dst=" << nwkDst
+              << "] Added route candidate"
+              << " dst=" << nwkDst
               << " nextHop=" << nextHop
-              << " hops=" << unsigned (numHop)
-              << " cost=" << re.cost
-              << " linkCost=" << re.linkCostToNextHop
-              << " advCost=" << re.advertisedCost
-              << " pathloss=" << pathlossDb
+              << " hops="
+              << unsigned (numHop)
+              << " cost=" << totalCost
+              << " linkCost="
+              << linkCostToNextHop
+              << " advCost="
+              << advertisedCost
+              << " learnedFrom="
+              << learnedFrom
+              << " selected="
+              << (best == stored ? 1 : 0)
               << std::endl;
 
     return true;
@@ -889,6 +946,9 @@ public:
       payload);
   }
 
+  void DumpBestRoute (
+    uint16_t destination) const;
+
 private:
 
   struct RouteEntry
@@ -910,6 +970,10 @@ private:
 
     uint16_t learnedFrom {CSR_BROADCAST_ID}; // node that taught us this route
   };
+
+  const RouteEntry*
+  FindBestRoute (
+    uint16_t destination) const;
 
   struct ReverseRouteEntry
   {
@@ -1069,27 +1133,22 @@ private:
     }
   }
 
-  bool LookupNextHop (uint16_t nwkDst, uint16_t &nextHopOut)
+  bool
+  LookupNextHop (
+    uint16_t nwkDst,
+    uint16_t &nextHopOut)
   {
-    RouteEntry const* best = nullptr;
-
-    for (const auto &re : m_routes)
-      {
-        if (re.nwkDst == nwkDst && re.valid)
-          {
-            if (best == nullptr || re.cost < best->cost)
-              {
-                best = &re;
-              }
-          }
-      }
+    const RouteEntry *best =
+      FindBestRoute (nwkDst);
 
     if (best == nullptr)
       {
         return false;
       }
 
-    nextHopOut = best->nextHop;
+    nextHopOut =
+      best->nextHop;
+
     return true;
   }
 
@@ -3719,6 +3778,15 @@ CsrNetLayer::BuildRoutingUpdatePayload (
 
   for (const auto &route : m_routes)
     {
+      const RouteEntry *best =
+        FindBestRoute (
+          route.nwkDst);
+
+      if (best != &route)
+        {
+          continue;
+        }
+
       if (!ShouldAdvertiseRoute (route))
         {
           continue;
@@ -4133,5 +4201,126 @@ CsrNetLayer::RoutingRequestTimeout (
   SendRoutingRequestAttempt (
     neighbor,
     true);
+}
+
+const CsrNetLayer::RouteEntry*
+CsrNetLayer::FindBestRoute (
+  uint16_t destination) const
+{
+  const RouteEntry *best = nullptr;
+
+  for (const auto &route : m_routes)
+    {
+      if (route.nwkDst != destination ||
+          !route.valid)
+        {
+          continue;
+        }
+
+      if (best == nullptr)
+        {
+          best = &route;
+          continue;
+        }
+
+      bool better = false;
+
+      if (route.cost < best->cost)
+        {
+          better = true;
+        }
+      else if (route.cost ==
+                 best->cost &&
+               route.numHop <
+                 best->numHop)
+        {
+          better = true;
+        }
+      else if (route.cost ==
+                 best->cost &&
+               route.numHop ==
+                 best->numHop &&
+               route.immediate &&
+               !best->immediate)
+        {
+          better = true;
+        }
+      else if (route.cost ==
+                 best->cost &&
+               route.numHop ==
+                 best->numHop &&
+               route.immediate ==
+                 best->immediate &&
+               route.nextHop <
+                 best->nextHop)
+        {
+          // Deterministic final tie-break.
+          better = true;
+        }
+
+      if (better)
+        {
+          best = &route;
+        }
+    }
+
+  return best;
+}
+
+void
+CsrNetLayer::DumpBestRoute (
+  uint16_t destination) const
+{
+  uint32_t candidateCount = 0;
+  uint32_t validCount = 0;
+
+  for (const auto &route : m_routes)
+    {
+      if (route.nwkDst != destination)
+        {
+          continue;
+        }
+
+      candidateCount++;
+
+      if (route.valid)
+        {
+          validCount++;
+        }
+    }
+
+  const RouteEntry *best =
+    FindBestRoute (destination);
+
+  if (best == nullptr)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Best route"
+                << " dst=" << destination
+                << " unavailable"
+                << " candidates="
+                << candidateCount
+                << " validCandidates="
+                << validCount
+                << std::endl;
+
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Best route"
+            << " dst=" << destination
+            << " nextHop="
+            << best->nextHop
+            << " cost=" << best->cost
+            << " hops="
+            << unsigned (best->numHop)
+            << " learnedFrom="
+            << best->learnedFrom
+            << " candidates="
+            << candidateCount
+            << " validCandidates="
+            << validCount
+            << std::endl;
 }
 // ------------------------------------------------------------

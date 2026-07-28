@@ -437,6 +437,70 @@ Simulator::Schedule (
     net2->DumpRoutes ();
   });
 
+Simulator::Schedule (
+  Seconds (35.0),
+  [net1]() {
+    std::cout
+      << "\n=== alternate route candidate setup ==="
+      << std::endl;
+
+    // Primary candidate through node 0:
+    // total cost = 39 + 10 = 49.
+    net1->AddOrUpdateRoute (
+      97,
+      0,
+      false,
+      2,
+      107.377,
+      39,
+      10,
+      0,
+      1);
+
+    // Backup candidate through node 2:
+    // total cost = 64 + 30 = 94.
+    net1->AddOrUpdateRoute (
+      97,
+      2,
+      false,
+      2,
+      115.742,
+      64,
+      30,
+      2,
+      1);
+
+    net1->DumpRoutes ();
+    net1->DumpBestRoute (97);
+  });
+
+  Simulator::Schedule (
+  Seconds (35.25),
+  [net0]() {
+    std::cout
+      << "\n=== withdraw primary route candidate ==="
+      << std::endl;
+
+    net0->SendReliableRoutingDelete (
+      1,
+      97);
+  });
+
+  Simulator::Schedule (
+  Seconds (36.75),
+  [net1]() {
+    std::cout
+      << "\n=== alternate route failover result ==="
+      << std::endl;
+
+    net1->DumpBestRoute (97);
+    net1->DumpRoutes ();
+
+    // Verify that only the selected backup
+    // candidate is advertised.
+    net1->SendRoutingUpdate ();
+  });
+
   // Sequence-aware discovery verification regression test.
   Simulator::Schedule (Seconds (37.5), [net1]() {
     net1->SetDiscoveryResponseEnabled (false);
