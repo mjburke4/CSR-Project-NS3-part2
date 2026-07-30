@@ -517,6 +517,8 @@ Simulator::Schedule (
       << "\n=== alternate route candidate setup ==="
       << std::endl;
 
+    net1->SetAutomaticRoutePropagationEnabled (
+      true);
     // Primary candidate through node 0:
     // total cost = 39 + 10 = 49.
     net1->AddOrUpdateRoute (
