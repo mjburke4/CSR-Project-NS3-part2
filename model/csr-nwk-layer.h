@@ -1168,7 +1168,28 @@ private:
 
     int16_t remoteTempLowCx10 {0};
     int16_t remoteTempHighCx10 {0};
-  };
+
+    bool negotiatedLinkProfileValid {
+      false
+    };
+
+    bool negotiatedSpeedCompatible {
+      false
+    };
+
+    bool negotiatedPowerCompatible {
+      false
+    };
+
+    uint16_t negotiatedMinSpeedKbps {0};
+    uint16_t negotiatedMaxSpeedKbps {0};
+
+    int16_t negotiatedMinPowerDbmX10 {0};
+    int16_t negotiatedMaxPowerDbmX10 {0};
+
+    int16_t negotiatedLinkMarginDbX10 {0};
+    int16_t negotiatedLowPowerDbmX10 {0};
+      };
 
   Ptr<Packet> BuildRoutingRequestPayload (
     uint32_t routingSequence);
@@ -1425,6 +1446,10 @@ private:
 
     return 1;
   }
+
+  void
+  UpdateNegotiatedLinkProfile (
+    NwkNeighborEntry &neighbor);
 
 public:
   void SetNodeType (CsrNodeType type)
@@ -2739,6 +2764,9 @@ CsrNetLayer::ProcessRoutingUpdate (
 
         neighbor.remoteTempHighCx10 =
           info.tempHighCx10;
+
+        UpdateNegotiatedLinkProfile (
+          neighbor);
 
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingSnapshot INFO received"
@@ -5178,6 +5206,149 @@ CsrNetLayer::DumpBestRoute (
             << candidateCount
             << " validCandidates="
             << validCount
+            << std::endl;
+}
+
+void
+CsrNetLayer::
+UpdateNegotiatedLinkProfile (
+  NwkNeighborEntry &neighbor)
+{
+  neighbor.negotiatedLinkProfileValid =
+    false;
+
+  neighbor.negotiatedSpeedCompatible =
+    false;
+
+  neighbor.negotiatedPowerCompatible =
+    false;
+
+  if (!neighbor.routingInfoValid)
+    {
+      return;
+    }
+
+  uint16_t localMinSpeed =
+    static_cast<uint16_t> (
+      std::clamp (
+        m_minCfgSpeedKbps,
+        0,
+        65535));
+
+  uint16_t localMaxSpeed =
+    static_cast<uint16_t> (
+      std::clamp (
+        m_maxCfgSpeedKbps,
+        0,
+        65535));
+
+  neighbor.negotiatedMinSpeedKbps =
+    std::max (
+      localMinSpeed,
+      neighbor.remoteMinSpeedKbps);
+
+  neighbor.negotiatedMaxSpeedKbps =
+    std::min (
+      localMaxSpeed,
+      neighbor.remoteMaxSpeedKbps);
+
+  neighbor.negotiatedSpeedCompatible =
+    neighbor.negotiatedMinSpeedKbps <=
+      neighbor.negotiatedMaxSpeedKbps &&
+    neighbor.negotiatedMaxSpeedKbps > 0;
+
+  int16_t localMinPowerDbmX10 =
+    static_cast<int16_t> (
+      std::round (
+        m_minTxPowerDbm * 10.0));
+
+  int16_t localMaxPowerDbmX10 =
+    static_cast<int16_t> (
+      std::round (
+        m_maxTxPowerDbm * 10.0));
+
+  neighbor.negotiatedMinPowerDbmX10 =
+    std::max (
+      localMinPowerDbmX10,
+      neighbor.remoteMinPowerDbmX10);
+
+  neighbor.negotiatedMaxPowerDbmX10 =
+    std::min (
+      localMaxPowerDbmX10,
+      neighbor.remoteMaxPowerDbmX10);
+
+  neighbor.negotiatedPowerCompatible =
+    neighbor.negotiatedMinPowerDbmX10 <=
+      neighbor.negotiatedMaxPowerDbmX10;
+
+  int16_t localLinkMarginDbX10 =
+    static_cast<int16_t> (
+      std::round (
+        m_linkMarginDb * 10.0));
+
+  neighbor.negotiatedLinkMarginDbX10 =
+    std::max (
+      localLinkMarginDbX10,
+      neighbor.remoteLinkMarginDbX10);
+
+  int16_t localLowPowerDbmX10 =
+    static_cast<int16_t> (
+      std::round (
+        m_txAmpBreakpointDbm * 10.0));
+
+  neighbor.negotiatedLowPowerDbmX10 =
+    std::max (
+      localLowPowerDbmX10,
+      neighbor.remoteLowPowerDbmX10);
+
+  // Keep the crossover inside the mutually
+  // supported transmit-power range.
+  neighbor.negotiatedLowPowerDbmX10 =
+    std::clamp (
+      neighbor.negotiatedLowPowerDbmX10,
+      neighbor.negotiatedMinPowerDbmX10,
+      neighbor.negotiatedMaxPowerDbmX10);
+
+  neighbor.negotiatedLinkProfileValid =
+    neighbor.negotiatedSpeedCompatible &&
+    neighbor.negotiatedPowerCompatible;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Negotiated link profile"
+            << " neighbor=" << neighbor.nodeId
+            << " valid="
+            << (neighbor
+                  .negotiatedLinkProfileValid
+                  ? 1
+                  : 0)
+            << " speedCompatible="
+            << (neighbor
+                  .negotiatedSpeedCompatible
+                  ? 1
+                  : 0)
+            << " speedKbps="
+            << neighbor
+                 .negotiatedMinSpeedKbps
+            << "-"
+            << neighbor
+                 .negotiatedMaxSpeedKbps
+            << " powerCompatible="
+            << (neighbor
+                  .negotiatedPowerCompatible
+                  ? 1
+                  : 0)
+            << " powerDbmX10="
+            << neighbor
+                 .negotiatedMinPowerDbmX10
+            << "-"
+            << neighbor
+                 .negotiatedMaxPowerDbmX10
+            << " marginDbX10="
+            << neighbor
+                 .negotiatedLinkMarginDbX10
+            << " lowPowerDbmX10="
+            << neighbor
+                 .negotiatedLowPowerDbmX10
             << std::endl;
 }
 // ------------------------------------------------------------
