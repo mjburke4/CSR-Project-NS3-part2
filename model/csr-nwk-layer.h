@@ -4,6 +4,7 @@
 #include "csr-hop-layer.h"
 #include <cmath>
 #include <set>
+#include <algorithm>
 
 
 class CsrNetLayer : public Object
@@ -1152,6 +1153,21 @@ private:
 
     std::set<uint16_t>
       routingSnapshotSeenDestinations;
+
+    bool routingInfoValid {false};
+    uint32_t routingInfoSequence {0};
+
+    uint16_t remoteMinSpeedKbps {0};
+    uint16_t remoteMaxSpeedKbps {0};
+
+    int16_t remoteMinPowerDbmX10 {0};
+    int16_t remoteMaxPowerDbmX10 {0};
+
+    int16_t remoteLinkMarginDbX10 {0};
+    int16_t remoteLowPowerDbmX10 {0};
+
+    int16_t remoteTempLowCx10 {0};
+    int16_t remoteTempHighCx10 {0};
   };
 
   Ptr<Packet> BuildRoutingRequestPayload (
@@ -2693,12 +2709,66 @@ CsrNetLayer::ProcessRoutingUpdate (
           .routingSnapshotSeenDestinations
           .clear ();
 
+        CsrHelloHeader::RoutingInfo info =
+          hh.GetRoutingInfo ();
+
+        neighbor.routingInfoValid = true;
+        neighbor.routingInfoSequence =
+          incomingSequence;
+
+        neighbor.remoteMinSpeedKbps =
+          info.minSpeedKbps;
+
+        neighbor.remoteMaxSpeedKbps =
+          info.maxSpeedKbps;
+
+        neighbor.remoteMinPowerDbmX10 =
+          info.minPowerDbmX10;
+
+        neighbor.remoteMaxPowerDbmX10 =
+          info.maxPowerDbmX10;
+
+        neighbor.remoteLinkMarginDbX10 =
+          info.linkMarginDbX10;
+
+        neighbor.remoteLowPowerDbmX10 =
+          info.lowPowerDbmX10;
+
+        neighbor.remoteTempLowCx10 =
+          info.tempLowCx10;
+
+        neighbor.remoteTempHighCx10 =
+          info.tempHighCx10;
+
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingSnapshot INFO received"
                   << " from=" << helloSrc
                   << " routingSequence="
                   << incomingSequence
                   << std::endl;
+
+        std::cout << "[NWK " << m_nodeId
+          << "] Stored RoutingInfo"
+          << " from=" << helloSrc
+          << " sequence="
+          << incomingSequence
+          << " speedKbps="
+          << info.minSpeedKbps
+          << "-"
+          << info.maxSpeedKbps
+          << " powerDbmX10="
+          << info.minPowerDbmX10
+          << "-"
+          << info.maxPowerDbmX10
+          << " marginDbX10="
+          << info.linkMarginDbX10
+          << " lowPowerDbmX10="
+          << info.lowPowerDbmX10
+          << " tempCx10="
+          << info.tempLowCx10
+          << "-"
+          << info.tempHighCx10
+          << std::endl;
 
         return;
       }
@@ -4224,17 +4294,19 @@ CsrNetLayer::BuildRoutingUpdatePayload (
 
       if (!ShouldAdvertiseRoute (route))
         {
-          if (eligibleIndex <
-              firstRouteIndex)
-            {
-              eligibleIndex++;
-              continue;
-            }
-
-          eligibleIndex++;
-
           continue;
         }
+
+      // Count only routes that are actually eligible
+      // to appear in the routing snapshot.
+      if (eligibleIndex <
+          firstRouteIndex)
+        {
+          eligibleIndex++;
+          continue;
+        }
+
+      eligibleIndex++;
 
       int16_t pathlossX10 = 0;
 
@@ -4259,7 +4331,7 @@ CsrNetLayer::BuildRoutingUpdatePayload (
           added++;
         }
 
-      if (added >= 8)
+      if (added >= ROUTES_PER_SECTION)
         {
           break;
         }
@@ -4383,6 +4455,55 @@ CsrNetLayer::BuildRoutingMarkerPayload (
 
   hh.SetRoutingOperation (
     operation);
+
+  if (operation ==
+      CsrRoutingOperation::Info)
+    {
+      CsrHelloHeader::RoutingInfo info;
+
+      info.minSpeedKbps =
+        static_cast<uint16_t> (
+          std::clamp (
+            m_minCfgSpeedKbps,
+            0,
+            65535));
+
+      info.maxSpeedKbps =
+        static_cast<uint16_t> (
+          std::clamp (
+            m_maxCfgSpeedKbps,
+            0,
+            65535));
+
+      info.minPowerDbmX10 =
+        static_cast<int16_t> (
+          std::round (
+            m_minTxPowerDbm * 10.0));
+
+      info.maxPowerDbmX10 =
+        static_cast<int16_t> (
+          std::round (
+            m_maxTxPowerDbm * 10.0));
+
+      info.linkMarginDbX10 =
+        static_cast<int16_t> (
+          std::round (
+            m_linkMarginDb * 10.0));
+
+      // Closest current ns-3 equivalent to the
+      // legacy RF low-power crossover.
+      info.lowPowerDbmX10 =
+        static_cast<int16_t> (
+          std::round (
+            m_txAmpBreakpointDbm * 10.0));
+
+      // Placeholders until the supervisor/temperature
+      // model is ported.
+      info.tempLowCx10 = 0;
+      info.tempHighCx10 = 0;
+
+      hh.SetRoutingInfo (info);
+    }
 
   hh.SetRoutingTarget (
     routingTarget);

@@ -166,6 +166,12 @@ namespace ns3 {
               pathCount) * 2;
       }
 
+    if (GetRoutingOperation () ==
+        CsrRoutingOperation::Info)
+      {
+        size += 16;
+      }
+
     return size;
   }
 
@@ -188,6 +194,40 @@ namespace ns3 {
     i.WriteU8 (m_routingTotalSections);
     i.WriteU8 (m_routingOperation);
     i.WriteHtonU16 (m_routingTarget);
+
+    if (GetRoutingOperation () ==
+        CsrRoutingOperation::Info)
+      {
+        i.WriteHtonU16 (
+          m_routingInfo.minSpeedKbps);
+
+        i.WriteHtonU16 (
+          m_routingInfo.maxSpeedKbps);
+
+        i.WriteHtonU16 (
+          static_cast<uint16_t> (
+            m_routingInfo.minPowerDbmX10));
+
+        i.WriteHtonU16 (
+          static_cast<uint16_t> (
+            m_routingInfo.maxPowerDbmX10));
+
+        i.WriteHtonU16 (
+          static_cast<uint16_t> (
+            m_routingInfo.linkMarginDbX10));
+
+        i.WriteHtonU16 (
+          static_cast<uint16_t> (
+            m_routingInfo.lowPowerDbmX10));
+
+        i.WriteHtonU16 (
+          static_cast<uint16_t> (
+            m_routingInfo.tempLowCx10));
+
+        i.WriteHtonU16 (
+          static_cast<uint16_t> (
+            m_routingInfo.tempHighCx10));
+      }
 
     uint8_t chirpCount = static_cast<uint8_t> (
     std::min<size_t> (m_chirpNeighbors.size (),
@@ -263,6 +303,43 @@ namespace ns3 {
       }
     m_routingOperation = i.ReadU8 ();
     m_routingTarget = i.ReadNtohU16 ();
+
+    m_routingInfo =
+  RoutingInfo {};
+
+  if (GetRoutingOperation () ==
+      CsrRoutingOperation::Info)
+    {
+      m_routingInfo.minSpeedKbps =
+        i.ReadNtohU16 ();
+
+      m_routingInfo.maxSpeedKbps =
+        i.ReadNtohU16 ();
+
+      m_routingInfo.minPowerDbmX10 =
+        static_cast<int16_t> (
+          i.ReadNtohU16 ());
+
+      m_routingInfo.maxPowerDbmX10 =
+        static_cast<int16_t> (
+          i.ReadNtohU16 ());
+
+      m_routingInfo.linkMarginDbX10 =
+        static_cast<int16_t> (
+          i.ReadNtohU16 ());
+
+      m_routingInfo.lowPowerDbmX10 =
+        static_cast<int16_t> (
+          i.ReadNtohU16 ());
+
+      m_routingInfo.tempLowCx10 =
+        static_cast<int16_t> (
+          i.ReadNtohU16 ());
+
+      m_routingInfo.tempHighCx10 =
+        static_cast<int16_t> (
+          i.ReadNtohU16 ());
+    }
 
     m_chirpNeighbors.clear ();
 
@@ -525,5 +602,18 @@ namespace ns3 {
   CsrHelloHeader::GetRoutingTotalSections () const
   {
     return m_routingTotalSections;
+  }
+
+  void
+  CsrHelloHeader::SetRoutingInfo (
+    const RoutingInfo &info)
+  {
+    m_routingInfo = info;
+  }
+
+  CsrHelloHeader::RoutingInfo
+  CsrHelloHeader::GetRoutingInfo () const
+  {
+    return m_routingInfo;
   }
 } // namespace ns3

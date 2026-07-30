@@ -117,6 +117,26 @@ public:
   void SetRoutingOperation (CsrRoutingOperation operation);
   CsrRoutingOperation GetRoutingOperation () const;
 
+  struct RoutingInfo
+  {
+    uint16_t minSpeedKbps {0};
+    uint16_t maxSpeedKbps {0};
+
+    int16_t minPowerDbmX10 {0};
+    int16_t maxPowerDbmX10 {0};
+
+    int16_t linkMarginDbX10 {0};
+    int16_t lowPowerDbmX10 {0};
+
+    int16_t tempLowCx10 {0};
+    int16_t tempHighCx10 {0};
+  };
+
+  void SetRoutingInfo (
+    const RoutingInfo &info);
+
+  RoutingInfo GetRoutingInfo () const;
+
   struct AdvertisedRoute
   {
     uint16_t dst {0xFFFF};
@@ -181,6 +201,8 @@ private:
   };
 
   uint16_t m_routingTarget {0xFFFF};
+
+  RoutingInfo m_routingInfo;
 };
 
 } // namespace ns3

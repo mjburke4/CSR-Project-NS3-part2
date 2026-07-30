@@ -671,7 +671,7 @@ Simulator::Schedule (
     });
 
   Simulator::Schedule (
-    Seconds (68.0),
+    Seconds (80.0),
     [net2]() {
       std::cout
         << "\n=== multi-section routing snapshot result ==="
@@ -681,7 +681,6 @@ Simulator::Schedule (
       net2->DumpBestRoute (211);
     });
 
-  Simulator::Stop (Seconds (80.0));
 
   // Traffic pattern similar to your earlier log
 
@@ -713,7 +712,7 @@ Simulator::Schedule (
 #endif
     
 
-  Simulator::Stop (Seconds (60.0));
+  Simulator::Stop (Seconds (90.0));
   Simulator::Run ();
   Simulator::Destroy ();
   CloseRxCsv ();
