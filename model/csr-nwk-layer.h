@@ -1320,15 +1320,68 @@ private:
                    double *txPowerOut = nullptr,
                    int *estDistanceOut = nullptr,
                    double *speedMarginOut = nullptr,
-                   double *totalMarginOut = nullptr) const
+                   double *totalMarginOut = nullptr,
+                   const NwkNeighborEntry *neighborProfile =
+                    nullptr) const
   {
     // Port of legacy OPNET br_hop.link_calc(), simplified for NS-3.
     // TX0_power is the power needed to meet link margin at 8 kbps.
     double tx0PowerDbm = s0PowerDbm + pathlossDb;
 
+    int effectiveMinSpeedKbps =
+      m_minCfgSpeedKbps;
+
+    int effectiveMaxSpeedKbps =
+      m_maxCfgSpeedKbps;
+
+    double effectiveMinTxPowerDbm =
+      m_minTxPowerDbm;
+
+    double effectiveMaxTxPowerDbm =
+      m_maxTxPowerDbm;
+
+    double effectiveTxAmpBreakpointDbm =
+      m_txAmpBreakpointDbm;
+
+    bool usingNegotiatedProfile =
+      neighborProfile != nullptr &&
+      neighborProfile->
+        negotiatedLinkProfileValid;
+
+    if (usingNegotiatedProfile)
+      {
+        effectiveMinSpeedKbps =
+          static_cast<int> (
+            neighborProfile->
+              negotiatedMinSpeedKbps);
+
+        effectiveMaxSpeedKbps =
+          static_cast<int> (
+            neighborProfile->
+              negotiatedMaxSpeedKbps);
+
+        effectiveMinTxPowerDbm =
+          static_cast<double> (
+            neighborProfile->
+              negotiatedMinPowerDbmX10) /
+          10.0;
+
+        effectiveMaxTxPowerDbm =
+          static_cast<double> (
+            neighborProfile->
+              negotiatedMaxPowerDbmX10) /
+          10.0;
+
+        effectiveTxAmpBreakpointDbm =
+          static_cast<double> (
+            neighborProfile->
+              negotiatedLowPowerDbmX10) /
+          10.0;
+      }
+
     // Txm_power is power required at configured minimum speed.
     double txmPowerDbm = tx0PowerDbm;
-    switch (m_minCfgSpeedKbps)
+    switch (effectiveMinSpeedKbps)
       {
       case 1000: txmPowerDbm = tx0PowerDbm + 23.0; break;
       case 500:  txmPowerDbm = tx0PowerDbm + 20.0; break;
@@ -1340,10 +1393,12 @@ private:
       default:   txmPowerDbm = tx0PowerDbm;        break;
       }
 
-    int speed = m_minCfgSpeedKbps;
+	    int speed = effectiveMinSpeedKbps;
 
     // Highest speed that can meet link margin at max configured TX power.
-    double marginAt8K = m_maxTxPowerDbm - tx0PowerDbm;
+    double marginAt8K =
+      effectiveMaxTxPowerDbm -
+      tx0PowerDbm;
 
     if      (marginAt8K >= 23.0) speed = 1000;
     else if (marginAt8K >= 20.0) speed = 500;
@@ -1352,17 +1407,17 @@ private:
     else if (marginAt8K >= 6.0)  speed = 32;
     else if (marginAt8K >= 3.0)  speed = 16;
     else if (marginAt8K > 0.0)   speed = 8;
-    else                         speed = m_minCfgSpeedKbps;
+	    else                         speed = effectiveMinSpeedKbps;
 
-    // Limit speed to configured min/max.
-    if (speed < m_minCfgSpeedKbps)
-      {
-        speed = m_minCfgSpeedKbps;
-      }
-    if (speed > m_maxCfgSpeedKbps)
-      {
-        speed = m_maxCfgSpeedKbps;
-      }
+	    // Limit speed to configured min/max.
+	    if (speed < effectiveMinSpeedKbps)
+	      {
+	        speed = effectiveMinSpeedKbps;
+	      }
+	    if (speed > effectiveMaxSpeedKbps)
+	      {
+	        speed = effectiveMaxSpeedKbps;
+	      }
 
     // Required TX power for selected speed.
     double txPowerDbm = tx0PowerDbm;
@@ -1378,29 +1433,43 @@ private:
       default:   txPowerDbm = tx0PowerDbm;        break;
       }
 
-    double totalMargin = m_maxTxPowerDbm - txmPowerDbm;
-    double speedMargin = m_maxTxPowerDbm - txPowerDbm;
+	    double totalMargin =
+	      effectiveMaxTxPowerDbm -
+	      txmPowerDbm;
 
-    // Limit actual power to configured min/max.
-    if (txPowerDbm < m_minTxPowerDbm)
-      {
-        txPowerDbm = m_minTxPowerDbm;
-      }
-    if (txPowerDbm > m_maxTxPowerDbm)
-      {
-        txPowerDbm = m_maxTxPowerDbm;
-      }
+	    double speedMargin =
+	      effectiveMaxTxPowerDbm -
+	      txPowerDbm;
+
+	    // Limit actual power to configured min/max.
+	    if (txPowerDbm < effectiveMinTxPowerDbm)
+	      {
+	        txPowerDbm = effectiveMinTxPowerDbm;
+	      }
+	    if (txPowerDbm > effectiveMaxTxPowerDbm)
+	      {
+	        txPowerDbm = effectiveMaxTxPowerDbm;
+	      }
 
     // Scaled distance from transmit power using r^4 model.
     int estDistance;
-    if (txPowerDbm <= m_txAmpBreakpointDbm)
+
+    if (txPowerDbm <=
+        effectiveTxAmpBreakpointDbm)
       {
         estDistance = 75;
       }
     else
       {
-        estDistance = static_cast<int> (
-          std::floor (std::pow (10.0, (txPowerDbm - m_txAmpBreakpointDbm) / 40.0) * 100.0));
+        estDistance =
+          static_cast<int> (
+            std::floor (
+              std::pow (
+                10.0,
+                (txPowerDbm -
+                effectiveTxAmpBreakpointDbm) /
+                  40.0) *
+              100.0));
       }
 
     uint32_t cost = static_cast<uint32_t> (
@@ -2193,14 +2262,22 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   double speedMargin = 0.0;
   double totalMargin = 0.0;
 
-  uint32_t linkCost = ComputeLinkCost (s0PowerDbm,
-                                      pathlossDb,
-                                      ne.numFailures,
-                                      &chosenSpeed,
-                                      &chosenTxPower,
-                                      &estDistance,
-                                      &speedMargin,
-                                      &totalMargin);
+  const NwkNeighborEntry *linkProfile =
+    ne.negotiatedLinkProfileValid
+      ? &ne
+      : nullptr;
+
+  uint32_t linkCost =
+    ComputeLinkCost (
+      s0PowerDbm,
+      pathlossDb,
+      ne.numFailures,
+      &chosenSpeed,
+      &chosenTxPower,
+      &estDistance,
+      &speedMargin,
+      &totalMargin,
+      linkProfile);
 
   std::cout << "[NWK " << m_nodeId
               << "] link_calc neighbor=" << src
@@ -2212,6 +2289,10 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
               << " estDistance=" << estDistance
               << " speedMargin=" << speedMargin
               << " totalMargin=" << totalMargin
+              << " profile="
+              << (linkProfile != nullptr
+                    ? "negotiated"
+                    : "local")
               << " cost=" << linkCost
               << std::endl;
 
@@ -5303,11 +5384,20 @@ UpdateNegotiatedLinkProfile (
 
   // Keep the crossover inside the mutually
   // supported transmit-power range.
-  neighbor.negotiatedLowPowerDbmX10 =
-    std::clamp (
-      neighbor.negotiatedLowPowerDbmX10,
-      neighbor.negotiatedMinPowerDbmX10,
-      neighbor.negotiatedMaxPowerDbmX10);
+  if (neighbor.negotiatedPowerCompatible)
+    {
+      neighbor.negotiatedLowPowerDbmX10 =
+        std::clamp (
+          neighbor.negotiatedLowPowerDbmX10,
+          neighbor.negotiatedMinPowerDbmX10,
+          neighbor.negotiatedMaxPowerDbmX10);
+    }
+  else
+    {
+      // No valid power overlap exists, so there
+      // is no meaningful crossover value.
+      neighbor.negotiatedLowPowerDbmX10 = 0;
+    }
 
   neighbor.negotiatedLinkProfileValid =
     neighbor.negotiatedSpeedCompatible &&
