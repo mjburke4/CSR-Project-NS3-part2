@@ -95,10 +95,12 @@ public:
   Ptr<Packet> payload);
 
   void SetRoutingControlSuccessCallback (
-    Callback<void,
-            uint16_t,
-            uint32_t,
-            CsrRoutingOperation> cb)
+  Callback<void,
+          uint16_t,
+	          uint32_t,
+	          CsrRoutingOperation,
+	          uint8_t,
+	          uint8_t> cb)
   {
     m_routingControlSuccessCb = cb;
   }
@@ -281,7 +283,9 @@ private:
   Callback<void,
           uint16_t,
           uint32_t,
-          CsrRoutingOperation>
+          CsrRoutingOperation,
+          uint8_t,
+          uint8_t>
     m_routingControlSuccessCb;
 
 };
@@ -720,6 +724,9 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
   CsrRoutingOperation completedRoutingOperation =
     CsrRoutingOperation::None;
 
+  uint8_t completedRoutingSection {0};
+  uint8_t completedRoutingTotalSections {1};
+
   CsrNeighborCheckType completedType =
     CsrNeighborCheckType::None;
 
@@ -765,12 +772,16 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
               if (originalFrame->RemoveHeader (
                     controlHeader))
                 {
-                  completedRoutingSequence =
-                    controlHeader
-                      .GetRoutingSequence ();
-                  completedRoutingOperation =
-                    controlHeader.GetRoutingOperation ();
-                }
+	                  completedRoutingSequence =
+	                    controlHeader
+	                      .GetRoutingSequence ();
+	                  completedRoutingOperation =
+	                    controlHeader.GetRoutingOperation ();
+	                  completedRoutingSection =
+	                    controlHeader.GetRoutingSection ();
+	                  completedRoutingTotalSections =
+	                    controlHeader.GetRoutingTotalSections ();
+	                }
               else
                 {
                   std::cout << "[HOP " << m_nodeId
@@ -789,7 +800,7 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
         }
     }
 
-  // Inform Net layer that this (nwkSrc,nwkDst) flow completed one packet
+	  // Inform Net layer that this (nwkSrc,nwkDst) flow completed one packet
   NotifyNsdpFromFrame (entry->frame);
 
   // Decrement flow-control outstanding counter
@@ -827,16 +838,23 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
                 << "] Reliable RoutingControl completed with "
                 << src
                 << " seq=" << seq
-                << " routingSequence="
-                << completedRoutingSequence
-                << std::endl;
+	                << " routingSequence="
+	                << completedRoutingSequence
+	                << " section="
+	                << unsigned (completedRoutingSection)
+	                << "/"
+	                << unsigned (
+	                    completedRoutingTotalSections)
+	                << std::endl;
 
       if (!m_routingControlSuccessCb.IsNull ())
         {
           m_routingControlSuccessCb (
             src,
             completedRoutingSequence,
-            completedRoutingOperation);
+            completedRoutingOperation,
+            completedRoutingSection,
+            completedRoutingTotalSections);
         }
     }
 
@@ -849,9 +867,14 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
         }
     }
 
-  NS_LOG_INFO ("Hop " << m_nodeId
-                      << " cleared resend to " << src
-                      << " seq=" << seq);
+	  NS_LOG_INFO ("Hop " << m_nodeId
+	                      << " cleared resend to " << src
+	                      << " seq=" << seq
+	                      << " section="
+	                      << unsigned (completedRoutingSection)
+	                      << "/"
+	                      << unsigned (
+	                          completedRoutingTotalSections));
 }
 
 void

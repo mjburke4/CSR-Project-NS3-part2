@@ -635,7 +635,53 @@ Simulator::Schedule (
       true);
   });
 
-  Simulator::Stop (Seconds (70.0));
+  Simulator::Schedule (
+    Seconds (60.0),
+    [net1]() {
+      std::cout
+        << "\n=== multi-section routing snapshot setup ==="
+        << std::endl;
+
+      net1->
+        SetAutomaticRoutePropagationEnabled (
+          false);
+
+      for (uint16_t destination = 200;
+          destination < 212;
+          ++destination)
+        {
+          net1->AddOrUpdateRoute (
+            destination,
+            0,
+            false,
+            2,
+            107.377,
+            39,
+            destination - 190,
+            0,
+            1,
+            std::vector<uint16_t> {
+              0,
+              destination
+            });
+        }
+
+      net1->StartReliableRoutingSnapshot (
+        2);
+    });
+
+  Simulator::Schedule (
+    Seconds (68.0),
+    [net2]() {
+      std::cout
+        << "\n=== multi-section routing snapshot result ==="
+        << std::endl;
+
+      net2->DumpBestRoute (200);
+      net2->DumpBestRoute (211);
+    });
+
+  Simulator::Stop (Seconds (80.0));
 
   // Traffic pattern similar to your earlier log
 
@@ -666,27 +712,6 @@ Simulator::Schedule (
     });
 #endif
     
-  /* // Burst 2 at t=12 s
-  Simulator::Schedule (Seconds (12.0), [net0]() {
-    for (int i = 0; i < 2; ++i)
-      {
-        uint32_t size = 140 + 20 * i;
-        Ptr<Packet> payload = Create<Packet> (size);
-        net0->Send ( 2, //dst
-                     0, //dscp
-                    payload,
-                    true); //ack
-      }
-  });
-
-  // Burst 3 at t=40 s
-  Simulator::Schedule (Seconds (40.0), [net0]() {
-    Ptr<Packet> payload = Create<Packet> (200);
-    net0->Send ( 2, //dst
-                7, //dscp
-                payload,
-                true); //ack
-  }); */
 
   Simulator::Stop (Seconds (60.0));
   Simulator::Run ();

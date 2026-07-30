@@ -127,6 +127,8 @@ namespace ns3 {
       + 1  // discoverType
       + 4  // discoverySequence
       + 4  // routingSequence
+      + 1  // routingSection
+      + 1  // routingTotalSections
       + 1  // routingOperation
       + 2  // routingTarget
       + 1  // chirpNeighborCount
@@ -182,6 +184,8 @@ namespace ns3 {
     i.WriteU8 (m_discoverType);
     i.WriteHtonU32 (m_discoverySequence);
     i.WriteHtonU32 (m_routingSequence);
+    i.WriteU8 (m_routingSection);
+    i.WriteU8 (m_routingTotalSections);
     i.WriteU8 (m_routingOperation);
     i.WriteHtonU16 (m_routingTarget);
 
@@ -247,6 +251,16 @@ namespace ns3 {
     m_discoverType = i.ReadU8 ();
     m_discoverySequence = i.ReadNtohU32 ();
     m_routingSequence = i.ReadNtohU32 ();
+    m_routingSection =
+     i.ReadU8 ();
+
+    m_routingTotalSections =
+      i.ReadU8 ();
+
+    if (m_routingTotalSections == 0)
+      {
+        m_routingTotalSections = 1;
+      }
     m_routingOperation = i.ReadU8 ();
     m_routingTarget = i.ReadNtohU16 ();
 
@@ -330,6 +344,10 @@ namespace ns3 {
       << " discoverType=" << unsigned (m_discoverType)
       << " discoverySequence=" << m_discoverySequence
       << " routingSequence=" << m_routingSequence
+      << " routingSection="
+      << unsigned (m_routingSection)
+      << " routingTotalSections="
+      << unsigned (m_routingTotalSections)
       << " chirpNeighbors=" << unsigned (GetChirpNeighborCount ())
       << " advRoutes=" << unsigned (GetAdvertisedRouteCount ())
       << " routingOperation=" << unsigned (m_routingOperation)
@@ -480,4 +498,32 @@ namespace ns3 {
     return m_routingTarget;
   }
 
+  void
+  CsrHelloHeader::SetRoutingSection (
+    uint8_t section)
+  {
+    m_routingSection = section;
+  }
+
+  uint8_t
+  CsrHelloHeader::GetRoutingSection () const
+  {
+    return m_routingSection;
+  }
+
+  void
+  CsrHelloHeader::SetRoutingTotalSections (
+    uint8_t totalSections)
+  {
+    m_routingTotalSections =
+      std::max<uint8_t> (
+        1,
+        totalSections);
+  }
+
+  uint8_t
+  CsrHelloHeader::GetRoutingTotalSections () const
+  {
+    return m_routingTotalSections;
+  }
 } // namespace ns3

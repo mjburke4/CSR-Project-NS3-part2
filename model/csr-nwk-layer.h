@@ -1132,10 +1132,15 @@ private:
 
     CsrNodeType nodeType {CsrNodeType::Ordinary};
 
-    bool routingSequenceValid {false};
-    uint32_t routingSequence {0};
+	    bool routingSequenceValid {false};
+	    uint32_t routingSequence {0};
 
-    bool routingRequestPending {false};
+	    bool routingUpdateSectionStateValid {false};
+	    uint32_t routingUpdateSectionSequence {0};
+	    uint8_t routingUpdateLastSection {0};
+	    uint8_t routingUpdateTotalSections {1};
+
+	    bool routingRequestPending {false};
     uint32_t routingRequestSequence {0};
 
     uint32_t routingRequestRetryCount {0};
@@ -1451,18 +1456,24 @@ public:
   NoteRoutingControlSuccess (
     uint16_t neighbor,
     uint32_t routingSequence,
-    CsrRoutingOperation operation)
+    CsrRoutingOperation operation,
+    uint8_t routingSection,
+    uint8_t routingTotalSections)
   {
     std::cout << "[NWK " << m_nodeId
               << "] Reliable RoutingControl ACKed"
               << " neighbor=" << neighbor
-              << " routingSequence="
-              << routingSequence
-              << " operation="
-              << RoutingOperationName (operation)
-              << std::endl;
+	              << " routingSequence="
+	              << routingSequence
+	              << " operation="
+	              << RoutingOperationName (operation)
+	              << " section="
+	              << unsigned (routingSection)
+	              << "/"
+	              << unsigned (routingTotalSections)
+	              << std::endl;
 
-    auto snapshotIt =
+	    auto snapshotIt =
       m_outboundRoutingSnapshots.find (
         neighbor);
 
@@ -1485,13 +1496,24 @@ public:
         routingSequence ==
           snapshot.infoSequence)
       {
+        snapshot.currentUpdateSection = 0;
+
         Ptr<Packet> updatePayload =
           BuildRoutingUpdatePayload (
-            snapshot.updateSequence);
+            snapshot.updateSequence,
+            snapshot.currentUpdateSection,
+            snapshot.totalUpdateSections);
 
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingSnapshot INFO ACKed;"
-                  << " sending UPDATE"
+                  << " sending UPDATE section="
+                  << unsigned (
+                      snapshot
+                        .currentUpdateSection)
+                  << "/"
+                  << unsigned (
+                      snapshot
+                        .totalUpdateSections)
                   << " neighbor=" << neighbor
                   << " routingSequence="
                   << snapshot.updateSequence
@@ -1509,13 +1531,69 @@ public:
         routingSequence ==
           snapshot.updateSequence)
       {
+        if (routingSection !=
+            snapshot.currentUpdateSection)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Ignoring unexpected snapshot"
+                      << " Update completion"
+                      << " neighbor=" << neighbor
+                      << " completedSection="
+                      << unsigned (routingSection)
+                      << " expectedSection="
+                      << unsigned (
+                          snapshot
+                            .currentUpdateSection)
+                      << std::endl;
+
+            return;
+          }
+
+        uint8_t nextSection =
+          static_cast<uint8_t> (
+            routingSection + 1);
+
+        if (nextSection <
+            snapshot.totalUpdateSections)
+          {
+            snapshot.currentUpdateSection =
+              nextSection;
+
+            Ptr<Packet> nextPayload =
+              BuildRoutingUpdatePayload (
+                snapshot.updateSequence,
+                snapshot.currentUpdateSection,
+                snapshot.totalUpdateSections);
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingSnapshot UPDATE ACKed;"
+                      << " sending next section="
+                      << unsigned (
+                          snapshot
+                            .currentUpdateSection)
+                      << "/"
+                      << unsigned (
+                          snapshot
+                            .totalUpdateSections)
+                      << " neighbor=" << neighbor
+                      << " routingSequence="
+                      << snapshot.updateSequence
+                      << std::endl;
+
+            m_hop->SendRoutingControl (
+              neighbor,
+              nextPayload);
+
+            return;
+          }
+
         Ptr<Packet> flushPayload =
           BuildRoutingMarkerPayload (
             CsrRoutingOperation::Flush,
             snapshot.flushSequence);
 
         std::cout << "[NWK " << m_nodeId
-                  << "] RoutingSnapshot UPDATE ACKed;"
+                  << "] RoutingSnapshot final UPDATE ACKed;"
                   << " sending FLUSH"
                   << " neighbor=" << neighbor
                   << " routingSequence="
@@ -1786,7 +1864,12 @@ private:
   }
 
   Ptr<Packet> BuildRoutingUpdatePayload (
-  uint32_t routingSequence);
+    uint32_t routingSequence,
+    uint8_t routingSection = 0,
+    uint8_t routingTotalSections = 1);
+
+  uint32_t
+  CountAdvertisableSelectedRoutes () const;
 
   uint16_t m_routingControlHeaderSeq {0};
 
@@ -1801,8 +1884,15 @@ private:
     bool active {false};
 
     uint32_t infoSequence {0};
+
+    // All Update sections share this sequence,
+    // matching the legacy routing message.
     uint32_t updateSequence {0};
+
     uint32_t flushSequence {0};
+
+    uint8_t totalUpdateSections {1};
+    uint8_t currentUpdateSection {0};
   };
 
   std::map<uint16_t, OutboundRoutingSnapshot>
@@ -2346,38 +2436,9 @@ CsrNetLayer::ProcessRoutingUpdate (
   uint32_t incomingSequence =
     hh.GetRoutingSequence ();
 
-  // Reject duplicate or older routing-control messages.
-  if (neighbor.routingSequenceValid)
-    {
-      int comparison =
-        CompareRoutingSequence (
-          neighbor.routingSequence,
-          incomingSequence);
-
-      // Existing sequence is equal to or newer than the incoming one.
-      if (comparison >= 0)
-        {
-          std::cout << "[NWK " << m_nodeId
-                    << "] Ignoring stale/duplicate RoutingControl"
-                    << " from=" << helloSrc
-                    << " incomingSequence="
-                    << incomingSequence
-                    << " lastSequence="
-                    << neighbor.routingSequence
-                    << std::endl;
-
-          return;
-        }
-    }
-
-  uint32_t previousSequence =
-    neighbor.routingSequence;
-
   CsrRoutingOperation operation =
     hh.GetRoutingOperation ();
 
-  // Backward compatibility: old route-vector builders may not
-  // explicitly identify themselves as Update operations.
   if (operation == CsrRoutingOperation::None &&
       hh.GetAdvertisedRouteCount () > 0)
     {
@@ -2385,13 +2446,140 @@ CsrNetLayer::ProcessRoutingUpdate (
         CsrRoutingOperation::Update;
     }
 
-  // Record this sequence before handling the operation.
-  neighbor.routingSequence =
-    incomingSequence;
+  uint8_t incomingSection =
+    hh.GetRoutingSection ();
 
-  neighbor.routingSequenceValid = true;
+  uint8_t incomingTotalSections =
+    std::max<uint8_t> (
+      1,
+      hh.GetRoutingTotalSections ());
 
-  switch (operation)
+  // Reject duplicate or older routing-control messages.
+  if (operation ==
+        CsrRoutingOperation::Update &&
+      incomingSection >=
+        incomingTotalSections)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Rejecting malformed RoutingUpdate section"
+                << " from=" << helloSrc
+                << " section="
+                << unsigned (incomingSection)
+                << " totalSections="
+                << unsigned (
+                    incomingTotalSections)
+                << std::endl;
+
+      return;
+    }
+
+  int sequenceComparison = -1;
+
+  if (neighbor.routingSequenceValid)
+    {
+      sequenceComparison =
+        CompareRoutingSequence (
+          neighbor.routingSequence,
+          incomingSequence);
+    }
+
+  bool continuationSection =
+    neighbor.routingSequenceValid &&
+    sequenceComparison == 0 &&
+    operation ==
+      CsrRoutingOperation::Update &&
+    neighbor
+      .routingUpdateSectionStateValid &&
+    neighbor.routingUpdateSectionSequence ==
+      incomingSequence &&
+    incomingSection ==
+      static_cast<uint8_t> (
+        neighbor.routingUpdateLastSection + 1) &&
+    incomingTotalSections ==
+      neighbor.routingUpdateTotalSections;
+
+  if (neighbor.routingSequenceValid &&
+      (sequenceComparison > 0 ||
+      (sequenceComparison == 0 &&
+        !continuationSection)))
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring stale/duplicate RoutingControl"
+                << " from=" << helloSrc
+                << " incomingSequence="
+                << incomingSequence
+                << " lastSequence="
+                << neighbor.routingSequence
+                << " section="
+                << unsigned (incomingSection)
+                << std::endl;
+
+      return;
+    }
+
+  bool newSequence =
+    !neighbor.routingSequenceValid ||
+    sequenceComparison < 0;
+
+  if (newSequence &&
+      operation ==
+        CsrRoutingOperation::Update &&
+      incomingSection != 0)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Rejecting RoutingUpdate"
+                << " missing first section"
+                << " from=" << helloSrc
+                << " firstReceivedSection="
+                << unsigned (incomingSection)
+                << std::endl;
+
+      return;
+    }
+
+  uint32_t previousSequence =
+    neighbor.routingSequence;
+
+  if (newSequence)
+    {
+      neighbor.routingSequence =
+        incomingSequence;
+
+      neighbor.routingSequenceValid = true;
+
+      if (operation ==
+          CsrRoutingOperation::Update)
+        {
+          neighbor
+            .routingUpdateSectionStateValid =
+              true;
+
+          neighbor
+            .routingUpdateSectionSequence =
+              incomingSequence;
+
+          neighbor
+            .routingUpdateLastSection =
+              incomingSection;
+
+          neighbor
+            .routingUpdateTotalSections =
+              incomingTotalSections;
+        }
+      else
+        {
+          neighbor
+            .routingUpdateSectionStateValid =
+              false;
+        }
+    }
+  else if (continuationSection)
+    {
+      neighbor.routingUpdateLastSection =
+        incomingSection;
+    }
+
+	  switch (operation)
     {
     case CsrRoutingOperation::Request:
       {
@@ -2438,6 +2626,10 @@ CsrNetLayer::ProcessRoutingUpdate (
                   << " advCount="
                   << unsigned (
                        hh.GetAdvertisedRouteCount ())
+                  << " section="
+                  << unsigned (incomingSection)
+                  << "/"
+                  << unsigned (incomingTotalSections)
                   << std::endl;
 
         // An ACK only proved that our Request arrived.
@@ -2471,6 +2663,19 @@ CsrNetLayer::ProcessRoutingUpdate (
                           .routingSnapshotSeenDestinations
                           .size ()
                       << std::endl;
+            if (incomingSection + 1 ==
+                incomingTotalSections)
+              {
+                std::cout << "[NWK " << m_nodeId
+                          << "] RoutingSnapshot received all UPDATE sections"
+                          << " from=" << helloSrc
+                          << " routingSequence="
+                          << incomingSequence
+                          << " totalSections="
+                          << unsigned (
+                              incomingTotalSections)
+                          << std::endl;
+              }
           }
 
         return;
@@ -3912,9 +4117,37 @@ CsrNetLayer::NeighborCheckTypeName (CsrNeighborCheckType t) const
     }
 }
 
+uint32_t
+CsrNetLayer::
+CountAdvertisableSelectedRoutes () const
+{
+  uint32_t count = 0;
+
+  for (const auto &route : m_routes)
+    {
+      const RouteEntry *best =
+        FindBestRoute (
+          route.nwkDst);
+
+      if (best != &route)
+        {
+          continue;
+        }
+
+      if (ShouldAdvertiseRoute (route))
+        {
+          count++;
+        }
+    }
+
+  return count;
+}
+
 Ptr<Packet>
 CsrNetLayer::BuildRoutingUpdatePayload (
-  uint32_t routingSequence)
+  uint32_t routingSequence,
+  uint8_t routingSection,
+  uint8_t routingTotalSections)
 {
   Ptr<Packet> packet =
     Create<Packet> ();
@@ -3955,13 +4188,28 @@ CsrNetLayer::BuildRoutingUpdatePayload (
   hh.SetRoutingSequence (
     routingSequence);
 
+  hh.SetRoutingSection (
+  routingSection);
+
+  hh.SetRoutingTotalSections (
+  routingTotalSections);
+
   hh.SetRoutingOperation (
     CsrRoutingOperation::Update);
 
   hh.ClearChirpNeighbors ();
   hh.ClearAdvertisedRoutes ();
 
+  static constexpr uint32_t
+    ROUTES_PER_SECTION = 8;
+
   uint8_t added = 0;
+  uint32_t eligibleIndex = 0;
+
+  uint32_t firstRouteIndex =
+    static_cast<uint32_t> (
+      routingSection) *
+    ROUTES_PER_SECTION;
 
   for (const auto &route : m_routes)
     {
@@ -3976,6 +4224,15 @@ CsrNetLayer::BuildRoutingUpdatePayload (
 
       if (!ShouldAdvertiseRoute (route))
         {
+          if (eligibleIndex <
+              firstRouteIndex)
+            {
+              eligibleIndex++;
+              continue;
+            }
+
+          eligibleIndex++;
+
           continue;
         }
 
@@ -4012,6 +4269,11 @@ CsrNetLayer::BuildRoutingUpdatePayload (
             << "] Built reliable RoutingUpdate"
             << " routingSequence="
             << routingSequence
+            << " section="
+            << unsigned (routingSection)
+            << "/"
+            << unsigned (
+                routingTotalSections)
             << " advertisedRoutes="
             << unsigned (added)
             << std::endl;
@@ -4187,6 +4449,27 @@ CsrNetLayer::StartReliableRoutingSnapshot (
 
   snapshot.active = true;
 
+  static constexpr uint32_t
+  ROUTES_PER_SECTION = 8;
+
+  uint32_t advertisedRouteCount =
+    CountAdvertisableSelectedRoutes ();
+
+  uint32_t calculatedSections =
+    std::max<uint32_t> (
+      1,
+      (advertisedRouteCount +
+        ROUTES_PER_SECTION - 1) /
+        ROUTES_PER_SECTION);
+
+  snapshot.totalUpdateSections =
+    static_cast<uint8_t> (
+      std::min<uint32_t> (
+        255,
+        calculatedSections));
+
+  snapshot.currentUpdateSection = 0;
+
   snapshot.infoSequence =
     NextRoutingSequence ();
 
@@ -4205,6 +4488,11 @@ CsrNetLayer::StartReliableRoutingSnapshot (
             << snapshot.updateSequence
             << " flushSequence="
             << snapshot.flushSequence
+            << " advertisedRoutes="
+            << advertisedRouteCount
+            << " updateSections="
+            << unsigned (
+                snapshot.totalUpdateSections)
             << std::endl;
 
   Ptr<Packet> infoPayload =
