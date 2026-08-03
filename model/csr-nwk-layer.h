@@ -3442,6 +3442,84 @@ CsrNetLayer::CheckNeighborFreshness ()
         {
           ne.stale = true;
 
+          bool hadPendingRoutingRequest =
+            ne.routingRequestPending;
+
+          bool hadInboundSnapshot =
+            ne.routingSnapshotActive;
+
+          bool hadOutboundSnapshot = false;
+
+          if (ne.routingRequestTimeoutEvent.IsPending ())
+            {
+              Simulator::Cancel (
+                ne.routingRequestTimeoutEvent);
+            }
+
+          ne.routingRequestPending = false;
+          ne.routingRequestSequence = 0;
+          ne.routingRequestRetryCount = 0;
+
+          ne.routingSnapshotActive = false;
+          ne.routingSnapshotInfoSequence = 0;
+          ne.routingSnapshotSeenDestinations.clear ();
+
+          // Discard any partially received multi-section Update.
+          ne.routingUpdateSectionStateValid = false;
+          ne.routingUpdateSectionSequence = 0;
+          ne.routingUpdateLastSection = 0;
+          ne.routingUpdateTotalSections = 1;
+
+          auto outboundSnapshotIt =
+            m_outboundRoutingSnapshots.find (
+              ne.nodeId);
+
+          if (outboundSnapshotIt !=
+                m_outboundRoutingSnapshots.end ())
+            {
+              hadOutboundSnapshot =
+                outboundSnapshotIt->second.active;
+
+              outboundSnapshotIt->second.active =
+                false;
+            }
+
+          // Do not leave a stale neighbor queued for
+          // automatic route-update fanout.
+          bool removedPendingAutomaticUpdate =
+            m_pendingAutomaticUpdateNeighbors.erase (
+              ne.nodeId) > 0;
+
+          std::cout << "[NWK " << m_nodeId
+                    << "] Cleared stale routing transaction state"
+                    << " neighbor=" << ne.nodeId
+                    << " pendingRequest="
+                    << (hadPendingRoutingRequest ? 1 : 0)
+                    << " inboundSnapshot="
+                    << (hadInboundSnapshot ? 1 : 0)
+                    << " outboundSnapshot="
+                    << (hadOutboundSnapshot ? 1 : 0)
+                    << " removedAutomaticUpdate="
+                    << (removedPendingAutomaticUpdate
+                          ? 1
+                          : 0)
+                    << std::endl;
+
+          // Do not reuse radio limits learned before
+          // the neighbor became stale. A fresh INFO
+          // exchange must re-establish them.
+          ne.routingInfoValid = false;
+          ne.routingInfoSequence = 0;
+
+          ne.negotiatedLinkProfileValid = false;
+          ne.negotiatedSpeedCompatible = false;
+          ne.negotiatedPowerCompatible = false;
+
+          std::cout << "[NWK " << m_nodeId
+                    << "] Cleared stale RoutingInfo"
+                    << " neighbor=" << ne.nodeId
+                    << std::endl;
+
           chirpNeeded = true;
           newlyStaleCount++;
 
@@ -3486,32 +3564,79 @@ CsrNetLayer::CheckNeighborFreshness ()
 }
 
 void
-CsrNetLayer::InvalidateRoutesViaNextHop (uint16_t nextHop, const char *reason)
+CsrNetLayer::InvalidateRoutesViaNextHop (
+  uint16_t nextHop,
+  const char *reason)
 {
   bool anyInvalidated = false;
 
-  for (auto &re : m_routes)
+  // Preserve the selected route for each affected
+  // destination before invalidating candidates.
+  std::map<uint16_t, SelectedRouteState>
+    selectedBefore;
+
+  for (auto &route : m_routes)
     {
-      if (!re.valid)
+      if (!route.valid)
         {
           continue;
         }
 
-      if (re.nextHop != nextHop)
+      if (route.nextHop != nextHop)
         {
           continue;
         }
 
-      re.valid = false;
-      re.lastUpdated = Simulator::Now ();
+      if (selectedBefore.find (
+            route.nwkDst) ==
+          selectedBefore.end ())
+        {
+          selectedBefore.emplace (
+            route.nwkDst,
+            CaptureSelectedRouteState (
+              route.nwkDst));
+        }
+
+      route.valid = false;
+      route.lastUpdated =
+        Simulator::Now ();
+
       anyInvalidated = true;
 
       std::cout << "[NWK " << m_nodeId
-                << "] Invalidated route dst=" << re.nwkDst
-                << " nextHop=" << re.nextHop
-                << " cost=" << re.cost
+                << "] Invalidated route"
+                << " dst=" << route.nwkDst
+                << " nextHop="
+                << route.nextHop
+                << " cost=" << route.cost
                 << " reason=" << reason
                 << std::endl;
+    }
+
+  // Determine whether invalidation actually changed
+  // the selected route. Invalidating a non-selected
+  // backup candidate should not generate an update.
+  for (const auto &entry :
+       selectedBefore)
+    {
+      uint16_t destination =
+        entry.first;
+
+      const SelectedRouteState
+        &before = entry.second;
+
+      SelectedRouteState after =
+        CaptureSelectedRouteState (
+          destination);
+
+      if (!SameSelectedRouteState (
+            before,
+            after))
+        {
+          MarkSelectedRouteChanged (
+            destination,
+            reason);
+        }
     }
 
   if (anyInvalidated)
