@@ -1740,8 +1740,8 @@ public:
               snapshot.watchdogEvent);
           }
 
-        // Invalidate any watchdog callback that may
-        // already have been dispatched.
+        // Prevent an already-scheduled older callback
+        // from affecting a later snapshot.
         snapshot.watchdogGeneration++;
 
         snapshot.watchdogPhase =
@@ -1756,9 +1756,9 @@ public:
                   << routingSequence
                   << std::endl;
 
-        // A route update may have been waiting while
-        // this snapshot occupied the neighbor.
-        if (!m_pendingAutomaticUpdateNeighbors.empty () &&
+        // Resume any automatic route propagation that
+        // was blocked while this snapshot was active.
+        if (!m_pendingAutomaticRouteChanges.empty () &&
             !m_automaticRouteUpdateEvent.IsPending ())
           {
             m_automaticRouteUpdateEvent =
@@ -2024,6 +2024,10 @@ private:
       }
   }
 
+  Ptr<Packet> BuildTargetedRoutingUpdatePayload (
+    uint16_t destination,
+    uint32_t routingSequence);
+
   Ptr<Packet> BuildRoutingUpdatePayload (
     uint32_t routingSequence,
     uint8_t routingSection = 0,
@@ -2092,8 +2096,10 @@ private:
     false
   };
 
-  std::set<uint16_t>
-    m_pendingAutomaticUpdateNeighbors;
+  // Changed destinations waiting to be advertised,
+  // grouped by receiving neighbor.
+  std::map<uint16_t, std::set<uint16_t>>
+    m_pendingAutomaticRouteChanges;
 
   EventId m_automaticRouteUpdateEvent;
 
@@ -3548,7 +3554,8 @@ CsrNetLayer::CheckNeighborFreshness ()
                     snapshot.watchdogEvent);
                 }
 
-              // Make any old watchdog callback harmless.
+              // Prevent any previously scheduled watchdog
+              // callback from acting on a future snapshot.
               snapshot.watchdogGeneration++;
 
               snapshot.watchdogPhase =
@@ -3560,7 +3567,7 @@ CsrNetLayer::CheckNeighborFreshness ()
           // Do not leave a stale neighbor queued for
           // automatic route-update fanout.
           bool removedPendingAutomaticUpdate =
-            m_pendingAutomaticUpdateNeighbors.erase (
+            m_pendingAutomaticRouteChanges.erase (
               ne.nodeId) > 0;
 
           std::cout << "[NWK " << m_nodeId
@@ -4846,6 +4853,127 @@ CsrNetLayer::BuildRoutingUpdatePayload (
 }
 
 Ptr<Packet>
+CsrNetLayer::
+BuildTargetedRoutingUpdatePayload (
+  uint16_t destination,
+  uint32_t routingSequence)
+{
+  const RouteEntry *route =
+    FindBestRoute (
+      destination);
+
+  if (route == nullptr ||
+      !ShouldAdvertiseRoute (*route))
+    {
+      return nullptr;
+    }
+
+  Ptr<Packet> packet =
+    Create<Packet> ();
+
+  CsrHelloHeader hh;
+
+  hh.SetNodeId (m_nodeId);
+
+  hh.SetHelloSeq (
+    ++m_routingControlHeaderSeq);
+
+  hh.SetNodeType (
+    m_nodeType);
+
+  hh.SetSpeedKey (
+    m_minSpeedKey);
+
+  double s0PowerDbm =
+    m_rxS0BaseLevelDbm +
+    m_linkMarginDb;
+
+  hh.SetRxPowerDbmX10 (
+    static_cast<int16_t> (
+      std::round (
+        s0PowerDbm * 10.0)));
+
+  hh.SetActiveNodes (
+    static_cast<uint8_t> (
+      GetActiveNodeCount ()));
+
+  hh.SetArlRouteMsgType (
+    CsrArlRouteMsgType::
+      RoutingUpdate);
+
+  hh.SetNeighborCheckType (
+    CsrNeighborCheckType::None);
+
+  hh.SetDiscoverType (
+    CsrDiscoverType::None);
+
+  hh.SetDiscoverySequence (0);
+
+  hh.SetRoutingSequence (
+    routingSequence);
+
+  hh.SetRoutingSection (0);
+  hh.SetRoutingTotalSections (1);
+
+  hh.SetRoutingOperation (
+    CsrRoutingOperation::Update);
+
+  hh.ClearChirpNeighbors ();
+  hh.ClearAdvertisedRoutes ();
+
+  int16_t pathlossX10 = 0;
+
+  if (!std::isnan (
+        route->pathlossDb))
+    {
+      pathlossX10 =
+        static_cast<int16_t> (
+          std::round (
+            route->pathlossDb *
+            10.0));
+    }
+
+  bool added =
+    hh.AddAdvertisedRoute (
+      route->nwkDst,
+      route->numHop,
+      route->cost,
+      pathlossX10,
+      route->capability,
+      route->path);
+
+  if (!added)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Failed to build targeted RoutingUpdate"
+                << " destination="
+                << destination
+                << std::endl;
+
+      return nullptr;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Built targeted RoutingUpdate"
+            << " destination="
+            << destination
+            << " nextHop="
+            << route->nextHop
+            << " cost="
+            << route->cost
+            << " hops="
+            << unsigned (
+                route->numHop)
+            << " routingSequence="
+            << routingSequence
+            << std::endl;
+
+  packet->AddHeader (hh);
+
+  return packet;
+}
+
+Ptr<Packet>
 CsrNetLayer::BuildRoutingRequestPayload (
   uint32_t routingSequence)
 {
@@ -5239,7 +5367,7 @@ RoutingSnapshotWatchdogExpired (
 
   // A selected-route change may have been waiting
   // behind this snapshot.
-  if (!m_pendingAutomaticUpdateNeighbors.empty () &&
+  if (!m_pendingAutomaticRouteChanges.empty () &&
       !m_automaticRouteUpdateEvent.IsPending ())
     {
       m_automaticRouteUpdateEvent =
@@ -5594,9 +5722,10 @@ ReportPendingSelectedRouteChanges ()
     }
 
   uint32_t queuedNeighbors = 0;
+  uint32_t queuedDestinationPairs = 0;
 
   for (const auto &entry :
-       m_nwkNeighbors)
+      m_nwkNeighbors)
     {
       const NwkNeighborEntry &neighbor =
         entry.second;
@@ -5610,26 +5739,47 @@ ReportPendingSelectedRouteChanges ()
           continue;
         }
 
-      bool inserted =
-        m_pendingAutomaticUpdateNeighbors
-          .insert (neighbor.nodeId)
-          .second;
+      std::set<uint16_t>
+        &pendingDestinations =
+          m_pendingAutomaticRouteChanges[
+            neighbor.nodeId];
 
-      if (inserted)
+      bool wasEmpty =
+        pendingDestinations.empty ();
+
+      for (uint16_t destination :
+          destinations)
+        {
+          bool inserted =
+            pendingDestinations.insert (
+              destination)
+              .second;
+
+          if (inserted)
+            {
+              queuedDestinationPairs++;
+            }
+        }
+
+      if (wasEmpty &&
+          !pendingDestinations.empty ())
         {
           queuedNeighbors++;
         }
     }
 
   std::cout << "[NWK " << m_nodeId
-            << "] Queued automatic reliable route propagation"
+            << "] Queued automatic destination-specific"
+            << " route propagation"
             << " freshNeighborsAdded="
             << queuedNeighbors
-            << " totalPendingNeighbors="
-            << m_pendingAutomaticUpdateNeighbors.size ()
+            << " destinationPairsAdded="
+            << queuedDestinationPairs
+            << " pendingNeighbors="
+            << m_pendingAutomaticRouteChanges.size ()
             << std::endl;
 
-  if (!m_pendingAutomaticUpdateNeighbors.empty () &&
+  if (!m_pendingAutomaticRouteChanges.empty () &&
       !m_automaticRouteUpdateEvent.IsPending ())
     {
       m_automaticRouteUpdateEvent =
@@ -5650,17 +5800,17 @@ TrySendAutomaticRouteUpdates ()
       return;
     }
 
-  bool sentUpdate = false;
+  bool sentAction = false;
   bool blockedBySnapshot = false;
 
   auto pendingIt =
-    m_pendingAutomaticUpdateNeighbors.begin ();
+    m_pendingAutomaticRouteChanges.begin ();
 
   while (pendingIt !=
-         m_pendingAutomaticUpdateNeighbors.end ())
+         m_pendingAutomaticRouteChanges.end ())
     {
       uint16_t neighborId =
-        *pendingIt;
+        pendingIt->first;
 
       auto neighborIt =
         m_nwkNeighbors.find (
@@ -5674,11 +5824,13 @@ TrySendAutomaticRouteUpdates ()
                     << "] Dropping automatic route propagation"
                     << " unavailableNeighbor="
                     << neighborId
+                    << " destinations="
+                    << pendingIt->second.size ()
                     << std::endl;
 
           pendingIt =
-            m_pendingAutomaticUpdateNeighbors
-              .erase (pendingIt);
+            m_pendingAutomaticRouteChanges.erase (
+              pendingIt);
 
           continue;
         }
@@ -5699,41 +5851,125 @@ TrySendAutomaticRouteUpdates ()
           continue;
         }
 
-      m_pendingAutomaticUpdateNeighbors.erase (
-        pendingIt);
+      std::set<uint16_t>
+        &pendingDestinations =
+          pendingIt->second;
 
-      std::cout << "[NWK " << m_nodeId
-                << "] Sending automatic reliable RoutingUpdate"
-                << " neighbor=" << neighborId
-                << " remainingNeighbors="
-                << m_pendingAutomaticUpdateNeighbors.size ()
-                << std::endl;
+      if (pendingDestinations.empty ())
+        {
+          pendingIt =
+            m_pendingAutomaticRouteChanges.erase (
+              pendingIt);
 
-      SendReliableRoutingUpdate (
-        neighborId);
+          continue;
+        }
 
-      sentUpdate = true;
+      uint16_t destination =
+        *pendingDestinations.begin ();
+
+      pendingDestinations.erase (
+        pendingDestinations.begin ());
+
+      bool neighborCompleted =
+        pendingDestinations.empty ();
+
+      if (neighborCompleted)
+        {
+          m_pendingAutomaticRouteChanges.erase (
+            pendingIt);
+        }
+
+      const RouteEntry *selectedRoute =
+        FindBestRoute (
+          destination);
+
+      bool sendUpdate =
+        selectedRoute != nullptr &&
+        ShouldAdvertiseRoute (
+          *selectedRoute);
+
+      if (sendUpdate)
+        {
+          uint32_t sequence =
+            NextRoutingSequence ();
+
+          Ptr<Packet> payload =
+            BuildTargetedRoutingUpdatePayload (
+              destination,
+              sequence);
+
+          if (payload != nullptr)
+            {
+              std::cout << "[NWK " << m_nodeId
+                        << "] Sending automatic targeted RoutingUpdate"
+                        << " neighbor="
+                        << neighborId
+                        << " destination="
+                        << destination
+                        << " routingSequence="
+                        << sequence
+                        << std::endl;
+
+              m_hop->SendRoutingControl (
+                neighborId,
+                payload);
+            }
+          else
+            {
+              // The selected route changed again between
+              // queueing and packet construction.
+              std::cout << "[NWK " << m_nodeId
+                        << "] Targeted Update became unavailable;"
+                        << " sending Delete instead"
+                        << " neighbor="
+                        << neighborId
+                        << " destination="
+                        << destination
+                        << std::endl;
+
+              SendReliableRoutingDelete (
+                neighborId,
+                destination);
+            }
+        }
+      else
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Sending automatic targeted RoutingDelete"
+                    << " neighbor="
+                    << neighborId
+                    << " destination="
+                    << destination
+                    << std::endl;
+
+          SendReliableRoutingDelete (
+            neighborId,
+            destination);
+        }
+
+      sentAction = true;
       break;
     }
 
-  if (m_pendingAutomaticUpdateNeighbors.empty ())
+  if (m_pendingAutomaticRouteChanges.empty ())
     {
       std::cout << "[NWK " << m_nodeId
-                << "] Automatic route propagation fanout completed"
+                << "] Automatic destination-specific"
+                << " route propagation completed"
                 << std::endl;
 
       return;
     }
 
   Time nextDelay =
-    sentUpdate
+    sentAction
       ? m_automaticRouteUpdateSpacing
       : m_automaticRouteUpdateRetryDelay;
 
   std::cout << "[NWK " << m_nodeId
             << "] Automatic route propagation rescheduled"
             << " pendingNeighbors="
-            << m_pendingAutomaticUpdateNeighbors.size ()
+            << m_pendingAutomaticRouteChanges.size ()
             << " blockedBySnapshot="
             << (blockedBySnapshot ? 1 : 0)
             << " delayMs="
