@@ -1633,6 +1633,10 @@ public:
           neighbor,
           updatePayload);
 
+        ArmRoutingSnapshotWatchdog (
+          neighbor,
+          "awaiting-update-section-ack");
+
         return;
       }
 
@@ -1694,6 +1698,10 @@ public:
               neighbor,
               nextPayload);
 
+            ArmRoutingSnapshotWatchdog (
+                neighbor,
+                "awaiting-update-section-ack");
+
             return;
           }
 
@@ -1714,6 +1722,10 @@ public:
           neighbor,
           flushPayload);
 
+        ArmRoutingSnapshotWatchdog (
+          neighbor,
+          "awaiting-flush-ack");
+
         return;
       }
 
@@ -1722,6 +1734,19 @@ public:
         routingSequence ==
           snapshot.flushSequence)
       {
+        if (snapshot.watchdogEvent.IsPending ())
+          {
+            Simulator::Cancel (
+              snapshot.watchdogEvent);
+          }
+
+        // Invalidate any watchdog callback that may
+        // already have been dispatched.
+        snapshot.watchdogGeneration++;
+
+        snapshot.watchdogPhase =
+          "completed";
+
         snapshot.active = false;
 
         std::cout << "[NWK " << m_nodeId
@@ -1730,6 +1755,18 @@ public:
                   << " finalSequence="
                   << routingSequence
                   << std::endl;
+
+        // A route update may have been waiting while
+        // this snapshot occupied the neighbor.
+        if (!m_pendingAutomaticUpdateNeighbors.empty () &&
+            !m_automaticRouteUpdateEvent.IsPending ())
+          {
+            m_automaticRouteUpdateEvent =
+              Simulator::ScheduleNow (
+                &CsrNetLayer::
+                  TrySendAutomaticRouteUpdates,
+                this);
+          }
       }
   }
 
@@ -1828,6 +1865,16 @@ public:
               << (enable ? "true" : "false")
               << std::endl;
   }
+
+  void
+  ArmRoutingSnapshotWatchdog (
+    uint16_t neighbor,
+    const char *phase);
+
+  void
+  RoutingSnapshotWatchdogExpired (
+    uint16_t neighbor,
+    uint32_t expectedGeneration);
 
 private:
   uint16_t                              m_nodeId;
@@ -1939,6 +1986,10 @@ private:
   Time m_neighborFreshnessTimeout { Seconds (20.0) };
   Time m_neighborFreshnessCheckPeriod { Seconds (2.0) };
 
+  Time m_routingSnapshotWatchdogTimeout {
+    Seconds (20.0)
+  };
+
   uint16_t m_neighborCheckSeq {0};
   uint32_t m_discoverySequence {0};
 
@@ -2003,6 +2054,14 @@ private:
 
     uint8_t totalUpdateSections {1};
     uint8_t currentUpdateSection {0};
+
+    EventId watchdogEvent;
+
+    uint32_t watchdogGeneration {0};
+
+    const char *watchdogPhase {
+      "inactive"
+    };
   };
 
   std::map<uint16_t, OutboundRoutingSnapshot>
@@ -3477,11 +3536,25 @@ CsrNetLayer::CheckNeighborFreshness ()
           if (outboundSnapshotIt !=
                 m_outboundRoutingSnapshots.end ())
             {
-              hadOutboundSnapshot =
-                outboundSnapshotIt->second.active;
+              OutboundRoutingSnapshot &snapshot =
+                outboundSnapshotIt->second;
 
-              outboundSnapshotIt->second.active =
-                false;
+              hadOutboundSnapshot =
+                snapshot.active;
+
+              if (snapshot.watchdogEvent.IsPending ())
+                {
+                  Simulator::Cancel (
+                    snapshot.watchdogEvent);
+                }
+
+              // Make any old watchdog callback harmless.
+              snapshot.watchdogGeneration++;
+
+              snapshot.watchdogPhase =
+                "neighbor-stale";
+
+              snapshot.active = false;
             }
 
           // Do not leave a stale neighbor queued for
@@ -5041,6 +5114,140 @@ CsrNetLayer::StartReliableRoutingSnapshot (
   m_hop->SendRoutingControl (
     neighbor,
     infoPayload);
+}
+
+void
+CsrNetLayer::
+ArmRoutingSnapshotWatchdog (
+  uint16_t neighbor,
+  const char *phase)
+{
+  auto snapshotIt =
+    m_outboundRoutingSnapshots.find (
+      neighbor);
+
+  if (snapshotIt ==
+      m_outboundRoutingSnapshots.end ())
+    {
+      return;
+    }
+
+  OutboundRoutingSnapshot &snapshot =
+    snapshotIt->second;
+
+  if (!snapshot.active)
+    {
+      return;
+    }
+
+  if (snapshot.watchdogEvent.IsPending ())
+    {
+      Simulator::Cancel (
+        snapshot.watchdogEvent);
+    }
+
+  snapshot.watchdogGeneration++;
+
+  snapshot.watchdogPhase =
+    phase;
+
+  uint32_t generation =
+    snapshot.watchdogGeneration;
+
+  snapshot.watchdogEvent =
+    Simulator::Schedule (
+      m_routingSnapshotWatchdogTimeout,
+      &CsrNetLayer::
+        RoutingSnapshotWatchdogExpired,
+      this,
+      neighbor,
+      generation);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Armed RoutingSnapshot watchdog"
+            << " neighbor=" << neighbor
+            << " phase=" << phase
+            << " generation="
+            << generation
+            << " timeoutSec="
+            << m_routingSnapshotWatchdogTimeout
+                 .GetSeconds ()
+            << std::endl;
+}
+
+void
+CsrNetLayer::
+RoutingSnapshotWatchdogExpired (
+  uint16_t neighbor,
+  uint32_t expectedGeneration)
+{
+  auto snapshotIt =
+    m_outboundRoutingSnapshots.find (
+      neighbor);
+
+  if (snapshotIt ==
+      m_outboundRoutingSnapshots.end ())
+    {
+      return;
+    }
+
+  OutboundRoutingSnapshot &snapshot =
+    snapshotIt->second;
+
+  if (!snapshot.active)
+    {
+      return;
+    }
+
+  if (snapshot.watchdogGeneration !=
+      expectedGeneration)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring stale RoutingSnapshot watchdog"
+                << " neighbor=" << neighbor
+                << " expectedGeneration="
+                << expectedGeneration
+                << " currentGeneration="
+                << snapshot.watchdogGeneration
+                << std::endl;
+
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] RoutingSnapshot watchdog expired"
+            << " neighbor=" << neighbor
+            << " phase="
+            << snapshot.watchdogPhase
+            << " infoSequence="
+            << snapshot.infoSequence
+            << " updateSequence="
+            << snapshot.updateSequence
+            << " section="
+            << unsigned (
+                snapshot.currentUpdateSection)
+            << "/"
+            << unsigned (
+                snapshot.totalUpdateSections)
+            << " flushSequence="
+            << snapshot.flushSequence
+            << std::endl;
+
+  snapshot.active = false;
+  snapshot.watchdogPhase =
+    "aborted";
+
+  // A selected-route change may have been waiting
+  // behind this snapshot.
+  if (!m_pendingAutomaticUpdateNeighbors.empty () &&
+      !m_automaticRouteUpdateEvent.IsPending ())
+    {
+      m_automaticRouteUpdateEvent =
+        Simulator::ScheduleNow (
+          &CsrNetLayer::
+            TrySendAutomaticRouteUpdates,
+          this);
+    }
 }
 
 void
