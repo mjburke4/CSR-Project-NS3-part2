@@ -2262,12 +2262,14 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   double speedMargin = 0.0;
   double totalMargin = 0.0;
 
-  const NwkNeighborEntry *linkProfile =
-    ne.negotiatedLinkProfileValid
-      ? &ne
-      : nullptr;
-
-  uint32_t linkCost =
+  // ----------------------------------------------------------
+  // Local direction:
+  // This node transmits to the neighbor.
+  //
+  // The neighbor's advertised S0 value represents the
+  // receive threshold that our transmission must satisfy.
+  // ----------------------------------------------------------
+  uint32_t localDirectionalCost =
     ComputeLinkCost (
       s0PowerDbm,
       pathlossDb,
@@ -2277,7 +2279,175 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
       &estDistance,
       &speedMargin,
       &totalMargin,
-      linkProfile);
+      nullptr);
+
+  uint32_t linkCost =
+    localDirectionalCost;
+
+  uint32_t remoteDirectionalCost = 0;
+
+  bool usingBidirectionalCost = false;
+
+  // Preserve the local-direction results before combining
+  // them with the reverse direction.
+  int localSpeed =
+    chosenSpeed;
+
+  double localTxPower =
+    chosenTxPower;
+
+  int localEstDistance =
+    estDistance;
+
+  double localSpeedMargin =
+    speedMargin;
+
+  double localTotalMargin =
+    totalMargin;
+
+  // The remote configuration must be internally valid.
+  // This is different from requiring the local and remote
+  // ranges to be identical.
+  bool remoteLimitsValid =
+    ne.routingInfoValid &&
+    ne.remoteMinSpeedKbps > 0 &&
+    ne.remoteMinSpeedKbps <=
+      ne.remoteMaxSpeedKbps &&
+    ne.remoteMinPowerDbmX10 <=
+      ne.remoteMaxPowerDbmX10;
+
+  int remoteSpeed = 0;
+  double remoteTxPower = 0.0;
+  int remoteEstDistance = 0;
+  double remoteSpeedMargin = 0.0;
+  double remoteTotalMargin = 0.0;
+
+  if (remoteLimitsValid)
+    {
+      // ComputeLinkCost already accepts a profile through
+      // its negotiated fields. Use a temporary profile to
+      // represent the remote transmitter's actual limits.
+      NwkNeighborEntry remoteTxProfile;
+
+      remoteTxProfile
+        .negotiatedLinkProfileValid =
+          true;
+
+      remoteTxProfile
+        .negotiatedMinSpeedKbps =
+          ne.remoteMinSpeedKbps;
+
+      remoteTxProfile
+        .negotiatedMaxSpeedKbps =
+          ne.remoteMaxSpeedKbps;
+
+      remoteTxProfile
+        .negotiatedMinPowerDbmX10 =
+          ne.remoteMinPowerDbmX10;
+
+      remoteTxProfile
+        .negotiatedMaxPowerDbmX10 =
+          ne.remoteMaxPowerDbmX10;
+
+      remoteTxProfile
+        .negotiatedLowPowerDbmX10 =
+          ne.remoteLowPowerDbmX10;
+
+      // Reverse direction:
+      // The neighbor transmits to this node, so use our
+      // local receiver threshold and the remote TX limits.
+      double localS0PowerDbm =
+        m_rxS0BaseLevelDbm +
+        m_linkMarginDb;
+
+      remoteDirectionalCost =
+        ComputeLinkCost (
+          localS0PowerDbm,
+          pathlossDb,
+          ne.numFailures,
+          &remoteSpeed,
+          &remoteTxPower,
+          &remoteEstDistance,
+          &remoteSpeedMargin,
+          &remoteTotalMargin,
+          &remoteTxProfile);
+
+      // Legacy behavior uses the weakest characteristic
+      // of the two directions:
+      //   lowest speed
+      //   lowest margins
+      //   highest required distance/energy estimate
+      chosenSpeed =
+        std::min (
+          localSpeed,
+          remoteSpeed);
+
+      estDistance =
+        std::max (
+          localEstDistance,
+          remoteEstDistance);
+
+      speedMargin =
+        std::min (
+          localSpeedMargin,
+          remoteSpeedMargin);
+
+      totalMargin =
+        std::min (
+          localTotalMargin,
+          remoteTotalMargin);
+
+      // chosenTxPower describes this node's own
+      // transmission requirement, so retain the local
+      // directional value.
+      chosenTxPower =
+        localTxPower;
+
+      if (chosenSpeed > 0)
+        {
+          linkCost =
+            static_cast<uint32_t> (
+              std::floor (
+                static_cast<double> (
+                  estDistance) *
+                100.0 /
+                static_cast<double> (
+                  chosenSpeed)));
+        }
+      else
+        {
+          linkCost = 1;
+        }
+
+      double failureMarginDb =
+        3.0 *
+        static_cast<double> (
+          ne.numFailures);
+
+      if ((totalMargin -
+          failureMarginDb) < 0.0)
+        {
+          linkCost *= 2;
+        }
+
+      if ((speedMargin -
+          failureMarginDb) > 3.0)
+        {
+          linkCost =
+            static_cast<uint32_t> (
+              std::floor (
+                static_cast<double> (
+                  linkCost) /
+                2.0));
+        }
+
+      linkCost =
+        std::max<uint32_t> (
+          1,
+          linkCost);
+
+      usingBidirectionalCost = true;
+    }
 
   std::cout << "[NWK " << m_nodeId
               << "] link_calc neighbor=" << src
@@ -2289,11 +2459,24 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
               << " estDistance=" << estDistance
               << " speedMargin=" << speedMargin
               << " totalMargin=" << totalMargin
-              << " profile="
-              << (linkProfile != nullptr
-                    ? "negotiated"
-                    : "local")
-              << " cost=" << linkCost
+              << " costMode="
+              << (usingBidirectionalCost
+                    ? "bidirectional"
+                    : "local-only")
+              << " localDirectionalCost="
+              << localDirectionalCost
+              << " remoteDirectionalCost="
+              << remoteDirectionalCost
+              << " localSpeed="
+              << localSpeed
+              << " remoteSpeed="
+              << remoteSpeed
+              << " localDistance="
+              << localEstDistance
+              << " remoteDistance="
+              << remoteEstDistance
+              << " cost="
+              << linkCost
               << std::endl;
 
   AddOrUpdateRoute (src,
