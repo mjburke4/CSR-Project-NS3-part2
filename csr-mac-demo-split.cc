@@ -488,68 +488,47 @@ Simulator::Schedule (
       1);
   });
 
-Simulator::Schedule (
-  Seconds (35.0),
-  [net1]() {
-    std::cout
-      << "\n=== route path loop-rejection result ==="
-      << std::endl;
 
-    net1->DumpBestRoute (95);
-    net1->DumpBestRoute (96);
-    net1->DumpRoutes ();
-  });
+  Simulator::Schedule (
+    Seconds (35.0),
+    [net1]() {
+      std::cout
+        << "\n=== genuine backup failover setup ==="
+        << std::endl;
 
-Simulator::Schedule (
-  Seconds (34.0),
-  [net2]() {
-    std::cout
-      << "\n=== post-RoutingDelete route table ==="
-      << std::endl;
+      // Node 1 should already have a genuine route to
+      // node 3 through node 2.
+      std::cout
+        << "--- existing genuine backup ---"
+        << std::endl;
 
-    net2->DumpRoutes ();
-  });
+      net1->DumpBestRoute (3);
 
-Simulator::Schedule (
-  Seconds (35.5),
-  [net1]() {
-    std::cout
-      << "\n=== alternate route candidate setup ==="
-      << std::endl;
+      // Install a temporary lower-cost primary through
+      // node 0. The candidate is identified as having
+      // been learned from node 0 so a Delete from node 0
+      // can withdraw only this candidate.
+      //
+      // total cost = 39 + 1 = 40, which should beat
+      // the genuine multi-hop route through node 2.
+      net1->AddOrUpdateRoute (
+        3,          // destination
+        0,          // next hop
+        false,      // not immediate
+        2,          // hop count
+        107.377,    // path loss to node 0
+        39,         // link cost to node 0
+        1,          // advertised downstream cost
+        0,          // learned from node 0
+        1);         // capability
 
-    net1->SetAutomaticRoutePropagationEnabled (
-      true);
-    // Primary candidate through node 0:
-    // total cost = 39 + 10 = 49.
-    net1->AddOrUpdateRoute (
-      97,
-      0,
-      false,
-      2,
-      107.377,
-      39,
-      10,
-      0,
-      1,
-      std::vector<uint16_t> {0, 97});
+      std::cout
+        << "--- temporary primary installed ---"
+        << std::endl;
 
-    // Backup candidate through node 2:
-    // total cost = 64 + 30 = 94.
-    net1->AddOrUpdateRoute (
-      97,
-      2,
-      false,
-      2,
-      115.742,
-      64,
-      30,
-      2,
-      1,
-      std::vector<uint16_t> {2, 97});
-
-    net1->DumpRoutes ();
-    net1->DumpBestRoute (97);
-  });
+      net1->DumpBestRoute (3);
+      net1->DumpRoutes ();
+    });
 
   Simulator::Schedule (
   Seconds (35.25),
@@ -564,6 +543,18 @@ Simulator::Schedule (
   });
 
   Simulator::Schedule (
+    Seconds (36.0),
+    [net0]() {
+      std::cout
+        << "\n=== withdraw temporary primary to destination 3 ==="
+        << std::endl;
+
+      net0->SendReliableRoutingDelete (
+        1,  // receiving neighbor
+        3); // destination
+    });
+
+  Simulator::Schedule (
   Seconds (36.75),
   [net1]() {
     std::cout
@@ -576,6 +567,33 @@ Simulator::Schedule (
     // Verify that only the selected backup
     // candidate is advertised.
     net1->SendRoutingUpdate ();
+  });
+
+  Simulator::Schedule (
+  Seconds (37.25),
+  [net0, net1, net2]() {
+    std::cout
+      << "\n=== genuine backup failover result ==="
+      << std::endl;
+
+    std::cout
+      << "--- node 1 selected route ---"
+      << std::endl;
+
+    net1->DumpBestRoute (3);
+    net1->DumpRoutes ();
+
+    std::cout
+      << "--- node 0 learned fallback advertisement ---"
+      << std::endl;
+
+    net0->DumpBestRoute (3);
+
+    std::cout
+      << "--- node 2 retains direct route ---"
+      << std::endl;
+
+    net2->DumpBestRoute (3);
   });
 
   // Sequence-aware discovery verification regression test.
