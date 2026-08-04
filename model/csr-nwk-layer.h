@@ -176,28 +176,95 @@ public:
               << "->" << ne.numFailures
               << std::endl;
 
-    if (wasStale)
-      {
-        for (auto &re : m_routes)
-          {
-            if (re.nextHop == neighbor)
-              {
-                re.valid = true;
-                re.lastUpdated = Simulator::Now ();
+      SelectedRouteState directRouteBefore =
+        CaptureSelectedRouteState (
+          neighbor);
 
-                std::cout << "[NWK " << m_nodeId
-                          << "] Reactivated route dst=" << re.nwkDst
-                          << " nextHop=" << neighbor
-                          << " after successful NeighborCheck"
-                          << std::endl;
-              }
-          }
-      }
-    RecomputeRoutesViaNextHop (neighbor);
-    ScheduleCheckNwkQueue ();
+      if (wasStale)
+        {
+          uint32_t directRoutesReactivated = 0;
+          uint32_t transitiveRoutesPreservedInvalid = 0;
+
+          for (auto &route : m_routes)
+            {
+              if (route.nextHop != neighbor)
+                {
+                  continue;
+                }
+
+              bool directNeighborRoute =
+                route.nwkDst == neighbor &&
+                route.nextHop == neighbor &&
+                route.immediate;
+
+              if (directNeighborRoute)
+                {
+                  route.valid = true;
+                  route.lastUpdated =
+                    Simulator::Now ();
+
+                  directRoutesReactivated++;
+
+                  std::cout << "[NWK " << m_nodeId
+                            << "] Reactivated direct neighbor route"
+                            << " dst=" << route.nwkDst
+                            << " nextHop=" << neighbor
+                            << " after successful NeighborCheck"
+                            << std::endl;
+                }
+              else if (!route.valid)
+                {
+                  // A successful NeighborCheck proves only that
+                  // the neighbor is reachable. It does not prove
+                  // that destinations previously advertised by
+                  // that neighbor remain reachable.
+                  transitiveRoutesPreservedInvalid++;
+
+                  std::cout << "[NWK " << m_nodeId
+                            << "] Preserving invalid transitive route"
+                            << " dst=" << route.nwkDst
+                            << " nextHop=" << neighbor
+                            << " pending fresh RoutingUpdate"
+                            << std::endl;
+                }
+            }
+
+          std::cout << "[NWK " << m_nodeId
+                    << "] Neighbor recovery route policy"
+                    << " neighbor=" << neighbor
+                    << " directRoutesReactivated="
+                    << directRoutesReactivated
+                    << " transitiveRoutesPreservedInvalid="
+                    << transitiveRoutesPreservedInvalid
+                    << std::endl;
+        }
+
+      // Recompute only currently valid routes.
+      // RecomputeRoutesViaNextHop() already skips invalid entries.
+      RecomputeRoutesViaNextHop (
+        neighbor);
+
+      SelectedRouteState directRouteAfter =
+        CaptureSelectedRouteState (
+          neighbor);
+
+      if (!SameSelectedRouteState (
+            directRouteBefore,
+            directRouteAfter))
+        {
+          MarkSelectedRouteChanged (
+            neighbor,
+            "direct neighbor recovery");
+        }
+
+      ScheduleCheckNwkQueue ();
   }
 
   void
+  RecomputeRoutesViaNextHop (
+    uint16_t nextHop);
+
+  /*void
   RecomputeRoutesViaNextHop (uint16_t nextHop)
   {
     auto nit = m_nwkNeighbors.find (nextHop);
@@ -259,7 +326,7 @@ public:
                   << " numFailures=" << ne.numFailures
                   << std::endl;
       }
-  }
+  }*/
 
   void UpdateMacActiveNodes ()
   {
@@ -6191,5 +6258,164 @@ UpdateNegotiatedLinkProfile (
             << neighbor
                  .negotiatedLowPowerDbmX10
             << std::endl;
+}
+
+void
+CsrNetLayer::
+RecomputeRoutesViaNextHop (
+  uint16_t nextHop)
+{
+  auto neighborIt =
+    m_nwkNeighbors.find (
+      nextHop);
+
+  if (neighborIt ==
+      m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &neighbor =
+    neighborIt->second;
+
+  if (std::isnan (
+        neighbor.lastPathlossDb))
+    {
+      return;
+    }
+
+  // Capture the selected state before modifying
+  // any candidate costs through this neighbor.
+  std::map<uint16_t, SelectedRouteState>
+    selectedBefore;
+
+  for (const auto &route :
+       m_routes)
+    {
+      if (!route.valid ||
+          route.nextHop != nextHop)
+        {
+          continue;
+        }
+
+      if (selectedBefore.find (
+            route.nwkDst) ==
+          selectedBefore.end ())
+        {
+          selectedBefore.emplace (
+            route.nwkDst,
+            CaptureSelectedRouteState (
+              route.nwkDst));
+        }
+    }
+
+  double s0PowerDbm =
+    static_cast<double> (
+      neighbor.rxPowerDbmX10) /
+    10.0;
+
+  if (s0PowerDbm == 0.0)
+    {
+      s0PowerDbm =
+        m_rxS0BaseLevelDbm +
+        m_linkMarginDb;
+    }
+
+  int chosenSpeed = 0;
+  double chosenTxPower = 0.0;
+  int estimatedDistance = 0;
+  double speedMargin = 0.0;
+  double totalMargin = 0.0;
+
+  uint32_t newLinkCost =
+    ComputeLinkCost (
+      s0PowerDbm,
+      neighbor.lastPathlossDb,
+      neighbor.numFailures,
+      &chosenSpeed,
+      &chosenTxPower,
+      &estimatedDistance,
+      &speedMargin,
+      &totalMargin);
+
+  for (auto &route :
+       m_routes)
+    {
+      if (!route.valid ||
+          route.nextHop != nextHop)
+        {
+          continue;
+        }
+
+      uint32_t oldCost =
+        route.cost;
+
+      route.linkCostToNextHop =
+        newLinkCost;
+
+      route.cost =
+        route.linkCostToNextHop +
+        route.advertisedCost;
+
+      route.lastUpdated =
+        Simulator::Now ();
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Recomputed route after link change"
+                << " dst=" << route.nwkDst
+                << " nextHop=" << nextHop
+                << " oldCost=" << oldCost
+                << " newCost=" << route.cost
+                << " linkCost="
+                << route.linkCostToNextHop
+                << " advertisedCost="
+                << route.advertisedCost
+                << " numFailures="
+                << neighbor.numFailures
+                << std::endl;
+    }
+
+  // Compare the selected route after all candidate
+  // costs have been updated. A cost increase may cause
+  // another next hop to become best.
+  for (const auto &entry :
+       selectedBefore)
+    {
+      uint16_t destination =
+        entry.first;
+
+      const SelectedRouteState &before =
+        entry.second;
+
+      SelectedRouteState after =
+        CaptureSelectedRouteState (
+          destination);
+
+      if (!SameSelectedRouteState (
+            before,
+            after))
+        {
+          MarkSelectedRouteChanged (
+            destination,
+            "link cost recompute");
+
+          std::cout << "[NWK " << m_nodeId
+                    << "] Link-cost recompute changed selection"
+                    << " dst=" << destination
+                    << " oldAvailable="
+                    << (before.available ? 1 : 0)
+                    << " oldNextHop="
+                    << before.nextHop
+                    << " oldCost="
+                    << before.cost
+                    << " newAvailable="
+                    << (after.available ? 1 : 0)
+                    << " newNextHop="
+                    << after.nextHop
+                    << " newCost="
+                    << after.cost
+                    << std::endl;
+        }
+    }
 }
 // ------------------------------------------------------------
