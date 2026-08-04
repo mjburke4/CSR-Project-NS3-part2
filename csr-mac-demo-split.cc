@@ -488,6 +488,16 @@ Simulator::Schedule (
       1);
   });
 
+  Simulator::Schedule (
+    Seconds (34.75),
+    [net1]() {
+      std::cout
+        << "\n=== enable automatic failover propagation ==="
+        << std::endl;
+
+      net1->SetAutomaticRoutePropagationEnabled (
+        true);
+    });
 
   Simulator::Schedule (
     Seconds (35.0),
@@ -554,7 +564,7 @@ Simulator::Schedule (
         3); // destination
     });
 
-  Simulator::Schedule (
+ /* Simulator::Schedule (
   Seconds (36.75),
   [net1]() {
     std::cout
@@ -567,7 +577,7 @@ Simulator::Schedule (
     // Verify that only the selected backup
     // candidate is advertised.
     net1->SendRoutingUpdate ();
-  });
+  });*/
 
   Simulator::Schedule (
   Seconds (37.25),
@@ -604,6 +614,32 @@ Simulator::Schedule (
   Simulator::Schedule (Seconds (38.0), [net0]() {
     net0->StartDiscovery (Seconds (0.0), Seconds (5.0));
   });
+
+  Simulator::Schedule (
+    Seconds (39.5),
+    [net0, net1, net2]() {
+      std::cout
+        << "\n=== genuine backup failover result ==="
+        << std::endl;
+
+      std::cout
+        << "--- node 1 selected route ---"
+        << std::endl;
+
+      net1->DumpBestRoute (3);
+
+      std::cout
+        << "--- node 0 learned fallback advertisement ---"
+        << std::endl;
+
+      net0->DumpBestRoute (3);
+
+      std::cout
+        << "--- node 2 retains direct route ---"
+        << std::endl;
+
+      net2->DumpBestRoute (3);
+    });
 
   Simulator::Schedule (
   Seconds (42.0),
