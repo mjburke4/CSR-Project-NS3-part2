@@ -1221,6 +1221,13 @@ private:
     std::set<uint16_t>
       routingSnapshotSeenDestinations;
 
+    // Complete routing UPDATE sections are buffered here
+    // until the final section arrives. This mirrors the
+    // legacy behavior of reconstructing the full routing
+    // message before modifying the live route table.
+    std::vector<CsrHelloHeader>
+      routingSnapshotBufferedUpdates;
+
     bool routingInfoValid {false};
     uint32_t routingInfoSequence {0};
 
@@ -3073,6 +3080,110 @@ CsrNetLayer::ProcessRoutingUpdate (
         // Receiving this Update proves that the requested
         // routing state came back.
 
+        if (neighbor.routingSnapshotActive)
+          {
+            // Do not modify the live routing table yet.
+            // Store this complete section until every section
+            // in the snapshot has arrived.
+            neighbor
+              .routingSnapshotBufferedUpdates
+              .push_back (hh);
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Buffered RoutingSnapshot UPDATE"
+                      << " from=" << helloSrc
+                      << " routingSequence="
+                      << incomingSequence
+                      << " section="
+                      << unsigned (incomingSection)
+                      << "/"
+                      << unsigned (incomingTotalSections)
+                      << " bufferedSections="
+                      << neighbor
+                          .routingSnapshotBufferedUpdates
+                          .size ()
+                      << std::endl;
+
+            bool finalSection =
+              incomingSection + 1 ==
+                incomingTotalSections;
+
+            if (!finalSection)
+              {
+                return;
+              }
+
+            // --------------------------------------------------
+            // We now have section 0 ... section N-1.
+            // Apply the complete reconstructed update during
+            // this single simulator event.
+            // --------------------------------------------------
+
+            std::set<uint16_t>
+              acceptedDestinations;
+
+            uint32_t bufferedRouteCount = 0;
+
+            for (const CsrHelloHeader &bufferedHeader :
+                neighbor.routingSnapshotBufferedUpdates)
+              {
+                bufferedRouteCount +=
+                  bufferedHeader
+                    .GetAdvertisedRouteCount ();
+
+                std::set<uint16_t>
+                  sectionAccepted =
+                    ProcessRoutesPayload (
+                      bufferedHeader,
+                      helloSrc,
+                      pathlossDb,
+                      snrDb,
+                      linkCost);
+
+                acceptedDestinations.insert (
+                  sectionAccepted.begin (),
+                  sectionAccepted.end ());
+              }
+
+            neighbor
+              .routingSnapshotSeenDestinations
+              .insert (
+                acceptedDestinations.begin (),
+                acceptedDestinations.end ());
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Applied complete RoutingSnapshot UPDATE"
+                      << " from=" << helloSrc
+                      << " routingSequence="
+                      << incomingSequence
+                      << " totalSections="
+                      << unsigned (
+                          incomingTotalSections)
+                      << " bufferedRoutes="
+                      << bufferedRouteCount
+                      << " acceptedDestinations="
+                      << acceptedDestinations.size ()
+                      << std::endl;
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] RoutingSnapshot received all UPDATE sections"
+                      << " from=" << helloSrc
+                      << " routingSequence="
+                      << incomingSequence
+                      << " totalSections="
+                      << unsigned (
+                          incomingTotalSections)
+                      << std::endl;
+
+            return;
+          }
+
+        // --------------------------------------------------
+        // This is an unsolicited/single UPDATE rather than
+        // part of an INFO -> UPDATE -> FLUSH snapshot.
+        // Process it immediately.
+        // --------------------------------------------------
+
         std::set<uint16_t>
           acceptedDestinations =
             ProcessRoutesPayload (
@@ -3082,38 +3193,12 @@ CsrNetLayer::ProcessRoutingUpdate (
               snrDb,
               linkCost);
 
-        if (neighbor.routingSnapshotActive)
-          {
-            neighbor
-              .routingSnapshotSeenDestinations
-              .insert (
-                acceptedDestinations.begin (),
-                acceptedDestinations.end ());
-
-            std::cout << "[NWK " << m_nodeId
-                      << "] RoutingSnapshot UPDATE"
-                      << " from=" << helloSrc
-                      << " acceptedDestinations="
-                      << acceptedDestinations.size ()
-                      << " cumulativeSeenDestinations="
-                      << neighbor
-                          .routingSnapshotSeenDestinations
-                          .size ()
-                      << std::endl;
-            if (incomingSection + 1 ==
-                incomingTotalSections)
-              {
-                std::cout << "[NWK " << m_nodeId
-                          << "] RoutingSnapshot received all UPDATE sections"
-                          << " from=" << helloSrc
-                          << " routingSequence="
-                          << incomingSequence
-                          << " totalSections="
-                          << unsigned (
-                              incomingTotalSections)
-                          << std::endl;
-              }
-          }
+        std::cout << "[NWK " << m_nodeId
+                  << "] Applied standalone RoutingUpdate"
+                  << " from=" << helloSrc
+                  << " acceptedDestinations="
+                  << acceptedDestinations.size ()
+                  << std::endl;
 
         return;
       }
@@ -3128,6 +3213,10 @@ CsrNetLayer::ProcessRoutingUpdate (
 
         neighbor
           .routingSnapshotSeenDestinations
+          .clear ();
+
+        neighbor
+          .routingSnapshotBufferedUpdates
           .clear ();
 
         CsrHelloHeader::RoutingInfo info =
@@ -3342,6 +3431,13 @@ CsrNetLayer::ProcessRoutingUpdate (
 
         uint32_t invalidated = 0;
 
+        // Preserve the selected state for every destination
+        // that FLUSH may invalidate. Multiple candidates may
+        // exist for the same destination, so capture each
+        // destination only once before modifying anything.
+        std::map<uint16_t, SelectedRouteState>
+          selectedBeforeFlush;
+
         for (auto &route : m_routes)
           {
             // The direct link to the reporting neighbor is
@@ -3364,6 +3460,19 @@ CsrNetLayer::ProcessRoutingUpdate (
 
             if (!present)
               {
+                // Capture the destination's selected state before
+                // the first candidate for that destination is
+                // invalidated.
+                if (selectedBeforeFlush.find (
+                      route.nwkDst) ==
+                    selectedBeforeFlush.end ())
+                  {
+                    selectedBeforeFlush.emplace (
+                      route.nwkDst,
+                      CaptureSelectedRouteState (
+                        route.nwkDst));
+                  }
+
                 route.valid = false;
                 route.lastUpdated =
                   Simulator::Now ();
@@ -3379,11 +3488,59 @@ CsrNetLayer::ProcessRoutingUpdate (
               }
           }
 
+          uint32_t selectedRoutesChanged = 0;
+
+        for (const auto &entry :
+            selectedBeforeFlush)
+          {
+            uint16_t destination =
+              entry.first;
+
+            const SelectedRouteState &before =
+              entry.second;
+
+            SelectedRouteState after =
+              CaptureSelectedRouteState (
+                destination);
+
+            if (!SameSelectedRouteState (
+                  before,
+                  after))
+              {
+                MarkSelectedRouteChanged (
+                  destination,
+                  "RoutingSnapshot FLUSH");
+
+                selectedRoutesChanged++;
+
+                std::cout << "[NWK " << m_nodeId
+                          << "] RoutingSnapshot FLUSH changed selection"
+                          << " dst=" << destination
+                          << " oldAvailable="
+                          << (before.available ? 1 : 0)
+                          << " oldNextHop="
+                          << before.nextHop
+                          << " oldCost="
+                          << before.cost
+                          << " newAvailable="
+                          << (after.available ? 1 : 0)
+                          << " newNextHop="
+                          << after.nextHop
+                          << " newCost="
+                          << after.cost
+                          << std::endl;
+              }
+          }
+
         neighbor.routingSnapshotActive =
           false;
 
         neighbor
           .routingSnapshotSeenDestinations
+          .clear ();
+
+        neighbor
+          .routingSnapshotBufferedUpdates
           .clear ();
 
         std::cout << "[NWK " << m_nodeId
@@ -3393,6 +3550,8 @@ CsrNetLayer::ProcessRoutingUpdate (
                   << incomingSequence
                   << " routesInvalidated="
                   << invalidated
+                  << " selectedRoutesChanged="
+                  << selectedRoutesChanged
                   << std::endl;
 
         if (neighbor.routingRequestPending)
@@ -3595,6 +3754,10 @@ CsrNetLayer::CheckNeighborFreshness ()
           ne.routingSnapshotActive = false;
           ne.routingSnapshotInfoSequence = 0;
           ne.routingSnapshotSeenDestinations.clear ();
+
+          ne
+            .routingSnapshotBufferedUpdates
+            .clear ();
 
           // Discard any partially received multi-section Update.
           ne.routingUpdateSectionStateValid = false;
@@ -5575,6 +5738,9 @@ CsrNetLayer::RoutingRequestTimeout (
   entry.routingSnapshotActive = false;
   entry.routingSnapshotInfoSequence = 0;
   entry.routingSnapshotSeenDestinations.clear ();
+  entry
+    .routingSnapshotBufferedUpdates
+    .clear ();
 
   if (entry.stale)
     {
