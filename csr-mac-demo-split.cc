@@ -451,6 +451,37 @@ Simulator::Schedule (
         2, 96
       });
 
+
+    // First candidate becomes selected.
+    net1->AddOrUpdateRoute (
+      250,
+      2,
+      false,
+      3,
+      115.0,
+      50,
+      50,
+      2,
+      1,
+      std::vector<uint16_t>{2, 250});
+
+    net1->DumpBestRoute (250);
+
+    // Exact tie through a LOWER node ID.
+    // Legacy behavior must stay on nextHop 2.
+    net1->AddOrUpdateRoute (
+      250,
+      0,
+      false,
+      3,
+      107.0,
+      50,
+      50,
+      0,
+      1,
+      std::vector<uint16_t>{0, 250});
+
+    net1->DumpBestRoute (250);
     // Valid route: node 2 reaches 95
     // through node 3.
     net2->AddOrUpdateRoute (

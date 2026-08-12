@@ -342,15 +342,6 @@ public:
       }
   }
 
-  /*void ClearRoutes ()
-  {
-    m_routes.clear ();
-
-    std::cout << "[NWK " << m_nodeId
-              << "] Cleared route table"
-              << std::endl;
-  }*/
-
   void
   ClearRoutes ()
   {
@@ -414,6 +405,11 @@ public:
           }
       }
 
+    uint32_t selectedPreferencesCleared =
+      m_selectedRoutePreferredNextHop.size ();
+
+    m_selectedRoutePreferredNextHop.clear ();
+
     UpdateMacActiveNodes ();
 
     std::cout << "[NWK " << m_nodeId
@@ -424,6 +420,8 @@ public:
               << routesInvalidated
               << " reverseRoutesInvalidated="
               << reverseRoutesInvalidated
+              << " selectedPreferencesCleared="
+              << selectedPreferencesCleared
               << std::endl;
 
     DumpRoutes ();
@@ -1962,7 +1960,13 @@ private:
   std::map<uint16_t, NwkNeighborEntry>  m_nwkNeighbors;
   std::map<std::pair<uint16_t,uint16_t>, NsdpEntry> m_nsdp;
   std::set<uint16_t>
-  m_pendingSelectedRouteChanges;
+    m_pendingSelectedRouteChanges;
+
+  // Legacy routesFindBestRoute() prefers the
+  // currently selected neighbor when cost and
+  // hop count are exactly tied.
+  std::map<uint16_t, uint16_t>
+    m_selectedRoutePreferredNextHop;
 
   EventId m_selectedRouteChangeEvent;
 
@@ -5791,7 +5795,26 @@ CsrNetLayer::FindBestRoute (
 {
   const RouteEntry *best = nullptr;
 
-  for (const auto &route : m_routes)
+  bool preferredValid = false;
+
+  uint16_t preferredNextHop =
+    CSR_BROADCAST_ID;
+
+  auto preferredIt =
+    m_selectedRoutePreferredNextHop.find (
+      destination);
+
+  if (preferredIt !=
+      m_selectedRoutePreferredNextHop.end ())
+    {
+      preferredValid = true;
+
+      preferredNextHop =
+        preferredIt->second;
+    }
+
+  for (const auto &route :
+       m_routes)
     {
       if (route.nwkDst != destination ||
           !route.valid)
@@ -5807,10 +5830,16 @@ CsrNetLayer::FindBestRoute (
 
       bool better = false;
 
-      if (route.cost < best->cost)
+      // Legacy primary criterion:
+      // lowest total route cost.
+      if (route.cost <
+          best->cost)
         {
           better = true;
         }
+
+      // Legacy secondary criterion:
+      // lowest hop count.
       else if (route.cost ==
                  best->cost &&
                route.numHop <
@@ -5818,28 +5847,25 @@ CsrNetLayer::FindBestRoute (
         {
           better = true;
         }
+
+      // Legacy tie behavior:
+      // when cost and hops are identical,
+      // retain the currently selected neighbor.
       else if (route.cost ==
                  best->cost &&
                route.numHop ==
                  best->numHop &&
-               route.immediate &&
-               !best->immediate)
+               preferredValid &&
+               route.nextHop ==
+                 preferredNextHop &&
+               best->nextHop !=
+                 preferredNextHop)
         {
-          better = true;
-        }
-      else if (route.cost ==
-                 best->cost &&
-               route.numHop ==
-                 best->numHop &&
-               route.immediate ==
-                 best->immediate &&
-               route.nextHop <
-                 best->nextHop)
-        {
-          // Deterministic final tie-break.
           better = true;
         }
 
+      // Otherwise leave the first equal candidate
+      // alone. Do not choose based on node ID.
       if (better)
         {
           best = &route;
@@ -5900,7 +5926,36 @@ void
 CsrNetLayer::MarkSelectedRouteChanged (
   uint16_t destination,
   const char *reason)
-{
+  {
+    const RouteEntry *selectedRoute =
+    FindBestRoute (
+      destination);
+
+  if (selectedRoute != nullptr)
+    {
+      m_selectedRoutePreferredNextHop[
+        destination] =
+          selectedRoute->nextHop;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Updated selected-route preference"
+                << " dst=" << destination
+                << " preferredNextHop="
+                << selectedRoute->nextHop
+                << std::endl;
+    }
+  else
+    {
+      m_selectedRoutePreferredNextHop.erase (
+        destination);
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Cleared selected-route preference"
+                << " dst=" << destination
+                << " reason=no-valid-route"
+                << std::endl;
+    }
+
   m_pendingSelectedRouteChanges.insert (
     destination);
 
