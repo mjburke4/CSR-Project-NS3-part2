@@ -789,6 +789,66 @@ Simulator::Schedule (
   });
 
 Simulator::Schedule (
+  Seconds (50.0),
+  [net3]() {
+    std::cout
+      << "\n=== reverse-route preference setup ==="
+      << std::endl;
+
+    net3->AddOrUpdateRoute (
+      0,
+      2,
+      false,
+      3,
+      111.868,
+      51,
+      100,
+      2,
+      2,
+      std::vector<uint16_t> {
+        2, 1, 0
+      });
+
+    Ptr<Packet> payload =
+      Create<Packet> (32);
+
+    net3->Send (
+      0,
+      0,
+      payload,
+      true);
+  });
+
+Simulator::Schedule (
+  Seconds (52.0),
+  [net1]() {
+    net1->AddOrUpdateRoute (
+      3,
+      0,
+      false,
+      2,
+      107.377,
+      39,
+      20,
+      0,
+      0,   // Ordinary / non-capable
+      std::vector<uint16_t> {
+        0, 3
+      });
+
+    net1->DumpBestRoute (3);
+
+    Ptr<Packet> payload =
+      Create<Packet> (32);
+
+    net1->Send (
+      3,
+      0,
+      payload,
+      true);
+  });
+
+Simulator::Schedule (
   Seconds (53.5),
   [net1]() {
     // The initial request was ACKed but received

@@ -1371,17 +1371,88 @@ private:
     uint16_t &nextHopOut)
   {
     const RouteEntry *best =
-      FindBestRoute (nwkDst);
+      FindBestRoute (
+        nwkDst);
 
-    if (best == nullptr)
+    // --------------------------------------------------
+    // Legacy priority 1:
+    // A routable/capable destination uses the selected
+    // forward route.
+    // --------------------------------------------------
+    if (best != nullptr &&
+        best->capability != 0)
       {
-        return false;
+        nextHopOut =
+          best->nextHop;
+
+        return true;
       }
 
-    nextHopOut =
-      best->nextHop;
+    // --------------------------------------------------
+    // Legacy priority 2:
+    // For an Ordinary/non-capable destination, prefer
+    // a valid reverse route learned from its traffic.
+    // The reverse hop must still be an active neighbor.
+    // --------------------------------------------------
+    auto reverseIt =
+      m_reverseRoutes.find (
+        nwkDst);
 
-    return true;
+    if (reverseIt !=
+        m_reverseRoutes.end () &&
+        reverseIt->second.valid)
+      {
+        uint16_t reverseHop =
+          reverseIt->second.reverseHop;
+
+        auto neighborIt =
+          m_nwkNeighbors.find (
+            reverseHop);
+
+        bool reverseNeighborActive =
+          neighborIt !=
+            m_nwkNeighbors.end () &&
+          neighborIt->second.lastHeardSec >=
+            0.0 &&
+          !neighborIt->second.stale;
+
+        if (reverseNeighborActive)
+          {
+            nextHopOut =
+              reverseHop;
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Using reverse route"
+                      << " dst=" << nwkDst
+                      << " reverseHop="
+                      << reverseHop
+                      << " forwardAvailable="
+                      << (best != nullptr ? 1 : 0)
+                      << " forwardCapability="
+                      << (best != nullptr
+                            ? unsigned (
+                                best->capability)
+                            : 0)
+                      << std::endl;
+
+            return true;
+          }
+      }
+
+    // --------------------------------------------------
+    // Legacy priority 3:
+    // With no usable reverse path, fall back to the
+    // ordinary forward/direct route if one exists.
+    // --------------------------------------------------
+    if (best != nullptr)
+      {
+        nextHopOut =
+          best->nextHop;
+
+        return true;
+      }
+
+    return false;
   }
 
   uint32_t
