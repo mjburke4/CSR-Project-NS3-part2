@@ -2931,6 +2931,17 @@ CsrNetLayer::ProcessRoutingUpdate (
           incomingSequence);
     }
 
+  bool snapshotUpdateStart =
+    neighbor.routingSequenceValid &&
+    sequenceComparison == 0 &&
+    operation ==
+      CsrRoutingOperation::Update &&
+    neighbor.routingSnapshotActive &&
+    neighbor.routingSnapshotInfoSequence ==
+      incomingSequence &&
+    incomingSection == 0 &&
+    !neighbor.routingUpdateSectionStateValid;
+
   bool continuationSection =
     neighbor.routingSequenceValid &&
     sequenceComparison == 0 &&
@@ -2946,10 +2957,30 @@ CsrNetLayer::ProcessRoutingUpdate (
     incomingTotalSections ==
       neighbor.routingUpdateTotalSections;
 
+  bool snapshotFlush =
+    neighbor.routingSequenceValid &&
+    sequenceComparison == 0 &&
+    operation ==
+      CsrRoutingOperation::Flush &&
+    neighbor.routingSnapshotActive &&
+    neighbor.routingSnapshotInfoSequence ==
+      incomingSequence &&
+    neighbor.routingUpdateSectionStateValid &&
+    neighbor.routingUpdateSectionSequence ==
+      incomingSequence &&
+    static_cast<uint8_t> (
+      neighbor.routingUpdateLastSection + 1) ==
+        neighbor.routingUpdateTotalSections;
+
+  bool validSameSequenceTransition =
+    snapshotUpdateStart ||
+    continuationSection ||
+    snapshotFlush;
+
   if (neighbor.routingSequenceValid &&
       (sequenceComparison > 0 ||
       (sequenceComparison == 0 &&
-        !continuationSection)))
+        !validSameSequenceTransition)))
     {
       std::cout << "[NWK " << m_nodeId
                 << "] Ignoring stale/duplicate RoutingControl"
@@ -2958,8 +2989,12 @@ CsrNetLayer::ProcessRoutingUpdate (
                 << incomingSequence
                 << " lastSequence="
                 << neighbor.routingSequence
+                << " operation="
+                << RoutingOperationName (
+                    operation)
                 << " section="
-                << unsigned (incomingSection)
+                << unsigned (
+                    incomingSection)
                 << std::endl;
 
       return;
@@ -3020,6 +3055,37 @@ CsrNetLayer::ProcessRoutingUpdate (
             .routingUpdateSectionStateValid =
               false;
         }
+    }
+  else if (snapshotUpdateStart)
+    {
+      neighbor
+        .routingUpdateSectionStateValid =
+          true;
+
+      neighbor
+        .routingUpdateSectionSequence =
+          incomingSequence;
+
+      neighbor
+        .routingUpdateLastSection =
+          incomingSection;
+
+      neighbor
+        .routingUpdateTotalSections =
+          incomingTotalSections;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] RoutingSnapshot UPDATE sequence transition"
+                << " from=" << helloSrc
+                << " routingSequence="
+                << incomingSequence
+                << " section="
+                << unsigned (
+                    incomingSection)
+                << "/"
+                << unsigned (
+                    incomingTotalSections)
+                << std::endl;
     }
   else if (continuationSection)
     {
@@ -3382,11 +3448,59 @@ CsrNetLayer::ProcessRoutingUpdate (
         if (!matchingRouteFound &&
             !directRouteProtected)
           {
+            // Legacy routes.c creates an invalid route entry
+            // when DELETE arrives for a destination that was
+            // not previously known from this neighbor.
+            RouteEntry tombstone;
+
+            tombstone.nwkDst =
+              destination;
+
+            tombstone.capability = 0;
+
+            tombstone.immediate =
+              false;
+
+            // This candidate belongs specifically to the
+            // neighbor that sent the DELETE.
+            tombstone.nextHop =
+              helloSrc;
+
+            tombstone.pathlossDb =
+              std::numeric_limits<double>::quiet_NaN ();
+
+            tombstone.numHop = 0;
+
+            tombstone.linkCostToNextHop = 0;
+            tombstone.advertisedCost = 0;
+            tombstone.cost = 0;
+
+            tombstone.learnedFrom =
+              helloSrc;
+
+            tombstone.path.clear ();
+
+            tombstone.energyLevel = 100;
+
+            tombstone.lastUpdated =
+              Simulator::Now ();
+
+            tombstone.valid = false;
+
+            m_routes.push_back (
+              tombstone);
+
+            matchingRouteFound = true;
+
             std::cout << "[NWK " << m_nodeId
-                      << "] RoutingDelete found no matching route"
+                      << "] RoutingDelete created invalid tombstone"
                       << " dst=" << destination
                       << " learnedFrom="
                       << helloSrc
+                      << " nextHop="
+                      << helloSrc
+                      << " routingSequence="
+                      << incomingSequence
                       << std::endl;
           }
 
@@ -3538,6 +3652,18 @@ CsrNetLayer::ProcessRoutingUpdate (
 
         neighbor.routingSnapshotActive =
           false;
+
+        neighbor.routingUpdateSectionStateValid =
+          false;
+
+        neighbor.routingUpdateSectionSequence =
+          0;
+
+        neighbor.routingUpdateLastSection =
+          0;
+
+        neighbor.routingUpdateTotalSections =
+          1;
 
         neighbor
           .routingSnapshotSeenDestinations
@@ -4864,7 +4990,17 @@ CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
     {
       return false;
     }
+
   if (!re.valid)
+    {
+      return false;
+    }
+
+  // Legacy ARL advertises only destinations with
+  // routing capability. Ordinary nodes remain valid
+  // local destinations but are not propagated as
+  // multi-hop reachable destinations.
+  if (re.capability == 0)
     {
       return false;
     }
@@ -5443,14 +5579,17 @@ CsrNetLayer::StartReliableRoutingSnapshot (
 
   snapshot.currentUpdateSection = 0;
 
-  snapshot.infoSequence =
+  uint32_t snapshotSequence =
     NextRoutingSequence ();
+
+  snapshot.infoSequence =
+    snapshotSequence;
 
   snapshot.updateSequence =
-    NextRoutingSequence ();
+    snapshotSequence;
 
   snapshot.flushSequence =
-    NextRoutingSequence ();
+    snapshotSequence;
 
   std::cout << "[NWK " << m_nodeId
             << "] Starting reliable RoutingSnapshot"

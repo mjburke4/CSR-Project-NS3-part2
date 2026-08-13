@@ -595,21 +595,6 @@ Simulator::Schedule (
         3); // destination
     });
 
- /* Simulator::Schedule (
-  Seconds (36.75),
-  [net1]() {
-    std::cout
-      << "\n=== alternate route failover result ==="
-      << std::endl;
-
-    net1->DumpBestRoute (97);
-    net1->DumpRoutes ();
-
-    // Verify that only the selected backup
-    // candidate is advertised.
-    net1->SendRoutingUpdate ();
-  });*/
-
   Simulator::Schedule (
   Seconds (37.25),
   [net0, net1, net2]() {
@@ -690,9 +675,60 @@ Simulator::Schedule (
       1);  // stale response from the previous cycle
   });
 
+  Simulator::Schedule (
+    Seconds (43.0),
+    [net0]() {
+      std::cout
+        << "\n=== unknown-route DELETE tombstone test ==="
+        << std::endl;
+
+      net0->SendReliableRoutingDelete (
+        1,
+        251);
+    });
+
+    Simulator::Schedule (
+      Seconds (43.0),
+      [net0]() {
+        std::cout
+          << "\n=== unknown-route DELETE tombstone test ==="
+          << std::endl;
+
+        net0->SendReliableRoutingDelete (
+          1,
+          251);
+      });
+
   Simulator::Schedule (Seconds (45.0), [net1]() {
     net1->SetDiscoveryResponseEnabled (true);
   });
+
+  Simulator::Schedule (
+    Seconds (45.0),
+    [net1]() {
+      std::cout
+        << "\n=== ordinary capability advertisement test ==="
+        << std::endl;
+
+      net1->AddOrUpdateRoute (
+        252,
+        0,
+        false,
+        2,
+        107.377,
+        39,
+        20,
+        0,
+        0,  // capability = ORDINARY
+        std::vector<uint16_t> {
+          0, 252
+        });
+
+      net1->DumpBestRoute (252);
+
+      net1->SendReliableRoutingUpdate (
+        2);
+    });
 
   Simulator::Schedule (
   Seconds (46.0),
@@ -709,6 +745,47 @@ Simulator::Schedule (
       << std::endl;
 
     net2->SendRoutingRequest (1);
+  });
+
+Simulator::Schedule (
+  Seconds (47.0),
+  [net2]() {
+    std::cout
+      << "\n=== ordinary capability result ==="
+      << std::endl;
+
+    net2->DumpBestRoute (252);
+  });
+
+  Simulator::Schedule (
+    Seconds (47.5),
+    [net1]() {
+      std::cout
+        << "\n=== routable capability advertisement test ==="
+        << std::endl;
+
+      net1->AddOrUpdateRoute (
+        252,
+        0,
+        false,
+        2,
+        107.377,
+        39,
+        20,
+        0,
+        1,  // capability = ROUTABLE
+        std::vector<uint16_t> {
+          0, 252
+        });
+
+      net1->SendReliableRoutingUpdate (
+        2);
+    });
+
+Simulator::Schedule (
+  Seconds (49.5),
+  [net2]() {
+    net2->DumpBestRoute (252);
   });
 
 Simulator::Schedule (
