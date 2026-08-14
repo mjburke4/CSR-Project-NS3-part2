@@ -2617,50 +2617,78 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
       chosenTxPower =
         localTxPower;
 
+      double failureMarginDb =
+        3.0 *
+        static_cast<double> (
+          ne.numFailures);
+
+      double adjustedTotalMarginDb =
+        totalMargin -
+        failureMarginDb;
+
+      double adjustedSpeedMarginDb =
+        speedMargin -
+        failureMarginDb;
+
+      // Legacy routesComputeHopCost() adjusts the
+      // required distance BEFORE dividing by speed.
+      // Keep x100 units explicitly to preserve the
+      // original integer cost semantics.
+      uint64_t adjustedDistanceX100 =
+        static_cast<uint64_t> (
+          std::max (
+            0,
+            estDistance)) *
+        100ULL;
+
+      // Legacy:
+      //   if total margin is negative,
+      //       double required link distance;
+      //   else if speed margin is at least 3 dB,
+      //       halve required link distance.
+      if (adjustedTotalMarginDb < 0.0)
+        {
+          adjustedDistanceX100 *= 2ULL;
+        }
+      else if (adjustedSpeedMarginDb >= 3.0)
+        {
+          adjustedDistanceX100 /= 2ULL;
+        }
+
       if (chosenSpeed > 0)
         {
+          uint64_t rawCost =
+            adjustedDistanceX100 /
+            static_cast<uint64_t> (
+              chosenSpeed);
+
           linkCost =
             static_cast<uint32_t> (
-              std::floor (
-                static_cast<double> (
-                  estDistance) *
-                100.0 /
-                static_cast<double> (
-                  chosenSpeed)));
+              std::min<uint64_t> (
+                rawCost,
+                std::numeric_limits<uint32_t>::max ()));
         }
       else
         {
           linkCost = 1;
         }
 
-      double failureMarginDb =
-        3.0 *
-        static_cast<double> (
-          ne.numFailures);
-
-      if ((totalMargin -
-          failureMarginDb) < 0.0)
-        {
-          linkCost *= 2;
-        }
-
-      if ((speedMargin -
-          failureMarginDb) > 3.0)
-        {
-          linkCost =
-            static_cast<uint32_t> (
-              std::floor (
-                static_cast<double> (
-                  linkCost) /
-                2.0));
-        }
-
-      linkCost =
-        std::max<uint32_t> (
-          1,
-          linkCost);
-
-      usingBidirectionalCost = true;
+      std::cout << "[NWK " << m_nodeId
+                << "] legacy hop-cost adjustment"
+                << " neighbor=" << src
+                << " failures="
+                << ne.numFailures
+                << " adjustedTotalMarginDb="
+                << adjustedTotalMarginDb
+                << " adjustedSpeedMarginDb="
+                << adjustedSpeedMarginDb
+                << " adjustedDistanceX100="
+                << adjustedDistanceX100
+                << " speed="
+                << chosenSpeed
+                << " cost="
+                << linkCost
+                << std::endl;
     }
 
   std::cout << "[NWK " << m_nodeId
