@@ -57,9 +57,13 @@ public:
   void StartReliableRoutingSnapshot (
     uint16_t neighbor);
 
+  void
+  RefreshRoutesAfterDiscovery ();
+
   const char* NeighborCheckTypeName (CsrNeighborCheckType t) const;
   void StartNeighborFreshnessMonitor (Time timeout = Seconds (20.0),
                                     Time period = Seconds (2.0));
+
   void SetInvalidateRoutesOnStaleNeighbor (bool enable)
   {
     m_invalidateRoutesOnStaleNeighbor = enable;
@@ -4616,6 +4620,11 @@ CsrNetLayer::DiscoveryStop ()
     this);
 
   TryDrainQueueAfterDiscovery ();
+
+  // Legacy discovery completion calls routesReroute():
+  // recompute active-neighbor costs and request fresh
+  // route state from every active neighbor.
+  RefreshRoutesAfterDiscovery ();
 }
 
 void
@@ -6996,6 +7005,86 @@ RecomputeRoutesViaNextHop (
                     << after.cost
                     << std::endl;
         }
+    }
+}
+
+void
+CsrNetLayer::
+RefreshRoutesAfterDiscovery ()
+{
+  std::vector<uint16_t>
+    activeNeighbors;
+
+  for (const auto &entry :
+       m_nwkNeighbors)
+    {
+      const NwkNeighborEntry &neighbor =
+        entry.second;
+
+      bool active =
+        neighbor.lastHeardSec >= 0.0 &&
+        !neighbor.stale;
+
+      if (!active)
+        {
+          continue;
+        }
+
+      activeNeighbors.push_back (
+        neighbor.nodeId);
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Post-discovery routing refresh"
+            << " activeNeighbors="
+            << activeNeighbors.size ()
+            << std::endl;
+
+  // Legacy routesReroute() first recomputes
+  // the cost to every active neighbor.
+  for (uint16_t neighborId :
+       activeNeighbors)
+    {
+      RecomputeRoutesViaNextHop (
+        neighborId);
+    }
+
+  // Legacy then marks every active neighbor
+  // as needing a fresh routing request.
+  for (uint16_t neighborId :
+       activeNeighbors)
+    {
+      auto it =
+        m_nwkNeighbors.find (
+          neighborId);
+
+      if (it ==
+          m_nwkNeighbors.end () ||
+          it->second.stale)
+        {
+          continue;
+        }
+
+      if (it->second.routingRequestPending)
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Post-discovery RoutingRequest"
+                    << " already pending"
+                    << " neighbor="
+                    << neighborId
+                    << std::endl;
+
+          continue;
+        }
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Post-discovery requesting fresh routes"
+                << " neighbor="
+                << neighborId
+                << std::endl;
+
+      SendRoutingRequest (
+        neighborId);
     }
 }
 // ------------------------------------------------------------
