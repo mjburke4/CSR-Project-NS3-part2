@@ -126,6 +126,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 0 seq=1
 [HOP 1] Reliable NeighborCheck completed with 0 seq=1 subtype=0 discoverySequence=1
 [NWK 1] NeighborCheck success neighbor=0 subtype=Discovery discoverySequence=1 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=0 failures=0 costMode=local-only localDirectionalCost=39 remoteDirectionalCost=0 newLinkCost=39
 [NWK 1] Recomputed route after link change dst=0 nextHop=0 oldCost=39 newCost=39 linkCost=39 advertisedCost=0 numFailures=0
 [NWK 1] CheckNwkQueue: size=0
 [t=2.34196] RX at node 1 from node 2 seq 2 rate 8 kbps preamble LONG pathloss 115.742 dB snr -8.76699 dB (slot 13, len 40B, ackable=0)
@@ -238,6 +239,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 0 seq=2
 [HOP 1] Reliable NeighborCheck completed with 0 seq=2 subtype=1 discoverySequence=0
 [NWK 1] NeighborCheck success neighbor=0 subtype=Message discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=0 failures=0 costMode=local-only localDirectionalCost=39 remoteDirectionalCost=0 newLinkCost=39
 [NWK 1] Recomputed route after link change dst=0 nextHop=0 oldCost=39 newCost=39 linkCost=39 advertisedCost=0 numFailures=0
 [NWK 1] CheckNwkQueue: size=0
 [MAC 0] rtslot_counter expired for neighbor 1 reserveSlot=15
@@ -478,6 +480,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 0 seq=3
 [HOP 1] Reliable NeighborCheck completed with 0 seq=3 subtype=0 discoverySequence=2
 [NWK 1] NeighborCheck success neighbor=0 subtype=Discovery discoverySequence=2 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=0 failures=0 costMode=local-only localDirectionalCost=39 remoteDirectionalCost=0 newLinkCost=39
 [NWK 1] Recomputed route after link change dst=0 nextHop=0 oldCost=39 newCost=39 linkCost=39 advertisedCost=0 numFailures=0
 [NWK 1] CheckNwkQueue: size=0
 [MAC 0] rtslot_counter expired for neighbor 1 reserveSlot=22
@@ -512,6 +515,7 @@ ninja: no work to do.
 [HOP 2] RX ACK from 1 seq=1
 [HOP 2] Reliable NeighborCheck completed with 1 seq=1 subtype=2 discoverySequence=0
 [NWK 2] NeighborCheck success neighbor=1 subtype=NoPath discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 2] recompute hop-cost neighbor=1 failures=0 costMode=local-only localDirectionalCost=64 remoteDirectionalCost=0 newLinkCost=64
 [NWK 2] Recomputed route after link change dst=1 nextHop=1 oldCost=64 newCost=64 linkCost=64 advertisedCost=0 numFailures=0
 [NWK 2] CheckNwkQueue: size=0
 [MAC 1] rtslot_counter expired for neighbor 2 reserveSlot=3
@@ -553,6 +557,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 2 seq=2
 [HOP 1] Reliable NeighborCheck completed with 2 seq=2 subtype=2 discoverySequence=0
 [NWK 1] NeighborCheck success neighbor=2 subtype=NoPath discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=2 failures=0 costMode=local-only localDirectionalCost=64 remoteDirectionalCost=0 newLinkCost=64
 [NWK 1] Recomputed route after link change dst=2 nextHop=2 oldCost=64 newCost=64 linkCost=64 advertisedCost=0 numFailures=0
 [NWK 1] CheckNwkQueue: size=0
 [MAC 2] rtslot_counter expired for neighbor 1 reserveSlot=5
@@ -617,6 +622,7 @@ ninja: no work to do.
 [HOP 3] RX ACK from 2 seq=1
 [HOP 3] Reliable NeighborCheck completed with 2 seq=1 subtype=2 discoverySequence=0
 [NWK 3] NeighborCheck success neighbor=2 subtype=NoPath discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 3] recompute hop-cost neighbor=2 failures=0 costMode=local-only localDirectionalCost=51 remoteDirectionalCost=0 newLinkCost=51
 [NWK 3] Recomputed route after link change dst=2 nextHop=2 oldCost=51 newCost=51 linkCost=51 advertisedCost=0 numFailures=0
 [NWK 3] CheckNwkQueue: size=0
 [NWK 0] Sending ARL RoutingUpdate routingSequence=1
@@ -769,6 +775,7 @@ ninja: no work to do.
 [HOP 3] RX ACK from 2 seq=2
 [HOP 3] Reliable NeighborCheck completed with 2 seq=2 subtype=4 discoverySequence=0
 [NWK 3] NeighborCheck success neighbor=2 subtype=Verify discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 3] recompute hop-cost neighbor=2 failures=0 costMode=local-only localDirectionalCost=51 remoteDirectionalCost=0 newLinkCost=51
 [NWK 3] Recomputed route after link change dst=2 nextHop=2 oldCost=51 newCost=51 linkCost=51 advertisedCost=0 numFailures=0
 [NWK 3] CheckNwkQueue: size=0
 [t=21.5162] RX at node 1 from node 2 seq 3 rate 8 kbps preamble SHORT pathloss 115.742 dB snr -8.76699 dB (slot 18, len 11B, ackable=0)
@@ -776,6 +783,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 2 seq=3
 [HOP 1] Reliable NeighborCheck completed with 2 seq=3 subtype=4 discoverySequence=0
 [NWK 1] NeighborCheck success neighbor=2 subtype=Verify discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=2 failures=0 costMode=local-only localDirectionalCost=64 remoteDirectionalCost=0 newLinkCost=64
 [NWK 1] Recomputed route after link change dst=2 nextHop=2 oldCost=64 newCost=64 linkCost=64 advertisedCost=0 numFailures=0
 [NWK 1] CheckNwkQueue: size=0
 [MAC 2] rtslot_counter expired for neighbor 3 reserveSlot=10
@@ -1287,6 +1295,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 0 seq=4
 [HOP 1] Reliable NeighborCheck completed with 0 seq=4 subtype=4 discoverySequence=0
 [NWK 1] NeighborCheck success neighbor=0 subtype=Verify discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=0 failures=0 costMode=local-only localDirectionalCost=39 remoteDirectionalCost=0 newLinkCost=39
 [NWK 1] Recomputed route after link change dst=0 nextHop=0 oldCost=39 newCost=39 linkCost=39 advertisedCost=0 numFailures=0
 [NWK 1] Recomputed route after link change dst=250 nextHop=0 oldCost=100 newCost=89 linkCost=39 advertisedCost=50 numFailures=0
 [NWK 1] Recomputed route after link change dst=3 nextHop=0 oldCost=40 newCost=40 linkCost=39 advertisedCost=1 numFailures=0
@@ -2230,6 +2239,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 0 seq=11
 [HOP 1] Reliable NeighborCheck completed with 0 seq=11 subtype=0 discoverySequence=3
 [NWK 1] NeighborCheck success neighbor=0 subtype=Discovery discoverySequence=3 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=0 failures=0 costMode=local-only localDirectionalCost=39 remoteDirectionalCost=0 newLinkCost=39
 [NWK 1] Recomputed route after link change dst=0 nextHop=0 oldCost=39 newCost=39 linkCost=39 advertisedCost=0 numFailures=0
 [NWK 1] Recomputed route after link change dst=250 nextHop=0 oldCost=89 newCost=89 linkCost=39 advertisedCost=50 numFailures=0
 [NWK 1] Recomputed route after link change dst=252 nextHop=0 oldCost=59 newCost=59 linkCost=39 advertisedCost=20 numFailures=0
@@ -2625,6 +2635,7 @@ ninja: no work to do.
 [HOP 3] RX ACK from 2 seq=4
 [HOP 3] Reliable NeighborCheck completed with 2 seq=4 subtype=0 discoverySequence=1
 [NWK 3] NeighborCheck success neighbor=2 subtype=Discovery discoverySequence=1 stale=0->0 numFailures=0->0
+[NWK 3] recompute hop-cost neighbor=2 failures=0 costMode=local-only localDirectionalCost=51 remoteDirectionalCost=0 newLinkCost=51
 [NWK 3] Recomputed route after link change dst=2 nextHop=2 oldCost=51 newCost=51 linkCost=51 advertisedCost=0 numFailures=0
 [NWK 3] Recomputed route after link change dst=0 nextHop=2 oldCost=151 newCost=151 linkCost=51 advertisedCost=100 numFailures=0
 [NWK 3] CheckNwkQueue: size=0
@@ -2656,6 +2667,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 2 seq=17
 [HOP 1] Reliable NeighborCheck completed with 2 seq=17 subtype=0 discoverySequence=1
 [NWK 1] NeighborCheck success neighbor=2 subtype=Discovery discoverySequence=1 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=2 failures=0 costMode=bidirectional localDirectionalCost=64 remoteDirectionalCost=64 newLinkCost=64
 [NWK 1] Recomputed route after link change dst=2 nextHop=2 oldCost=64 newCost=64 linkCost=64 advertisedCost=0 numFailures=0
 [NWK 1] Recomputed route after link change dst=95 nextHop=2 oldCost=135 newCost=135 linkCost=64 advertisedCost=71 numFailures=0
 [NWK 1] CheckNwkQueue: size=0
@@ -3323,6 +3335,7 @@ ninja: no work to do.
 [HOP 0] RX ACK from 1 seq=5
 [HOP 0] Reliable NeighborCheck completed with 1 seq=5 subtype=4 discoverySequence=0
 [NWK 0] NeighborCheck success neighbor=1 subtype=Verify discoverySequence=0 stale=0->0 numFailures=0->0
+[NWK 0] recompute hop-cost neighbor=1 failures=0 costMode=local-only localDirectionalCost=39 remoteDirectionalCost=0 newLinkCost=39
 [NWK 0] Recomputed route after link change dst=1 nextHop=1 oldCost=39 newCost=39 linkCost=39 advertisedCost=0 numFailures=0
 [NWK 0] Recomputed route after link change dst=95 nextHop=1 oldCost=174 newCost=174 linkCost=39 advertisedCost=135 numFailures=0
 [NWK 0] CheckNwkQueue: size=3
@@ -3516,6 +3529,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 0 seq=15
 [HOP 1] Reliable NeighborCheck completed with 0 seq=15 subtype=0 discoverySequence=4
 [NWK 1] NeighborCheck success neighbor=0 subtype=Discovery discoverySequence=4 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=0 failures=0 costMode=local-only localDirectionalCost=39 remoteDirectionalCost=0 newLinkCost=39
 [NWK 1] Recomputed route after link change dst=0 nextHop=0 oldCost=39 newCost=39 linkCost=39 advertisedCost=0 numFailures=0
 [NWK 1] CheckNwkQueue: size=0
 [MAC 0] rtslot_counter expired for neighbor 1 reserveSlot=18
@@ -3635,6 +3649,7 @@ ninja: no work to do.
 [HOP 3] RX ACK from 2 seq=5
 [HOP 3] Reliable NeighborCheck completed with 2 seq=5 subtype=0 discoverySequence=2
 [NWK 3] NeighborCheck success neighbor=2 subtype=Discovery discoverySequence=2 stale=0->0 numFailures=0->0
+[NWK 3] recompute hop-cost neighbor=2 failures=0 costMode=local-only localDirectionalCost=51 remoteDirectionalCost=0 newLinkCost=51
 [NWK 3] Recomputed route after link change dst=2 nextHop=2 oldCost=51 newCost=51 linkCost=51 advertisedCost=0 numFailures=0
 [NWK 3] CheckNwkQueue: size=0
 [t=87.9418] RX at node 1 from node 2 seq 26 rate 8 kbps preamble SHORT pathloss 115.742 dB snr -8.76699 dB (slot 10, len 11B, ackable=0)
@@ -3642,6 +3657,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 2 seq=26
 [HOP 1] Reliable NeighborCheck completed with 2 seq=26 subtype=0 discoverySequence=2
 [NWK 1] NeighborCheck success neighbor=2 subtype=Discovery discoverySequence=2 stale=0->0 numFailures=0->0
+[NWK 1] recompute hop-cost neighbor=2 failures=0 costMode=bidirectional localDirectionalCost=64 remoteDirectionalCost=64 newLinkCost=64
 [NWK 1] Recomputed route after link change dst=2 nextHop=2 oldCost=64 newCost=64 linkCost=64 advertisedCost=0 numFailures=0
 [NWK 1] Recomputed route after link change dst=95 nextHop=2 oldCost=135 newCost=135 linkCost=64 advertisedCost=71 numFailures=0
 [NWK 1] CheckNwkQueue: size=0

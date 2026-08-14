@@ -264,70 +264,6 @@ public:
   RecomputeRoutesViaNextHop (
     uint16_t nextHop);
 
-  /*void
-  RecomputeRoutesViaNextHop (uint16_t nextHop)
-  {
-    auto nit = m_nwkNeighbors.find (nextHop);
-    if (nit == m_nwkNeighbors.end ())
-      {
-        return;
-      }
-
-    NwkNeighborEntry &ne = nit->second;
-
-    if (std::isnan (ne.lastPathlossDb))
-      {
-        return;
-      }
-
-    double s0PowerDbm = static_cast<double> (ne.rxPowerDbmX10) / 10.0;
-    if (s0PowerDbm == 0.0)
-      {
-        s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
-      }
-
-    int chosenSpeed = 0;
-    double chosenTxPower = 0.0;
-    int estDistance = 0;
-    double speedMargin = 0.0;
-    double totalMargin = 0.0;
-
-    uint32_t newLinkCost =
-      ComputeLinkCost (s0PowerDbm,
-                      ne.lastPathlossDb,
-                      ne.numFailures,
-                      &chosenSpeed,
-                      &chosenTxPower,
-                      &estDistance,
-                      &speedMargin,
-                      &totalMargin);
-
-    for (auto &re : m_routes)
-      {
-        if (!re.valid || re.nextHop != nextHop)
-          {
-            continue;
-          }
-
-        uint32_t oldCost = re.cost;
-
-        re.linkCostToNextHop = newLinkCost;
-        re.cost = re.linkCostToNextHop + re.advertisedCost;
-        re.lastUpdated = Simulator::Now ();
-
-        std::cout << "[NWK " << m_nodeId
-                  << "] Recomputed route after link failure"
-                  << " dst=" << re.nwkDst
-                  << " nextHop=" << nextHop
-                  << " oldCost=" << oldCost
-                  << " newCost=" << re.cost
-                  << " linkCost=" << re.linkCostToNextHop
-                  << " advertisedCost=" << re.advertisedCost
-                  << " numFailures=" << ne.numFailures
-                  << std::endl;
-      }
-  }*/
-
   void UpdateMacActiveNodes ()
   {
     if (m_hop != nullptr)
@@ -1662,6 +1598,12 @@ private:
   void
   UpdateNegotiatedLinkProfile (
     NwkNeighborEntry &neighbor);
+
+  uint32_t
+  ComputeNeighborHopCost (
+    NwkNeighborEntry &neighbor,
+    double pathlossDb,
+    const char *reason);
 
 public:
   void SetNodeType (CsrNodeType type)
@@ -6768,34 +6710,213 @@ RecomputeRoutesViaNextHop (
         }
     }
 
-  double s0PowerDbm =
+  // ----------------------------------------------------------
+  // Recompute the neighbor cost using the same bidirectional
+  // rules used when ProcessHello() originally learns the link.
+  // Legacy routesReroute() calls routesComputeHopCost(), so a
+  // reroute must not fall back to a one-direction-only cost.
+  // ----------------------------------------------------------
+
+  double remoteS0PowerDbm =
     static_cast<double> (
       neighbor.rxPowerDbmX10) /
     10.0;
 
-  if (s0PowerDbm == 0.0)
+  if (remoteS0PowerDbm == 0.0)
     {
-      s0PowerDbm =
+      remoteS0PowerDbm =
         m_rxS0BaseLevelDbm +
         m_linkMarginDb;
     }
 
-  int chosenSpeed = 0;
-  double chosenTxPower = 0.0;
-  int estimatedDistance = 0;
-  double speedMargin = 0.0;
-  double totalMargin = 0.0;
+  // Local direction:
+  // this node transmits to the neighbor.
+  int localSpeed = 0;
+  double localTxPower = 0.0;
+  int localDistance = 0;
+  double localSpeedMargin = 0.0;
+  double localTotalMargin = 0.0;
 
-  uint32_t newLinkCost =
+  uint32_t localDirectionalCost =
     ComputeLinkCost (
-      s0PowerDbm,
+      remoteS0PowerDbm,
       neighbor.lastPathlossDb,
       neighbor.numFailures,
-      &chosenSpeed,
-      &chosenTxPower,
-      &estimatedDistance,
-      &speedMargin,
-      &totalMargin);
+      &localSpeed,
+      &localTxPower,
+      &localDistance,
+      &localSpeedMargin,
+      &localTotalMargin,
+      nullptr);
+
+  uint32_t newLinkCost =
+    localDirectionalCost;
+
+  bool usingBidirectionalCost =
+    false;
+
+  uint32_t remoteDirectionalCost = 0;
+
+  bool remoteLimitsValid =
+    neighbor.routingInfoValid &&
+    neighbor.remoteMinSpeedKbps > 0 &&
+    neighbor.remoteMinSpeedKbps <=
+      neighbor.remoteMaxSpeedKbps &&
+    neighbor.remoteMinPowerDbmX10 <=
+      neighbor.remoteMaxPowerDbmX10;
+
+  if (remoteLimitsValid)
+    {
+      NwkNeighborEntry remoteTxProfile;
+
+      remoteTxProfile
+        .negotiatedLinkProfileValid =
+          true;
+
+      remoteTxProfile
+        .negotiatedMinSpeedKbps =
+          neighbor.remoteMinSpeedKbps;
+
+      remoteTxProfile
+        .negotiatedMaxSpeedKbps =
+          neighbor.remoteMaxSpeedKbps;
+
+      remoteTxProfile
+        .negotiatedMinPowerDbmX10 =
+          neighbor.remoteMinPowerDbmX10;
+
+      remoteTxProfile
+        .negotiatedMaxPowerDbmX10 =
+          neighbor.remoteMaxPowerDbmX10;
+
+      remoteTxProfile
+        .negotiatedLowPowerDbmX10 =
+          neighbor.remoteLowPowerDbmX10;
+
+      // Reverse direction:
+      // neighbor transmits to this node.
+      double localS0PowerDbm =
+        m_rxS0BaseLevelDbm +
+        m_linkMarginDb;
+
+      int remoteSpeed = 0;
+      double remoteTxPower = 0.0;
+      int remoteDistance = 0;
+      double remoteSpeedMargin = 0.0;
+      double remoteTotalMargin = 0.0;
+
+      remoteDirectionalCost =
+        ComputeLinkCost (
+          localS0PowerDbm,
+          neighbor.lastPathlossDb,
+          neighbor.numFailures,
+          &remoteSpeed,
+          &remoteTxPower,
+          &remoteDistance,
+          &remoteSpeedMargin,
+          &remoteTotalMargin,
+          &remoteTxProfile);
+
+      // Legacy routesComputeHopCost() takes the
+      // pessimistic characteristic of both directions.
+      int chosenSpeed =
+        std::min (
+          localSpeed,
+          remoteSpeed);
+
+      int estimatedDistance =
+        std::max (
+          localDistance,
+          remoteDistance);
+
+      double speedMargin =
+        std::min (
+          localSpeedMargin,
+          remoteSpeedMargin);
+
+      double totalMargin =
+        std::min (
+          localTotalMargin,
+          remoteTotalMargin);
+
+      // Apply the legacy 3-dB-per-failure adjustment
+      // before converting distance to route cost.
+      double failureMarginDb =
+        3.0 *
+        static_cast<double> (
+          neighbor.numFailures);
+
+      double adjustedTotalMarginDb =
+        totalMargin -
+        failureMarginDb;
+
+      double adjustedSpeedMarginDb =
+        speedMargin -
+        failureMarginDb;
+
+      uint64_t adjustedDistanceX100 =
+        static_cast<uint64_t> (
+          std::max (
+            0,
+            estimatedDistance)) *
+        100ULL;
+
+      if (adjustedTotalMarginDb < 0.0)
+        {
+          adjustedDistanceX100 *=
+            2ULL;
+        }
+      else if (adjustedSpeedMarginDb >= 3.0)
+        {
+          adjustedDistanceX100 /=
+            2ULL;
+        }
+
+      if (chosenSpeed > 0)
+        {
+          uint64_t rawCost =
+            adjustedDistanceX100 /
+            static_cast<uint64_t> (
+              chosenSpeed);
+
+          newLinkCost =
+            static_cast<uint32_t> (
+              std::min<uint64_t> (
+                rawCost,
+                std::numeric_limits<
+                  uint32_t>::max ()));
+        }
+      else
+        {
+          newLinkCost = 1;
+        }
+
+      newLinkCost =
+        std::max<uint32_t> (
+          1,
+          newLinkCost);
+
+      usingBidirectionalCost =
+        true;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] recompute hop-cost"
+            << " neighbor="
+            << nextHop
+            << " failures="
+            << neighbor.numFailures
+            << " costMode="
+            << (usingBidirectionalCost
+                  ? "bidirectional"
+                  : "local-only")
+            << " localDirectionalCost="
+            << localDirectionalCost
+            << " remoteDirectionalCost="
+            << remoteDirectionalCost
+            << " newLinkCost="
+            << newLinkCost
+            << std::endl;
 
   for (auto &route :
        m_routes)
