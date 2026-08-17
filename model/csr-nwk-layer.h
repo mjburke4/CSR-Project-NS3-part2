@@ -1603,11 +1603,11 @@ private:
   UpdateNegotiatedLinkProfile (
     NwkNeighborEntry &neighbor);
 
-  uint32_t
+ /*uint32_t
   ComputeNeighborHopCost (
     NwkNeighborEntry &neighbor,
     double pathlossDb,
-    const char *reason);
+    const char *reason);*/
 
 public:
   void SetNodeType (CsrNodeType type)
@@ -1649,6 +1649,26 @@ public:
   {
     SetNodeType (CsrNodeType::Ordinary);
     SetTransitForwardingEnabled (false);
+  }
+
+  void
+  SetTemperatureLimitsCx10 (
+    int16_t lowCx10,
+    int16_t highCx10)
+  {
+    m_tempLowCx10 =
+      lowCx10;
+
+    m_tempHighCx10 =
+      highCx10;
+
+    std::cout << "[NWK " << m_nodeId
+              << "] temperature limits"
+              << " lowCx10="
+              << m_tempLowCx10
+              << " highCx10="
+              << m_tempHighCx10
+              << std::endl;
   }
 
   void
@@ -2010,6 +2030,10 @@ private:
   int      m_maxCfgSpeedKbps    { 128 };
   int      m_minCfgSpeedKbps    { 8 };
   double   m_txAmpBreakpointDbm { 14.0 };
+  // Legacy ROUTING_INFO temperature limits.
+  // Stored as degrees C x10, matching routes.c.
+  int16_t m_tempLowCx10  {0};
+  int16_t m_tempHighCx10 {0};
 
   void DiscoveryStart ();
   void DiscoveryStop ();
@@ -5535,10 +5559,13 @@ CsrNetLayer::BuildRoutingMarkerPayload (
           std::round (
             m_txAmpBreakpointDbm * 10.0));
 
-      // Placeholders until the supervisor/temperature
-      // model is ported.
-      info.tempLowCx10 = 0;
-      info.tempHighCx10 = 0;
+      // Legacy ROUTING_INFO includes the configured
+      // temperature operating limits.
+      info.tempLowCx10 =
+        m_tempLowCx10;
+
+      info.tempHighCx10 =
+        m_tempHighCx10;
 
       hh.SetRoutingInfo (info);
     }

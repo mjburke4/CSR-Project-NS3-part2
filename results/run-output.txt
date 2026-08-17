@@ -32,6 +32,7 @@ ninja: no work to do.
 [NWK 0] Scheduling Gateway startup discovery delay=0.25s duration=5s
 [NWK 1] Gateway startup discovery not scheduled role=Routable
 [NWK 3] Gateway startup discovery not scheduled role=Ordinary
+[NWK 1] temperature limits lowCx10=-123 highCx10=456
 [NWK 1] Consolidated selected-route changes count=2
 [NWK 1] Best route dst=0 nextHop=0 cost=39 hops=1 learnedFrom=65535 candidates=1 validCandidates=1
 [NWK 1] Best route dst=2 nextHop=2 cost=64 hops=1 learnedFrom=65535 candidates=1 validCandidates=1
@@ -343,7 +344,7 @@ ninja: no work to do.
 [NWK 0] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 0] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 0] RoutingSnapshot INFO received from=1 routingSequence=2
-[NWK 0] Stored RoutingInfo from=1 sequence=2 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 0] Stored RoutingInfo from=1 sequence=2 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 0] Routes: dst=1->nh=1(hops=1,cost=39,linkCost=39,advCost=0,from=1,imm=1,pl=107.377,valid=1,path=[1])
 [HOP 0] ACK RoutingControl to 1 seq=3
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0
@@ -1027,7 +1028,7 @@ ninja: no work to do.
 [NWK 2] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 2] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 2] RoutingSnapshot INFO received from=1 routingSequence=4
-[NWK 2] Stored RoutingInfo from=1 sequence=4 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 2] Stored RoutingInfo from=1 sequence=4 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 2] Routes: dst=1->nh=1(hops=1,cost=64,linkCost=64,advCost=0,from=1,imm=1,pl=115.742,valid=1,path=[1]) dst=3->nh=3(hops=1,cost=51,linkCost=51,advCost=0,from=3,imm=1,pl=111.868,valid=1,path=[3]) dst=99->nh=1(hops=2,cost=89,linkCost=64,advCost=25,from=1,imm=0,pl=115.742,valid=1,path=[1])
 [HOP 2] ACK RoutingControl to 1 seq=4
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0
@@ -2257,7 +2258,7 @@ ninja: no work to do.
 [NWK 0] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 0] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 0] RoutingSnapshot INFO received from=1 routingSequence=16
-[NWK 0] Stored RoutingInfo from=1 sequence=16 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 0] Stored RoutingInfo from=1 sequence=16 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 0] Routes: dst=1->nh=1(hops=1,cost=39,linkCost=39,advCost=0,from=1,imm=1,pl=107.377,valid=1,path=[1]) dst=95->nh=1(hops=4,cost=174,linkCost=39,advCost=135,from=1,imm=0,pl=107.377,valid=1,path=[1->2->3->95]) dst=96->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=3->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[])
 [HOP 0] ACK RoutingControl to 1 seq=13
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0
@@ -3116,7 +3117,7 @@ ninja: no work to do.
 [NWK 2] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 2] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 2] RoutingSnapshot INFO received from=1 routingSequence=25
-[NWK 2] Stored RoutingInfo from=1 sequence=25 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 2] Stored RoutingInfo from=1 sequence=25 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 2] Routes: dst=1->nh=1(hops=1,cost=64,linkCost=64,advCost=0,from=1,imm=1,pl=115.742,valid=1,path=[1]) dst=3->nh=3(hops=1,cost=51,linkCost=51,advCost=0,from=3,imm=1,pl=111.868,valid=1,path=[3]) dst=99->nh=1(hops=2,cost=89,linkCost=64,advCost=25,from=1,imm=0,pl=115.742,valid=0,path=[1]) dst=98->nh=1(hops=2,cost=84,linkCost=64,advCost=20,from=1,imm=0,pl=115.742,valid=0,path=[1]) dst=95->nh=3(hops=2,cost=71,linkCost=51,advCost=20,from=3,imm=0,pl=111.868,valid=0,path=[3->95]) dst=96->nh=3(hops=3,cost=76,linkCost=51,advCost=25,from=3,imm=0,pl=111.868,valid=0,path=[3->1->96]) dst=3->nh=1(hops=3,cost=104,linkCost=64,advCost=40,from=1,imm=0,pl=115.742,valid=0,path=[1->0]) dst=250->nh=1(hops=4,cost=153,linkCost=64,advCost=89,from=1,imm=0,pl=115.742,valid=1,path=[1->0->250]) dst=96->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=252->nh=1(hops=3,cost=123,linkCost=64,advCost=59,from=1,imm=0,pl=115.742,valid=1,path=[1->0->252])
 [HOP 2] ACK RoutingControl to 1 seq=19
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0
@@ -3302,7 +3303,7 @@ ninja: no work to do.
 [NWK 2] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 2] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 2] RoutingSnapshot INFO received from=1 routingSequence=26
-[NWK 2] Stored RoutingInfo from=1 sequence=26 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 2] Stored RoutingInfo from=1 sequence=26 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 2] Routes: dst=1->nh=1(hops=1,cost=64,linkCost=64,advCost=0,from=1,imm=1,pl=115.742,valid=1,path=[1]) dst=3->nh=3(hops=1,cost=51,linkCost=51,advCost=0,from=3,imm=1,pl=111.868,valid=1,path=[3]) dst=99->nh=1(hops=2,cost=89,linkCost=64,advCost=25,from=1,imm=0,pl=115.742,valid=0,path=[1]) dst=98->nh=1(hops=2,cost=84,linkCost=64,advCost=20,from=1,imm=0,pl=115.742,valid=0,path=[1]) dst=95->nh=3(hops=2,cost=71,linkCost=51,advCost=20,from=3,imm=0,pl=111.868,valid=0,path=[3->95]) dst=96->nh=3(hops=3,cost=76,linkCost=51,advCost=25,from=3,imm=0,pl=111.868,valid=0,path=[3->1->96]) dst=3->nh=1(hops=3,cost=104,linkCost=64,advCost=40,from=1,imm=0,pl=115.742,valid=0,path=[1->0]) dst=250->nh=1(hops=4,cost=153,linkCost=64,advCost=89,from=1,imm=0,pl=115.742,valid=1,path=[1->0->250]) dst=96->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=252->nh=1(hops=3,cost=123,linkCost=64,advCost=59,from=1,imm=0,pl=115.742,valid=1,path=[1->0->252])
 [HOP 2] ACK RoutingControl to 1 seq=22
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0
@@ -3879,7 +3880,7 @@ ninja: no work to do.
 [NWK 0] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 0] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 0] RoutingSnapshot INFO received from=1 routingSequence=27
-[NWK 0] Stored RoutingInfo from=1 sequence=27 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 0] Stored RoutingInfo from=1 sequence=27 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 0] Routes: dst=1->nh=1(hops=1,cost=39,linkCost=39,advCost=0,from=1,imm=1,pl=107.377,valid=1,path=[1]) dst=95->nh=1(hops=4,cost=174,linkCost=39,advCost=135,from=1,imm=0,pl=107.377,valid=1,path=[1->2->3->95]) dst=96->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=3->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=252->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[])
 [HOP 0] ACK RoutingControl to 1 seq=21
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0
@@ -4142,7 +4143,7 @@ ninja: no work to do.
 [NWK 2] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 2] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 2] RoutingSnapshot INFO received from=1 routingSequence=28
-[NWK 2] Stored RoutingInfo from=1 sequence=28 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 2] Stored RoutingInfo from=1 sequence=28 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 2] Routes: dst=1->nh=1(hops=1,cost=64,linkCost=64,advCost=0,from=1,imm=1,pl=115.742,valid=1,path=[1]) dst=3->nh=3(hops=1,cost=51,linkCost=51,advCost=0,from=3,imm=1,pl=111.868,valid=1,path=[3]) dst=99->nh=1(hops=2,cost=89,linkCost=64,advCost=25,from=1,imm=0,pl=115.742,valid=0,path=[1]) dst=98->nh=1(hops=2,cost=84,linkCost=64,advCost=20,from=1,imm=0,pl=115.742,valid=0,path=[1]) dst=95->nh=3(hops=2,cost=71,linkCost=51,advCost=20,from=3,imm=0,pl=111.868,valid=0,path=[3->95]) dst=96->nh=3(hops=3,cost=76,linkCost=51,advCost=25,from=3,imm=0,pl=111.868,valid=0,path=[3->1->96]) dst=3->nh=1(hops=3,cost=104,linkCost=64,advCost=40,from=1,imm=0,pl=115.742,valid=0,path=[1->0]) dst=250->nh=1(hops=4,cost=153,linkCost=64,advCost=89,from=1,imm=0,pl=115.742,valid=1,path=[1->0->250]) dst=96->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=252->nh=1(hops=3,cost=123,linkCost=64,advCost=59,from=1,imm=0,pl=115.742,valid=1,path=[1->0->252]) dst=200->nh=1(hops=3,cost=113,linkCost=64,advCost=49,from=1,imm=0,pl=115.742,valid=1,path=[1->0->200]) dst=201->nh=1(hops=3,cost=114,linkCost=64,advCost=50,from=1,imm=0,pl=115.742,valid=1,path=[1->0->201]) dst=202->nh=1(hops=3,cost=115,linkCost=64,advCost=51,from=1,imm=0,pl=115.742,valid=1,path=[1->0->202]) dst=203->nh=1(hops=3,cost=116,linkCost=64,advCost=52,from=1,imm=0,pl=115.742,valid=1,path=[1->0->203]) dst=204->nh=1(hops=3,cost=117,linkCost=64,advCost=53,from=1,imm=0,pl=115.742,valid=1,path=[1->0->204]) dst=205->nh=1(hops=3,cost=118,linkCost=64,advCost=54,from=1,imm=0,pl=115.742,valid=1,path=[1->0->205]) dst=206->nh=1(hops=3,cost=119,linkCost=64,advCost=55,from=1,imm=0,pl=115.742,valid=1,path=[1->0->206]) dst=207->nh=1(hops=3,cost=120,linkCost=64,advCost=56,from=1,imm=0,pl=115.742,valid=1,path=[1->0->207]) dst=208->nh=1(hops=3,cost=121,linkCost=64,advCost=57,from=1,imm=0,pl=115.742,valid=1,path=[1->0->208]) dst=209->nh=1(hops=3,cost=122,linkCost=64,advCost=58,from=1,imm=0,pl=115.742,valid=1,path=[1->0->209]) dst=210->nh=1(hops=3,cost=123,linkCost=64,advCost=59,from=1,imm=0,pl=115.742,valid=1,path=[1->0->210]) dst=211->nh=1(hops=3,cost=124,linkCost=64,advCost=60,from=1,imm=0,pl=115.742,valid=1,path=[1->0->211])
 [HOP 2] ACK RoutingControl to 1 seq=26
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0
@@ -4705,7 +4706,7 @@ ninja: no work to do.
 [NWK 0] ARL route message from 1 type=RoutingUpdate advCount=0
 [NWK 0] Negotiated link profile neighbor=1 valid=1 speedCompatible=1 speedKbps=8-128 powerCompatible=1 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140
 [NWK 0] RoutingSnapshot INFO received from=1 routingSequence=29
-[NWK 0] Stored RoutingInfo from=1 sequence=29 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=0-0
+[NWK 0] Stored RoutingInfo from=1 sequence=29 speedKbps=8-128 powerDbmX10=0-300 marginDbX10=100 lowPowerDbmX10=140 tempCx10=-123-456
 [NWK 0] Routes: dst=1->nh=1(hops=1,cost=39,linkCost=39,advCost=0,from=1,imm=1,pl=107.377,valid=1,path=[1]) dst=95->nh=1(hops=4,cost=174,linkCost=39,advCost=135,from=1,imm=0,pl=107.377,valid=1,path=[1->2->3->95]) dst=96->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=3->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[]) dst=252->nh=1(hops=0,cost=0,linkCost=0,advCost=0,from=1,imm=0,pl=nan,valid=0,path=[])
 [HOP 0] ACK RoutingControl to 1 seq=25
 [MAC] Enqueue TX pkt dscp=7 insert_pos=0 queue_size_before=0

@@ -275,6 +275,10 @@ main (int argc, char *argv[])
     Seconds (0.25),
     Seconds (5.0));
 
+  net1->SetTemperatureLimitsCx10 (
+    -123,
+    456);
+
   Simulator::Schedule (Seconds (1.4), [net2]() {
   net2->SendRoutingUpdate ();
   });
