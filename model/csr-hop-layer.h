@@ -996,8 +996,43 @@ CsrHopLayer::CheckResend ()
       ResendEntry &e = *it;
       if (e.resendCount >= m_maxNumResend)
         {
-          NS_LOG_INFO ("Hop " << m_nodeId << " giving up on dest="
-                              << e.dest << " seq=" << e.seq);
+          // Legacy br_hop waits 2 * RESEND_TIME after the
+          // final retransmission before declaring the packet
+          // unacknowledged. This gives a delayed ACK one last
+          // chance to arrive.
+          Time finalAckWait =
+            m_resendTime +
+            m_resendTime;
+
+          Time sinceLastTx =
+            now -
+            e.lastTxTime;
+
+          if (sinceLastTx <
+              finalAckWait)
+            {
+              std::cout << "[HOP " << m_nodeId
+                        << "] Waiting final ACK grace"
+                        << " dest=" << e.dest
+                        << " seq=" << e.seq
+                        << " resendCount="
+                        << e.resendCount
+                        << " elapsedSec="
+                        << sinceLastTx.GetSeconds ()
+                        << " requiredSec="
+                        << finalAckWait.GetSeconds ()
+                        << std::endl;
+
+              ++it;
+              continue;
+            }
+
+          NS_LOG_INFO ("Hop " << m_nodeId
+                              << " giving up on dest="
+                              << e.dest
+                              << " seq=" << e.seq);
+
+    // Everything already below here stays unchanged.
 
          if (!m_linkFailureCb.IsNull ())
             {
