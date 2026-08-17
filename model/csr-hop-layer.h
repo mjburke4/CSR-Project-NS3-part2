@@ -95,14 +95,25 @@ public:
   Ptr<Packet> payload);
 
   void SetRoutingControlSuccessCallback (
-  Callback<void,
-          uint16_t,
-	          uint32_t,
-	          CsrRoutingOperation,
-	          uint8_t,
-	          uint8_t> cb)
+    Callback<void,
+            uint16_t,
+              uint32_t,
+              CsrRoutingOperation,
+              uint8_t,
+              uint8_t> cb)
   {
     m_routingControlSuccessCb = cb;
+  }
+
+  void SetRoutingControlFailureCallback (
+    Callback<void,
+            uint16_t,
+            uint32_t,
+            CsrRoutingOperation,
+            uint8_t,
+            uint8_t> cb)
+  {
+    m_routingControlFailureCb = cb;
   }
 
 private:
@@ -287,6 +298,14 @@ private:
           uint8_t,
           uint8_t>
     m_routingControlSuccessCb;
+
+  Callback<void,
+        uint16_t,
+        uint32_t,
+        CsrRoutingOperation,
+        uint8_t,
+        uint8_t>
+  m_routingControlFailureCb;
 
 };
 
@@ -1032,7 +1051,75 @@ CsrHopLayer::CheckResend ()
                               << e.dest
                               << " seq=" << e.seq);
 
-    // Everything already below here stays unchanged.
+          // Legacy HOP reports final transmission failure
+          // back to the routing layer with the original
+          // routing-message metadata.
+          if (e.frame != nullptr)
+            {
+              Ptr<Packet> failedFrame =
+                e.frame->Copy ();
+
+              CsrHeader failedHopHeader;
+
+              if (failedFrame->RemoveHeader (
+                    failedHopHeader) &&
+                  failedHopHeader.GetType () ==
+                    CSR_PKT_ROUTING_CONTROL)
+                {
+                  CsrHelloHeader controlHeader;
+
+                  if (failedFrame->RemoveHeader (
+                        controlHeader))
+                    {
+                      uint32_t routingSequence =
+                        controlHeader
+                          .GetRoutingSequence ();
+
+                      CsrRoutingOperation operation =
+                        controlHeader
+                          .GetRoutingOperation ();
+
+                      uint8_t routingSection =
+                        controlHeader
+                          .GetRoutingSection ();
+
+                      uint8_t routingTotalSections =
+                        controlHeader
+                          .GetRoutingTotalSections ();
+
+                      std::cout << "[HOP " << m_nodeId
+                                << "] Reliable RoutingControl FAILED"
+                                << " neighbor="
+                                << e.dest
+                                << " routingSequence="
+                                << routingSequence
+                                << " operation="
+                                << unsigned (
+                                    static_cast<uint8_t> (
+                                      operation))
+                                << " section="
+                                << unsigned (
+                                    routingSection)
+                                << "/"
+                                << unsigned (
+                                    routingTotalSections)
+                                << std::endl;
+
+                      if (!m_routingControlFailureCb
+                            .IsNull ())
+                        {
+                          m_routingControlFailureCb (
+                            e.dest,
+                            routingSequence,
+                            operation,
+                            routingSection,
+                            routingTotalSections);
+                        }
+                    }
+                }
+            }
+
+          // Everything already below here stays unchanged.
 
          if (!m_linkFailureCb.IsNull ())
             {

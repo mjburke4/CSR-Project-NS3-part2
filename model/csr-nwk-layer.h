@@ -456,6 +456,12 @@ public:
         m_hop->SetNeighborCheckSuccessCallback (
           MakeCallback (&CsrNetLayer::NoteNeighborCheckSuccess, this));
 
+        m_hop->SetRoutingControlFailureCallback (
+          MakeCallback (
+            &CsrNetLayer::
+              NoteRoutingControlFailure,
+            this));
+
         m_hop->SetRoutingControlSuccessCallback (
           MakeCallback (
             &CsrNetLayer::
@@ -1877,6 +1883,37 @@ public:
                 this);
           }
       }
+  }
+
+  void
+  NoteRoutingControlFailure (
+    uint16_t neighbor,
+    uint32_t routingSequence,
+    CsrRoutingOperation operation,
+    uint8_t routingSection,
+    uint8_t routingTotalSections)
+  {
+    std::cout << "[NWK " << m_nodeId
+              << "] Reliable RoutingControl failure"
+              << " neighbor="
+              << neighbor
+              << " routingSequence="
+              << routingSequence
+              << " operation="
+              << RoutingOperationName (
+                  operation)
+              << " section="
+              << unsigned (
+                  routingSection)
+              << "/"
+              << unsigned (
+                  routingTotalSections)
+              << std::endl;
+
+    // For now, leave recovery to the existing
+    // snapshot watchdog. The next parity step can
+    // use this callback to retry the exact failed
+    // INFO/UPDATE/FLUSH immediately.
   }
 
   const char*
