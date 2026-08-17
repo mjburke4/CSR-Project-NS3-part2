@@ -539,14 +539,31 @@ public:
 
   void DecrementNsdp (uint16_t src, uint16_t dst)
   {
-    NsdpEntry &e = GetNsdpEntry (src, dst);
+    NsdpEntry &e =
+      GetNsdpEntry (src, dst);
+
     if (e.count > 0)
       {
         e.count--;
-      std::cout << "[NWK " << m_nodeId << "] NSDP("
-                << src << "->" << dst
-                << ") decremented to "
-                << e.count << std::endl;
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] NSDP("
+                  << src << "->" << dst
+                  << ") decremented to "
+                  << e.count
+                  << std::endl;
+
+        // Legacy HOP schedules a NWK queue check whenever
+        // ACK/DACK/final-timeout processing releases flow
+        // control capacity.
+        std::cout << "[NWK " << m_nodeId
+                  << "] HOP completion released NSDP slot;"
+                  << " scheduling NWK queue check"
+                  << " flow=" << src
+                  << "->" << dst
+                  << std::endl;
+
+        ScheduleCheckNwkQueue ();
       }
   }
 

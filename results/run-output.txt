@@ -2815,6 +2815,8 @@ ninja: no work to do.
 [MAC 3] Learned neighbor 2 uses slot 9 (rtCounter=20)
 [HOP 3] RX ACK from 2 seq=3
 [NWK 3] NSDP(3->0) decremented to 0
+[NWK 3] HOP completion released NSDP slot; scheduling NWK queue check flow=3->0
+[NWK 3] CheckNwkQueue: size=0
 [MAC 2] rtslot_counter expired for neighbor 3 reserveSlot=20
 [MAC 3] rtslot_counter expired for neighbor 2 reserveSlot=9
 [t=51.8675] RX at node 1 from node 2 seq 15 rate 8 kbps preamble LONG pathloss 115.742 dB snr -8.76699 dB (slot 15, len 40B, ackable=0)
@@ -3040,6 +3042,8 @@ ninja: no work to do.
 [MAC 1] Learned neighbor 0 uses slot 15 (rtCounter=20)
 [HOP 1] RX ACK from 0 seq=19
 [NWK 1] NSDP(1->3) decremented to 0
+[NWK 1] HOP completion released NSDP slot; scheduling NWK queue check flow=1->3
+[NWK 1] CheckNwkQueue: size=0
 [t=53.0485] RX at node 1 from node 0 seq 20 rate 8 kbps preamble SHORT pathloss 107.377 dB snr -0.40234 dB (slot 25, len 11B, ackable=0)
 [MAC 1] Learned neighbor 0 uses slot 25 (rtCounter=20)
 [HOP 1] RX ACK from 0 seq=20
