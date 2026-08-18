@@ -916,16 +916,30 @@ CsrHopLayer::CheckDack ()
     {
       if (now >= it->expiry)
         {
-          // Release NSDP + flow control *after* delay
-          NotifyNsdpFromFrame (it->frame);
+          // NSDP was already released when the DACK arrived.
+          // Legacy holds only the HOP per-neighbor flow-control
+          // slot until the DACK timer expires.
+          FlowCtrlEntry &fc =
+            GetFlowCtrlEntry (
+              it->dest);
 
-          FlowCtrlEntry &fc = GetFlowCtrlEntry (it->dest);
           if (fc.outstanding > 0)
             {
               fc.outstanding--;
+
+              std::cout << "[HOP " << m_nodeId
+                        << "] DACK hold expired"
+                        << " neighbor="
+                        << it->dest
+                        << " seq="
+                        << it->seq
+                        << " outstanding="
+                        << fc.outstanding
+                        << std::endl;
             }
 
-          it = m_dackList.erase (it);
+          it =
+            m_dackList.erase (it);
         }
       else
         {
@@ -954,15 +968,56 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
       return;
     }
 
-  // Stop retransmitting immediately by removing from resend queue,
-  // but delay NSDP/flow release.
+  // Legacy behavior:
+  // - release the NWK source/destination flow count immediately
+  // - keep the HOP per-neighbor flow-control slot held until
+  //   the DACK timer expires.
+  NotifyNsdpFromFrame (
+    entry->frame);
+
   DackEntry de;
-  de.dest   = entry->dest;
-  de.seq    = entry->seq;
-  de.frame  = entry->frame;
-  de.expiry = Simulator::Now () + m_dackHoldTime;
+  de.dest =
+    entry->dest;
+
+  de.seq =
+    entry->seq;
+
+  de.frame =
+    entry->frame;
+
+  // Legacy doubles the DACK hold time when the packet had
+  // already reached the maximum resend count.
+  Time holdTime =
+    m_dackHoldTime;
+
+  if (entry->resendCount >=
+      m_maxNumResend)
+    {
+      holdTime =
+        m_dackHoldTime +
+        m_dackHoldTime;
+    }
+
+  de.expiry =
+    Simulator::Now () +
+    holdTime;
+
+  std::cout << "[HOP " << m_nodeId
+            << "] DACK received"
+            << " neighbor="
+            << entry->dest
+            << " seq="
+            << entry->seq
+            << " resendCount="
+            << entry->resendCount
+            << " holdSec="
+            << holdTime.GetSeconds ()
+            << " NSDP=release-now"
+            << " hopFlow=hold"
+            << std::endl;
 
   m_dackList.push_back (de);
+
   ScheduleDackCheck ();
 
   for (auto it = m_resendQueue.begin (); it != m_resendQueue.end (); ++it)
