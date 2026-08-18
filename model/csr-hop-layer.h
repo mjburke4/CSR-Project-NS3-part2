@@ -65,6 +65,13 @@ public:
     m_linkFailureCb = cb;
   }
 
+  void
+  SetNwkQueueWakeCallback (
+    Callback<void> cb)
+  {
+    m_nwkQueueWakeCb = cb;
+  }
+
   void SetNeighborCheckSuccessCallback (
     Callback<void,
             uint16_t,
@@ -203,6 +210,8 @@ private:
   Callback<bool, uint16_t, uint16_t> m_shouldDackCb;
 
   Callback<void, uint16_t> m_linkFailureCb;
+
+  Callback<void> m_nwkQueueWakeCb;
 
   //Callback<void, uint16_t> m_neighborCheckSuccessCb;
 
@@ -997,6 +1006,21 @@ CsrHopLayer::CheckDack ()
                         << " outstanding="
                         << fc.outstanding
                         << std::endl;
+            }
+
+          // Legacy check_dack() wakes the Network layer
+          // whenever a delayed HOP flow-control slot is released.
+          if (!m_nwkQueueWakeCb.IsNull ())
+            {
+              std::cout << "[HOP " << m_nodeId
+                        << "] DACK release waking NWK queue"
+                        << " neighbor="
+                        << it->dest
+                        << " seq="
+                        << it->seq
+                        << std::endl;
+
+              m_nwkQueueWakeCb ();
             }
 
           it =

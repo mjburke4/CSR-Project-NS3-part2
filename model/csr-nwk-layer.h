@@ -468,6 +468,12 @@ public:
               NoteRoutingControlSuccess,
             this));
               }
+
+        m_hop->SetNwkQueueWakeCallback (
+          MakeCallback (
+            &CsrNetLayer::
+              ScheduleCheckNwkQueue,
+            this));
   }
 
   // Net -> App callback: payload + network source node ID
