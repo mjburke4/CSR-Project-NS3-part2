@@ -182,11 +182,15 @@ public:
 private:
   struct ResendEntry
   {
-    uint16_t   dest;
-    uint16_t   seq;
+    uint16_t dest;
+    uint16_t seq;
     Ptr<Packet> frame;
-    uint32_t   resendCount;
-    Time       lastTxTime;
+    uint32_t resendCount;
+    Time lastTxTime;
+
+    // Legacy network flow control applies to ordinary
+    // DATA traffic, not reliable routing/control packets.
+    bool flowControlTracked {false};
   };
 
   void HandleDataFrame (const CsrHeader &hdr, Ptr<Packet> payload, bool firstReception);
@@ -196,7 +200,11 @@ private:
   void ScheduleDackCheck ();
   void CheckDack ();
 
-  void EnqueueResend (uint16_t dst, uint16_t seq, Ptr<Packet> frame);
+  void EnqueueResend (
+    uint16_t dst,
+    uint16_t seq,
+    Ptr<Packet> frame,
+    bool flowControlTracked);
   void ScheduleResendCheck ();
   void CheckResend ();
   ResendEntry* FindResendEntry (uint16_t dst, uint16_t seq);
@@ -415,7 +423,11 @@ CsrHopLayer::SendData (uint16_t dst, uint8_t dscp,
       FlowCtrlEntry &fc = GetFlowCtrlEntry (dst);
       fc.outstanding++;
 
-      EnqueueResend (dst, seq, frame->Copy ());
+      EnqueueResend (
+        dst,
+        seq,
+        frame->Copy (),
+        true);
     }
 
   m_mac->EnqueueTxFrame (frame, dst, dscp, ack);
@@ -444,10 +456,11 @@ CsrHopLayer::SendNeighborCheck (uint16_t dst, Ptr<Packet> payload)
   Ptr<Packet> frame = payload->Copy ();
   frame->AddHeader (hdr);
 
-  FlowCtrlEntry &fc = GetFlowCtrlEntry (dst);
-  fc.outstanding++;
-
-  EnqueueResend (dst, seq, frame->Copy ());
+  EnqueueResend (
+    dst,
+    seq,
+    frame->Copy (),
+    false);
 
   std::cout << "[HOP " << m_nodeId
             << "] TX reliable NeighborCheck to " << dst
@@ -490,15 +503,11 @@ CsrHopLayer::SendRoutingControl (
   Ptr<Packet> frame = payload->Copy ();
   frame->AddHeader (hdr);
 
-  FlowCtrlEntry &fc =
-    GetFlowCtrlEntry (dst);
-
-  fc.outstanding++;
-
   EnqueueResend (
     dst,
     seq,
-    frame->Copy ());
+    frame->Copy (),
+    false);
 
   std::cout << "[HOP " << m_nodeId
             << "] TX reliable RoutingControl to "
@@ -853,50 +862,51 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
 	  // Inform Net layer that this (nwkSrc,nwkDst) flow completed one packet
   NotifyNsdpFromFrame (entry->frame);
 
-  // Decrement flow-control outstanding counter
-  FlowCtrlEntry &fc = GetFlowCtrlEntry (entry->dest);
-  if (fc.outstanding > 0)
+  if (entry->flowControlTracked)
     {
-      fc.outstanding--;
-    }
+      FlowCtrlEntry &fc =
+        GetFlowCtrlEntry (
+          entry->dest);
 
-  // Legacy increases the per-neighbor flow-control
-  // threshold after three consecutive ACKs that did
-  // not require retransmission.
-  if (entry->resendCount == 0)
-    {
-      fc.consecutiveCleanAcks++;
-
-      if (fc.consecutiveCleanAcks >= 3)
+      if (fc.outstanding > 0)
         {
-          if (fc.threshold < 16)
+          fc.outstanding--;
+        }
+
+      if (entry->resendCount == 0)
+        {
+          fc.consecutiveCleanAcks++;
+
+          if (fc.consecutiveCleanAcks >= 3)
             {
-              uint32_t oldThreshold =
-                fc.threshold;
+              if (fc.threshold < 16)
+                {
+                  uint32_t oldThreshold =
+                    fc.threshold;
 
-              fc.threshold++;
+                  fc.threshold++;
 
-              std::cout << "[HOP " << m_nodeId
-                        << "] Adaptive flow threshold increased"
-                        << " neighbor="
-                        << entry->dest
-                        << " old="
-                        << oldThreshold
-                        << " new="
-                        << fc.threshold
-                        << " effectiveWindow="
-                        << (fc.threshold + 1)
-                        << std::endl;
+                  std::cout
+                    << "[HOP " << m_nodeId
+                    << "] Adaptive flow threshold increased"
+                    << " neighbor="
+                    << entry->dest
+                    << " old="
+                    << oldThreshold
+                    << " new="
+                    << fc.threshold
+                    << " effectiveWindow="
+                    << (fc.threshold + 1)
+                    << std::endl;
+                }
+
+              fc.consecutiveCleanAcks = 0;
             }
-
+        }
+      else
+        {
           fc.consecutiveCleanAcks = 0;
         }
-    }
-  else
-    {
-      // Legacy does not count an ACK as "clean"
-      // if retransmission was required.
-      fc.consecutiveCleanAcks = 0;
     }
 
   if (neighborCheckCompleted)
@@ -1122,16 +1132,24 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
 }
 
 void
-CsrHopLayer::EnqueueResend (uint16_t dst, uint16_t seq, Ptr<Packet> frame)
+CsrHopLayer::EnqueueResend (
+  uint16_t dst,
+  uint16_t seq,
+  Ptr<Packet> frame,
+  bool flowControlTracked)
 {
   ResendEntry e;
-  e.dest        = dst;
-  e.seq         = seq;
-  e.frame       = frame;
+
+  e.dest = dst;
+  e.seq = seq;
+  e.frame = frame;
   e.resendCount = 0;
-  e.lastTxTime  = Simulator::Now ();
+  e.lastTxTime = Simulator::Now ();
+  e.flowControlTracked =
+    flowControlTracked;
 
   m_resendQueue.push_back (e);
+
   ScheduleResendCheck ();
 }
 
@@ -1275,35 +1293,40 @@ CsrHopLayer::CheckResend ()
           // Inform Net layer that this flow lost a packet
           NotifyNsdpFromFrame (e.frame);
 
-          // Decrement flow-control outstanding counter
-          FlowCtrlEntry &fc = GetFlowCtrlEntry (e.dest);
-
-          if (fc.outstanding > 0)
+          if (e.flowControlTracked)
             {
-              fc.outstanding--;
-            }
+              FlowCtrlEntry &fc =
+                GetFlowCtrlEntry (
+                  e.dest);
 
-          fc.consecutiveCleanAcks = 0;
+              if (fc.outstanding > 0)
+                {
+                  fc.outstanding--;
+                }
 
-          if (fc.threshold > 0)
-            {
-              uint32_t oldThreshold =
-                fc.threshold;
+              fc.consecutiveCleanAcks = 0;
 
-              fc.threshold--;
+              if (fc.threshold > 0)
+                {
+                  uint32_t oldThreshold =
+                    fc.threshold;
 
-              std::cout << "[HOP " << m_nodeId
-                        << "] Adaptive flow threshold decreased"
-                        << " neighbor="
-                        << e.dest
-                        << " old="
-                        << oldThreshold
-                        << " new="
-                        << fc.threshold
-                        << " effectiveWindow="
-                        << (fc.threshold + 1)
-                        << " reason=no-ACK"
-                        << std::endl;
+                  fc.threshold--;
+
+                  std::cout
+                    << "[HOP " << m_nodeId
+                    << "] Adaptive flow threshold decreased"
+                    << " neighbor="
+                    << e.dest
+                    << " old="
+                    << oldThreshold
+                    << " new="
+                    << fc.threshold
+                    << " effectiveWindow="
+                    << (fc.threshold + 1)
+                    << " reason=no-ACK"
+                    << std::endl;
+                }
             }
 
           it = m_resendQueue.erase (it);
