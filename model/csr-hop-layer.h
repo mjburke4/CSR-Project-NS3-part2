@@ -119,8 +119,17 @@ public:
 private:
   struct FlowCtrlEntry
   {
-    uint32_t outstanding { 0 };   // how many ACKable frames we've sent but not completed
-    uint32_t threshold  { 4 };   // max in-flight before we say "stop" (tuneable)
+    uint32_t outstanding {0};
+
+    // Legacy flow_ctrl_threshold starts at
+    // FLOW_CTRL_MIN_THRESHOLD = 0.
+    // The effective number of packets allowed
+    // in flight is threshold + 1.
+    uint32_t threshold {0};
+
+    // Number of consecutive packets ACKed
+    // without requiring retransmission.
+    uint32_t consecutiveCleanAcks {0};
   };
 
   FlowCtrlEntry& GetFlowCtrlEntry (uint16_t dest)
@@ -131,7 +140,8 @@ private:
         FlowCtrlEntry e;
         // default threshold; you can tune this
         e.outstanding = 0;
-        e.threshold   = 4;
+        e.threshold = 0;
+        e.consecutiveCleanAcks = 0;
         it = m_flowCtrlByDest.insert (std::make_pair (dest, e)).first;
       }
     return it->second;
@@ -142,12 +152,24 @@ public:
   {
     FlowCtrlEntry &e = GetFlowCtrlEntry (dest);
     
-    std::cout << "[HOP " << m_nodeId << "] CanSendToHop dest=" << dest
-            << " outstanding=" << e.outstanding
-            << " threshold="  << e.threshold
-            << " -> " << (e.outstanding < e.threshold ? "YES" : "NO")
-            << std::endl;
-    return e.outstanding < e.threshold;
+    bool canSend =
+      e.outstanding <=
+        e.threshold;
+
+    std::cout << "[HOP " << m_nodeId
+              << "] CanSendToHop dest="
+              << dest
+              << " outstanding="
+              << e.outstanding
+              << " threshold="
+              << e.threshold
+              << " effectiveWindow="
+              << (e.threshold + 1)
+              << " -> "
+              << (canSend ? "YES" : "NO")
+              << std::endl;
+
+    return canSend;
   }
 
 private:
@@ -829,6 +851,45 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
       fc.outstanding--;
     }
 
+  // Legacy increases the per-neighbor flow-control
+  // threshold after three consecutive ACKs that did
+  // not require retransmission.
+  if (entry->resendCount == 0)
+    {
+      fc.consecutiveCleanAcks++;
+
+      if (fc.consecutiveCleanAcks >= 3)
+        {
+          if (fc.threshold < 16)
+            {
+              uint32_t oldThreshold =
+                fc.threshold;
+
+              fc.threshold++;
+
+              std::cout << "[HOP " << m_nodeId
+                        << "] Adaptive flow threshold increased"
+                        << " neighbor="
+                        << entry->dest
+                        << " old="
+                        << oldThreshold
+                        << " new="
+                        << fc.threshold
+                        << " effectiveWindow="
+                        << (fc.threshold + 1)
+                        << std::endl;
+            }
+
+          fc.consecutiveCleanAcks = 0;
+        }
+    }
+  else
+    {
+      // Legacy does not count an ACK as "clean"
+      // if retransmission was required.
+      fc.consecutiveCleanAcks = 0;
+    }
+
   if (neighborCheckCompleted)
     {
       std::cout << "[HOP " << m_nodeId
@@ -967,6 +1028,12 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
                           << " from " << src);
       return;
     }
+
+  FlowCtrlEntry &fc =
+    GetFlowCtrlEntry (
+      entry->dest);
+
+  fc.consecutiveCleanAcks = 0;
 
   // Legacy behavior:
   // - release the NWK source/destination flow count immediately
@@ -1186,9 +1253,33 @@ CsrHopLayer::CheckResend ()
 
           // Decrement flow-control outstanding counter
           FlowCtrlEntry &fc = GetFlowCtrlEntry (e.dest);
+
           if (fc.outstanding > 0)
             {
               fc.outstanding--;
+            }
+
+          fc.consecutiveCleanAcks = 0;
+
+          if (fc.threshold > 0)
+            {
+              uint32_t oldThreshold =
+                fc.threshold;
+
+              fc.threshold--;
+
+              std::cout << "[HOP " << m_nodeId
+                        << "] Adaptive flow threshold decreased"
+                        << " neighbor="
+                        << e.dest
+                        << " old="
+                        << oldThreshold
+                        << " new="
+                        << fc.threshold
+                        << " effectiveWindow="
+                        << (fc.threshold + 1)
+                        << " reason=no-ACK"
+                        << std::endl;
             }
 
           it = m_resendQueue.erase (it);
