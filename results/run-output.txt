@@ -734,6 +734,7 @@ ninja: no work to do.
 [NWK 1] CheckNwkQueue: size=0
 [MAC 2] rtslot_counter expired for neighbor 1 reserveSlot=13
 [MAC 1] rtslot_counter expired for neighbor 2 reserveSlot=8
+[HOP 2] Pending DATA increment dest=3 pending=1
 [MAC] Enqueue TX pkt dscp=5 insert_pos=0 queue_size_before=0
 [MAC 2] PickTxSlot(dest=3) active_nodes_for_slotting=3 opnet_slot_range=25
 [MAC 2] PickTxSlot(dest=3) avoid:
@@ -763,6 +764,7 @@ ninja: no work to do.
 [t=17.0419] RX at node 2 from node 3 seq 1 rate 8 kbps preamble SHORT pathloss 111.868 dB snr -4.89298 dB (slot 21, len 11B, ackable=0)
 [MAC 2] Learned neighbor 3 uses slot 21 (rtCounter=20)
 [HOP 2] RX ACK from 3 seq=1
+[HOP 2] Pending DATA decrement reason=ACK neighbor=3 pending=0
 [MAC 3] rtslot_counter expired for neighbor 2 reserveSlot=17
 [MAC 2] rtslot_counter expired for neighbor 3 reserveSlot=21
 [t=17.8512] RX at node 2 from node 3 seq 1 rate 16 kbps preamble LONG pathloss 111.868 dB snr -4.89298 dB (slot 13, len 40B, ackable=1)
@@ -2777,7 +2779,8 @@ ninja: no work to do.
 [NWK 3] NSDP(3->0) incremented to 1
 [NWK 3] CheckNwkQueue: size=1
 [NWK 3] CanSendForFlow 3->0 NSDP.count=1 limit=4 -> YES
-[HOP 3] CanSendToHop dest=2 outstanding=0 threshold=0 effectiveWindow=1 -> YES
+[HOP 3] CanSendToHop dest=2 outstanding=0 threshold=0 effectiveWindow=1 pendingData=0 globalLimit=16 neighborOK=1 nodeOK=1 -> YES
+[HOP 3] Pending DATA increment dest=2 pending=1
 [MAC] Enqueue TX pkt dscp=0 insert_pos=0 queue_size_before=0
 [MAC 3] PickTxSlot(dest=2) active_nodes_for_slotting=2 opnet_slot_range=21
 [MAC 3] PickTxSlot(dest=2) avoid:
@@ -2816,6 +2819,7 @@ ninja: no work to do.
 [HOP 3] RX ACK from 2 seq=3
 [NWK 3] NSDP(3->0) decremented to 0
 [NWK 3] HOP completion released NSDP slot; scheduling NWK queue check flow=3->0
+[HOP 3] Pending DATA decrement reason=ACK neighbor=2 pending=0
 [NWK 3] CheckNwkQueue: size=0
 [MAC 2] rtslot_counter expired for neighbor 3 reserveSlot=20
 [MAC 3] rtslot_counter expired for neighbor 2 reserveSlot=9
@@ -2874,7 +2878,8 @@ ninja: no work to do.
 [NWK 1] NSDP(1->3) incremented to 1
 [NWK 1] CheckNwkQueue: size=1
 [NWK 1] CanSendForFlow 1->3 NSDP.count=1 limit=4 -> YES
-[HOP 1] CanSendToHop dest=0 outstanding=0 threshold=0 effectiveWindow=1 -> YES
+[HOP 1] CanSendToHop dest=0 outstanding=0 threshold=0 effectiveWindow=1 pendingData=0 globalLimit=16 neighborOK=1 nodeOK=1 -> YES
+[HOP 1] Pending DATA increment dest=0 pending=1
 [MAC] Enqueue TX pkt dscp=0 insert_pos=0 queue_size_before=0
 [MAC 1] PickTxSlot(dest=0) active_nodes_for_slotting=3 opnet_slot_range=25
 [MAC 1] avoiding neighbor 2 reserveSlot=15 rtslot_counter=9
@@ -3043,6 +3048,7 @@ ninja: no work to do.
 [HOP 1] RX ACK from 0 seq=19
 [NWK 1] NSDP(1->3) decremented to 0
 [NWK 1] HOP completion released NSDP slot; scheduling NWK queue check flow=1->3
+[HOP 1] Pending DATA decrement reason=ACK neighbor=0 pending=0
 [NWK 1] CheckNwkQueue: size=0
 [t=53.0485] RX at node 1 from node 0 seq 20 rate 8 kbps preamble SHORT pathloss 107.377 dB snr -0.40234 dB (slot 25, len 11B, ackable=0)
 [MAC 1] Learned neighbor 0 uses slot 25 (rtCounter=20)

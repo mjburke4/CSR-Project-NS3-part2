@@ -154,14 +154,33 @@ private:
     return it->second;
   }
 
+  // Legacy pending_pk_count:
+  // total DATA packets still pending in HOP and below.
+  uint32_t m_pendingDataCount {0};
+
+  static constexpr uint32_t
+    HOP_PENDING_MAX_THRESHOLD = 16;
+
 public:
   bool CanSendToHop (uint16_t dest)
   {
     FlowCtrlEntry &e = GetFlowCtrlEntry (dest);
     
-    bool canSend =
+    bool neighborCanSend =
       e.outstanding <=
         e.threshold;
+
+    // Legacy NWK computes:
+    // FLOW_CTRL_MAX_THRESHOLD - pending_pk_count + 1.
+    // Therefore pending=16 may admit one final packet,
+    // producing pending=17 and congestion.
+    bool nodeCanSend =
+      m_pendingDataCount <=
+        HOP_PENDING_MAX_THRESHOLD;
+
+    bool canSend =
+      neighborCanSend &&
+      nodeCanSend;
 
     std::cout << "[HOP " << m_nodeId
               << "] CanSendToHop dest="
@@ -172,6 +191,14 @@ public:
               << e.threshold
               << " effectiveWindow="
               << (e.threshold + 1)
+              << " pendingData="
+              << m_pendingDataCount
+              << " globalLimit="
+              << HOP_PENDING_MAX_THRESHOLD
+              << " neighborOK="
+              << (neighborCanSend ? 1 : 0)
+              << " nodeOK="
+              << (nodeCanSend ? 1 : 0)
               << " -> "
               << (canSend ? "YES" : "NO")
               << std::endl;
@@ -422,6 +449,27 @@ CsrHopLayer::SendData (uint16_t dst, uint8_t dscp,
       // Track this as an outstanding hop-level transmission
       FlowCtrlEntry &fc = GetFlowCtrlEntry (dst);
       fc.outstanding++;
+
+      m_pendingDataCount++;
+
+      std::cout << "[HOP " << m_nodeId
+                << "] Pending DATA increment"
+                << " dest=" << dst
+                << " pending="
+                << m_pendingDataCount
+                << std::endl;
+
+      if (m_pendingDataCount >
+          HOP_PENDING_MAX_THRESHOLD)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] GLOBAL HOP CONGESTED"
+                    << " pending="
+                    << m_pendingDataCount
+                    << " threshold="
+                    << HOP_PENDING_MAX_THRESHOLD
+                    << std::endl;
+        }
 
       EnqueueResend (
         dst,
@@ -871,6 +919,20 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
       if (fc.outstanding > 0)
         {
           fc.outstanding--;
+
+          if (m_pendingDataCount > 0)
+            {
+              m_pendingDataCount--;
+            }
+
+          std::cout << "[HOP " << m_nodeId
+                    << "] Pending DATA decrement"
+                    << " reason=ACK"
+                    << " neighbor="
+                    << entry->dest
+                    << " pending="
+                    << m_pendingDataCount
+                    << std::endl;
         }
 
       if (entry->resendCount == 0)
@@ -1015,6 +1077,20 @@ CsrHopLayer::CheckDack ()
                         << it->seq
                         << " outstanding="
                         << fc.outstanding
+                        << std::endl;
+
+              if (m_pendingDataCount > 0)
+                {
+                  m_pendingDataCount--;
+                }
+
+              std::cout << "[HOP " << m_nodeId
+                        << "] Pending DATA decrement"
+                        << " reason=DACK-expiry"
+                        << " neighbor="
+                        << it->dest
+                        << " pending="
+                        << m_pendingDataCount
                         << std::endl;
             }
 
@@ -1302,6 +1378,20 @@ CsrHopLayer::CheckResend ()
               if (fc.outstanding > 0)
                 {
                   fc.outstanding--;
+
+                  if (m_pendingDataCount > 0)
+                    {
+                      m_pendingDataCount--;
+                    }
+
+                  std::cout << "[HOP " << m_nodeId
+                            << "] Pending DATA decrement"
+                            << " reason=no-ACK"
+                            << " neighbor="
+                            << e.dest
+                            << " pending="
+                            << m_pendingDataCount
+                            << std::endl;
                 }
 
               fc.consecutiveCleanAcks = 0;
