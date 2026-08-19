@@ -75,13 +75,15 @@ void
 CheckRelayAdmission (Ptr<CsrNetLayer> relayNwk,
                      Ptr<CsrHopLayer> relayHop)
 {
-  // By this point all four first-hop packets have reached the relay, while
-  // the relay's initial one-packet window is still waiting for its first ACK.
+  // With OPNET MAC holdoff and serialized airtime, the relay has admitted the
+  // first packet while the source's initial one-packet HOP window waits for
+  // the relay ACK.  The old immediate-MAC model unrealistically placed all
+  // four packets here before this checkpoint.
   Require (relayNwk->GetNsdpCount (SOURCE_NODE, DESTINATION_NODE) ==
-             BURST_SIZE,
-           "relay NSDP did not count every forwarded packet");
-  Require (relayNwk->GetNwkQueueSize () == BURST_SIZE - 1,
-           "relay NWK did not retain three packets behind its initial HOP window");
+             1,
+           "relay NSDP did not count the first forwarded packet");
+  Require (relayNwk->GetNwkQueueSize () == 0,
+           "relay did not admit its first packet into HOP");
   Require (relayHop->GetPendingDataCount () == 1,
            "relay HOP pending DATA count is not one before its first ACK");
   Require (relayHop->GetOutstandingDataCount (DESTINATION_NODE) == 1,

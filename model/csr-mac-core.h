@@ -10,6 +10,8 @@ class CsrMacCore
       m_dev (nullptr)
   {}
 
+  static constexpr double TS_HOLDOFF_SECONDS = 0.3;
+
   void SetNodeId (uint16_t id)        { m_nodeId = id; }
   void SetDevice (CsrNetDevice *dev)  { m_dev = dev; }
   int SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const;
@@ -48,8 +50,6 @@ class CsrMacCore
   //Time    m_slotTickPeriod { Seconds (1.0) };   // default; tune later
   Time    m_slotTickPeriod { Seconds (0.013) }; // OPNET TSLOT_CYCLE
   bool    m_slotTickEnabled { false };
-  static constexpr int DEFAULT_RTSLOT_COUNTER = 20;
-
   void SlotTick ();
 
 
@@ -151,6 +151,12 @@ class CsrMacCore
     return m_transmittedFrameCount;
   }
 
+  int32_t GetNeighborReservationCounter (uint16_t neighbor) const
+  {
+    auto it = m_neighbors.find (neighbor);
+    return (it == m_neighbors.end ()) ? -1 : it->second.rtCounter;
+  }
+
   // Called by Hop layer to enqueue a full over-the-air frame
   void EnqueueTxFrame (Ptr<Packet> frame,
                        uint16_t dest,
@@ -190,10 +196,18 @@ class CsrMacCore
 
   void NoteNeighborReservedSlot (uint16_t neighbor, int slot)
   {
+    if (!m_slotTickEnabled)
+      {
+        StartSlotTick (m_slotTickPeriod);
+      }
+
     NeighborInfo &info = m_neighbors[neighbor];
 
     info.reserveSlot = slot;
-    info.rtCounter   = DEFAULT_RTSLOT_COUNTER;
+    // OPNET copies the advertised "Reserve TSlot" into both fields.  The
+    // counter then advances toward the neighbor's next transmission once per
+    // 13-ms MAC slot; it is not a fixed reservation lifetime.
+    info.rtCounter   = slot;
 
     std::cout << "[MAC " << m_nodeId << "] Learned neighbor " << neighbor
               << " uses slot " << slot
@@ -279,6 +293,8 @@ private:
 
 
   void MaybeScheduleNextTx ();
+  void ScheduleTxOpportunity (int slot, Time notBefore, bool initialHoldoff);
+  void FinishTx ();
   void DoTx ();
 
   int           ChooseRateForDest (uint16_t dest);
@@ -292,6 +308,8 @@ private:
   Callback<void, Ptr<Packet>, double, double>  m_rxCallback;
   Callback<void, uint16_t, uint16_t, Time>     m_txSentCallback;
   uint64_t                            m_transmittedFrameCount {0};
+  int                                 m_scheduledTxSlot {-1};
+  bool                                m_txInProgress {false};
   std::map<uint16_t, NeighborInfo>    m_neighbors;
   Time                                m_neighborTimeout { Seconds (6.0) };   // default: 3x hello interval (if hello=2s)
   EventId                             m_neighborAgingEvent;
@@ -393,27 +411,22 @@ private:
               << " opnet_slot_range=" << slotRange
               << std::endl;
 
-    // Mark reserved slots learned from neighbors.
+    // OPNET get_slot() marks each neighbor's current reservation counter, not
+    // the original advertised offset.  The counter moves every slot tick.
     for (auto &kv : m_neighbors)
       {
         NeighborInfo &ni = kv.second;
 
-        if (ni.rtCounter > 0 &&
-            ni.reserveSlot >= 0 &&
-            ni.reserveSlot < MAX_SLOTRESERVE_NS3)
+        if (ni.rtCounter >= 0 &&
+            ni.rtCounter < MAX_SLOTRESERVE_NS3)
           {
-            used[ni.reserveSlot] = true;
+            used[ni.rtCounter] = true;
 
             std::cout << "[MAC " << m_nodeId
                       << "] avoiding neighbor " << kv.first
-                      << " reserveSlot=" << ni.reserveSlot
+                      << " currentReservedSlot=" << ni.rtCounter
                       << " rtslot_counter=" << ni.rtCounter
                       << std::endl;
-          }
-
-        if (ni.rtCounter == 0)
-          {
-            ni.reserveSlot = -1;
           }
       }
 
@@ -447,35 +460,40 @@ private:
       }
     std::cout << std::endl;
 
-    // Build list of free slots in OPNET range [1, slotRange].
-    std::vector<int> freeSlots;
-    freeSlots.reserve (slotRange);
-
-    for (int s = 1; s <= slotRange; ++s)
-      {
-        if (!used[s])
-          {
-            freeSlots.push_back (s);
-          }
-      }
-
     Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
 
-    int chosenSlot;
-    if (!freeSlots.empty ())
+    // The legacy code draws an ordinal in [1, slotRange], then scans the full
+    // 255-entry reservation table beginning at slot zero.  Slot zero is
+    // intentionally skipped by the countdown logic; occupied slots therefore
+    // shift the selected physical offset beyond the nominal slot range.
+    int remaining = rng->GetInteger (1, slotRange);
+    int chosenSlot = -1;
+    for (int slot = 0; slot < MAX_SLOTRESERVE_NS3 - 1; ++slot)
       {
-        int idx = rng->GetInteger (0, static_cast<int> (freeSlots.size ()) - 1);
-        chosenSlot = freeSlots[idx];
+        if (used[slot])
+          {
+            continue;
+          }
+
+        if (remaining == 0)
+          {
+            chosenSlot = slot;
+            break;
+          }
+        remaining--;
       }
-    else
+
+    if (chosenSlot < 0)
       {
-        // Fallback: OPNET-style random slot in [1, slotRange].
+        std::cout << "[MAC " << m_nodeId
+                  << "] slot reservation table exhausted; using random fallback"
+                  << std::endl;
         chosenSlot = rng->GetInteger (1, slotRange);
       }
 
     std::cout << "[MAC " << m_nodeId
               << "] PickTxSlot chose " << chosenSlot
-              << " from range [1," << slotRange << "]"
+              << " using OPNET free-slot ordinal range [1," << slotRange << "]"
               << std::endl;
 
     return chosenSlot;
@@ -541,24 +559,27 @@ CsrMacCore::SlotTick ()
       return;
     }
 
-  for (auto &kv : m_neighbors)
+  // OPNET tslot_tasks() keeps the timer running in Tx_st but does not advance
+  // any reservation counters until the MAC returns to Search_st.
+  if (!m_txInProgress)
     {
-      uint16_t neighbor = kv.first;
-      NeighborInfo &ni = kv.second;
-
-      if (ni.rtCounter > 0)
+      for (auto &kv : m_neighbors)
         {
-          ni.rtCounter--;
+          uint16_t neighbor = kv.first;
+          NeighborInfo &ni = kv.second;
 
-          if (ni.rtCounter == 0)
+          if (ni.rtCounter >= 0)
             {
-              std::cout << "[MAC " << m_nodeId
-                        << "] rtslot_counter expired for neighbor "
-                        << neighbor
-                        << " reserveSlot=" << ni.reserveSlot
-                        << std::endl;
+              ni.rtCounter--;
 
-              ni.reserveSlot = -1;
+              if (ni.rtCounter == -1)
+                {
+                  std::cout << "[MAC " << m_nodeId
+                            << "] rtslot_counter expired for neighbor "
+                            << neighbor
+                            << " reserveSlot=" << ni.reserveSlot
+                            << std::endl;
+                }
             }
         }
     }

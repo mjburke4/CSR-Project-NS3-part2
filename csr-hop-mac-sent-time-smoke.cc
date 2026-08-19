@@ -62,8 +62,8 @@ CheckBeforeFirstRetry (Ptr<CsrNetDevice> device,
 {
   Require (device->GetMac ().GetTransmittedFrameCount () == 1,
            "first retry was scheduled from HOP enqueue time instead of MAC sent time");
-  Require (device->GetMac ().GetQueuedFrameCount () == 0,
-           "unexpected frame remained queued before the first retry");
+  Require (device->GetMac ().GetQueuedFrameCount () <= 1,
+           "more than one retry was queued behind MAC slot contention");
   Require (hop->GetPendingDataCount () == 1,
            "initial transmission released HOP flow control without an ACK");
 }
@@ -141,25 +141,28 @@ main ()
                        &CheckDeferredInitialFrame,
                        device,
                        hop);
-  Simulator::Schedule (Seconds (4.9),
+  // Once the link becomes available, the initial frame must first reach its
+  // selected MAC slot.  Each HOP retry then enters a fresh 300-ms holdoff and
+  // slot countdown; use windows that cover every OPNET slot in [1,18].
+  Simulator::Schedule (Seconds (4.4),
                        &CheckBeforeFirstRetry,
                        device,
                        hop);
-  Simulator::Schedule (Seconds (5.1),
+  Simulator::Schedule (Seconds (6.1),
                        &CheckFirstRetry,
                        device);
-  Simulator::Schedule (Seconds (7.1),
+  Simulator::Schedule (Seconds (8.7),
                        &CheckSecondRetry,
                        device);
-  Simulator::Schedule (Seconds (10.9),
+  Simulator::Schedule (Seconds (11.0),
                        &CheckFinalGraceStillHeld,
                        hop);
-  Simulator::Schedule (Seconds (11.1),
+  Simulator::Schedule (Seconds (12.7),
                        &CheckFinalTimeout,
                        device,
                        hop);
 
-  Simulator::Stop (Seconds (12.0));
+  Simulator::Stop (Seconds (13.0));
   Simulator::Run ();
   Simulator::Destroy ();
 
