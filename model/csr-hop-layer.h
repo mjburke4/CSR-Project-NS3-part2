@@ -20,7 +20,18 @@ public:
       m_maxNumResend (2)
   {}
 
-  void SetMac (CsrMacCore *mac)   { m_mac = mac; }
+  void SetMac (CsrMacCore *mac)
+  {
+    m_mac = mac;
+
+    if (m_mac != nullptr)
+      {
+        m_mac->SetTxSentCallback (
+          MakeCallback (
+            &CsrHopLayer::NotifyMacFrameSent,
+            this));
+      }
+  }
   void SetNodeId (uint16_t id)    { m_nodeId = id; }
   void SetActiveNodesForPostTx (uint32_t n)
   {
@@ -173,6 +184,52 @@ public:
     return it == m_flowCtrlByDest.end () ? 0 : it->second.outstanding;
   }
 
+  void NotifyMacFrameSent (
+    uint16_t dest,
+    uint16_t seq,
+    Time sentAt)
+  {
+    ResendEntry *entry =
+      FindResendEntry (dest, seq);
+
+    if (entry == nullptr)
+      {
+        return;
+      }
+
+    entry->lastTxTime = sentAt;
+    entry->initialTxConfirmed = true;
+
+    std::cout << "[HOP " << m_nodeId
+              << "] MAC sent confirmation"
+              << " dest=" << dest
+              << " seq=" << seq
+              << " transmission="
+              << (entry->resendCount + 1)
+              << " sentAt="
+              << sentAt.GetSeconds ()
+              << std::endl;
+
+    Time wait =
+      entry->resendCount >= m_maxNumResend
+        ? m_resendTime + m_resendTime
+        : m_resendTime;
+
+    Time due = sentAt + wait;
+    Time delay =
+      due > Simulator::Now ()
+        ? due - Simulator::Now ()
+        : Seconds (0.0);
+
+    // OPNET schedules one RESEND_TIMER event for every br_Mac_Hop_Inst.
+    // Keeping these events independent prevents a later frame from inheriting
+    // the check cadence of an earlier transmission.
+    Simulator::Schedule (
+      delay,
+      &CsrHopLayer::CheckResend,
+      this);
+  }
+
   bool CanAcceptDataGlobally () const
   {
     // Legacy permits one final transfer while pending_pk_count is 16,
@@ -232,6 +289,7 @@ private:
     Ptr<Packet> frame;
     uint32_t resendCount;
     Time lastTxTime;
+    bool initialTxConfirmed {false};
 
     // Legacy network flow control applies to ordinary
     // DATA traffic, not reliable routing/control packets.
@@ -251,7 +309,6 @@ private:
     uint16_t seq,
     Ptr<Packet> frame,
     bool flowControlTracked);
-  void ScheduleResendCheck ();
   void CheckResend ();
   ResendEntry* FindResendEntry (uint16_t dst, uint16_t seq);
   bool CheckReceivedSeq (uint16_t src, uint16_t seq, bool dataTraffic);
@@ -361,7 +418,6 @@ private:
 
   std::map<uint16_t, uint16_t>                  m_lastSentSeqByDest;
   std::list<ResendEntry>                        m_resendQueue;
-  EventId                                       m_resendEvent;
   Time                                          m_resendTime;
   uint32_t                                      m_maxNumResend;
 
@@ -1307,24 +1363,12 @@ CsrHopLayer::EnqueueResend (
   e.seq = seq;
   e.frame = frame;
   e.resendCount = 0;
-  e.lastTxTime = Simulator::Now ();
+  e.lastTxTime = Seconds (0.0);
+  e.initialTxConfirmed = false;
   e.flowControlTracked =
     flowControlTracked;
 
   m_resendQueue.push_back (e);
-
-  ScheduleResendCheck ();
-}
-
-void
-CsrHopLayer::ScheduleResendCheck ()
-{
-  if (!m_resendEvent.IsPending () && !m_resendQueue.empty ())
-    {
-      m_resendEvent = Simulator::Schedule (m_resendTime,
-                                           &CsrHopLayer::CheckResend,
-                                           this);
-    }
 }
 
 void
@@ -1340,6 +1384,15 @@ CsrHopLayer::CheckResend ()
   for (auto it = m_resendQueue.begin (); it != m_resendQueue.end (); /* no increment */)
     {
       ResendEntry &e = *it;
+
+      // An OPNET resend entry starts with A_VERY_LARGE_NUMBER and cannot
+      // expire until MAC reports the first real transmission instant.
+      if (!e.initialTxConfirmed)
+        {
+          ++it;
+          continue;
+        }
+
       if (e.resendCount >= m_maxNumResend)
         {
           // Legacy br_hop waits 2 * RESEND_TIME after the
@@ -1516,8 +1569,12 @@ CsrHopLayer::CheckResend ()
                               << e.dest << " seq=" << e.seq
                               << " attempt=" << (e.resendCount + 1));
 
-          e.lastTxTime = now;
           e.resendCount++;
+
+          // Keep the legacy provisional timestamp.  br_hop records the time
+          // it hands a retransmission to MAC, then br_Mac_Hop_Inst replaces
+          // it with the actual sent time when transmission occurs.
+          e.lastTxTime = now;
 
           m_mac->EnqueueTxFrame (e.frame->Copy (), e.dest,
                                  /*dscp*/ 5, /*ackable*/ true);
@@ -1526,10 +1583,6 @@ CsrHopLayer::CheckResend ()
       ++it;
     }
 
-  if (!m_resendQueue.empty ())
-    {
-      ScheduleResendCheck ();
-    }
 }
 
 CsrHopLayer::ResendEntry*

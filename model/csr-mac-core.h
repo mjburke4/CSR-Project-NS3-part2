@@ -135,6 +135,22 @@ class CsrMacCore
     m_rxCallback = cb;
   }
 
+  void SetTxSentCallback (
+    Callback<void, uint16_t, uint16_t, Time> cb)
+  {
+    m_txSentCallback = cb;
+  }
+
+  uint32_t GetQueuedFrameCount () const
+  {
+    return static_cast<uint32_t> (m_queue.size ());
+  }
+
+  uint64_t GetTransmittedFrameCount () const
+  {
+    return m_transmittedFrameCount;
+  }
+
   // Called by Hop layer to enqueue a full over-the-air frame
   void EnqueueTxFrame (Ptr<Packet> frame,
                        uint16_t dest,
@@ -274,6 +290,8 @@ private:
   std::vector<TxQueueEntry>           m_queue;
   EventId                             m_txEvent;
   Callback<void, Ptr<Packet>, double, double>  m_rxCallback;
+  Callback<void, uint16_t, uint16_t, Time>     m_txSentCallback;
+  uint64_t                            m_transmittedFrameCount {0};
   std::map<uint16_t, NeighborInfo>    m_neighbors;
   Time                                m_neighborTimeout { Seconds (6.0) };   // default: 3x hello interval (if hello=2s)
   EventId                             m_neighborAgingEvent;

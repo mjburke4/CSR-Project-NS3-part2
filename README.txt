@@ -23,4 +23,10 @@ NWK/HOP integration parity test:
 3. Run: ./ns3 run csr-nwk-hop-integration-smoke
 4. Expected: PASS: NWK/HOP integration parity test
 
+MAC/HOP sent-time parity test:
+1. Copy csr-hop-mac-sent-time-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-hop-mac-sent-time-smoke
+3. Run: ./ns3 run csr-hop-mac-sent-time-smoke
+4. Expected: PASS: MAC/HOP sent-time parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

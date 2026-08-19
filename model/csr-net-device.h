@@ -770,6 +770,19 @@ CsrMacCore::DoTx ()
   // Send via device
   m_dev->SendToPeer (e.frame, dest, rateKbps, pt, slot, ackable);
 
+  m_transmittedFrameCount++;
+
+  // OPNET br_mac sends br_Mac_Hop_Inst only after the frame actually enters
+  // the transmitter.  HOP uses that sent instant, rather than its enqueue
+  // time, as the origin for ACK timeout and retransmission processing.
+  if (ackable && !m_txSentCallback.IsNull ())
+    {
+      m_txSentCallback (
+        dest,
+        th.GetSeq (),
+        Simulator::Now ());
+    }
+
   // Now we can remove the queue entry
   m_queue.erase (m_queue.begin ());
 
