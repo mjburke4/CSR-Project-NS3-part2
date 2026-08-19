@@ -17,4 +17,10 @@ Cumulative ACK/DACK smoke test:
 2. Build: ./ns3 build csr-ack-window-smoke
 3. Run: ./ns3 run csr-ack-window-smoke
 
+NWK/HOP integration parity test:
+1. Copy csr-nwk-hop-integration-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-nwk-hop-integration-smoke
+3. Run: ./ns3 run csr-nwk-hop-integration-smoke
+4. Expected: PASS: NWK/HOP integration parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

@@ -251,13 +251,10 @@ main (int argc, char *argv[])
   //net0->StartDiscovery (Seconds (10.0), Seconds (30.0));
   //net1->StartDiscovery (Seconds (10.0), Seconds (30.0));
   //net2->StartDiscovery (Seconds (10.0), Seconds (30.0));
-  // Route propagation sequence:
-  //
-  // 1) Node 0 sends to 3 and gets stuck with no route.
-  // 2) Node 2 advertises route to 3.
-  // 3) Node 1 learns route to 3 via 2.
-  // 4) Node 1 advertises route to 3.
-  // 5) Node 0 learns route to 3 via 1 and drains queue.
+  // Node 3 is configured as an Ordinary leaf below.  Legacy OPNET routing
+  // does not advertise Ordinary destinations as multi-hop routes.  Traffic
+  // from node 0 to node 3 therefore remains queued until a usable reverse
+  // path exists; this is intentional parity behavior, not a HOP stall.
 
   // Use a short delay/window for the regression test.
   // Production defaults remain the legacy 10 s / 30 s.
@@ -910,8 +907,10 @@ Simulator::Schedule (
 
   // Traffic pattern similar to your earlier log
 
-  // Flow-control parity regression: four packets make NSDP.count == 4.
-  // NSDP must not gate NWK release; HOP capacity drains the burst.
+  // Ordinary-destination routing regression: four packets make
+  // NSDP.count == 4, but node 3 is not advertised beyond its direct neighbor.
+  // The deterministic NWK/HOP burst-and-drain check lives in
+  // csr-nwk-hop-integration-smoke.cc with an already-converged Routable path.
   Simulator::Schedule (Seconds (1.0), [net0]() {
     for (int i = 0; i < 4; ++i)
       {

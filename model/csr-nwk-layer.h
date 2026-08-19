@@ -96,6 +96,17 @@ public:
       }
   }
 
+  uint32_t GetNwkQueueSize () const
+  {
+    return static_cast<uint32_t> (m_nwkQueue.size ());
+  }
+
+  uint32_t GetNsdpCount (uint16_t src, uint16_t dst) const
+  {
+    auto it = m_nsdp.find (std::make_pair (src, dst));
+    return it == m_nsdp.end () ? 0 : it->second.count;
+  }
+
   void
   SendNoPath (uint16_t neighbor, uint16_t unreachableDest)
   {
