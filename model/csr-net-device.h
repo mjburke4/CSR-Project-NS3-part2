@@ -513,6 +513,92 @@ std::cout << "[MAC " << m_id
 // CsrMacCore implementation
 // ------------------------------------------------------------
 
+bool
+CsrMacCore::HasPendingFrame () const
+{
+  return !m_ackQueue.empty () || !m_queue.empty ();
+}
+
+void
+CsrMacCore::EnqueueAckFrame (Ptr<Packet> frame,
+                             const CsrHeader &header)
+{
+  uint16_t dest = header.GetDst ();
+  uint16_t seq = header.GetSeq ();
+
+  if (header.HasAckWindow ())
+    {
+      // OPNET replaces the first cumulative ACK/DACK entry for a destination
+      // and restarts its transmission count.  It does this even when the ACK
+      // queue is already at its capacity.
+      for (auto &entry : m_ackQueue)
+        {
+          if (entry.dest == dest)
+            {
+              entry.frame = frame;
+              entry.seq = seq;
+              entry.hasWindow = true;
+              entry.txCount = 0;
+
+              std::cout << "[MAC " << m_nodeId
+                        << "] Update cumulative ACK queue entry"
+                        << " dest=" << dest
+                        << " baseSeq=" << seq
+                        << " txCount=0"
+                        << std::endl;
+
+              MaybeScheduleNextTx ();
+              return;
+            }
+        }
+    }
+  else
+    {
+      // Exact ACKs are retained only once for a destination/sequence pair.
+      for (const auto &entry : m_ackQueue)
+        {
+          if (entry.dest == dest && entry.seq == seq)
+            {
+              std::cout << "[MAC " << m_nodeId
+                        << "] Ignore duplicate exact ACK"
+                        << " dest=" << dest
+                        << " seq=" << seq
+                        << std::endl;
+              return;
+            }
+        }
+    }
+
+  if (m_ackQueue.size () >= ACK_QUEUE_SIZE)
+    {
+      std::cout << "[MAC " << m_nodeId
+                << "] Drop ACK: OPNET ACK queue limit reached"
+                << " dest=" << dest
+                << " seq=" << seq
+                << " limit=" << ACK_QUEUE_SIZE
+                << std::endl;
+      return;
+    }
+
+  AckQueueEntry entry;
+  entry.frame = frame;
+  entry.dest = dest;
+  entry.seq = seq;
+  entry.hasWindow = header.HasAckWindow ();
+  entry.txCount = 0;
+  m_ackQueue.push_back (entry);
+
+  std::cout << "[MAC " << m_nodeId
+            << "] Enqueue ACK"
+            << " dest=" << dest
+            << " seq=" << seq
+            << " window=" << (entry.hasWindow ? 1 : 0)
+            << " ack_queue_size=" << m_ackQueue.size ()
+            << std::endl;
+
+  MaybeScheduleNextTx ();
+}
+
 void
 CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
                             uint16_t dest,
@@ -522,6 +608,16 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
   if (!m_slotTickEnabled)
     {
       StartSlotTick (m_slotTickPeriod);
+    }
+
+  CsrHeader header;
+  if (frame != nullptr && frame->PeekHeader (header) &&
+      (header.IsAck () || header.IsDack () ||
+       header.GetType () == CSR_PKT_ACK ||
+       header.GetType () == CSR_PKT_DACK))
+    {
+      EnqueueAckFrame (frame, header);
+      return;
     }
 
   TxQueueEntry e;
@@ -615,7 +711,7 @@ CsrMacCore::MaybeScheduleNextTx ()
       return;
     }
 
-  if (m_queue.empty ())
+  if (!HasPendingFrame ())
     {
       return;
     }
@@ -623,7 +719,10 @@ CsrMacCore::MaybeScheduleNextTx ()
   // OPNET prep_tx(): a newly active transmitter waits through the 300-ms
   // radio holdoff, then decrements its selected counter once per 13-ms slot.
   // Transmission occurs only after the counter moves from zero to -1.
-  int slot = PickTxSlot (m_queue.front ().dest);
+  uint16_t dest = !m_ackQueue.empty ()
+    ? m_ackQueue.front ().dest
+    : m_queue.front ().dest;
+  int slot = PickTxSlot (dest);
   ScheduleTxOpportunity (slot, Seconds (0.0), true);
 }
 
@@ -711,14 +810,30 @@ CsrMacCore::ChoosePreambleForDest (uint16_t dest)
 void
 CsrMacCore::DoTx ()
 {
-  if (m_queue.empty () || m_dev == nullptr)
+  if (!HasPendingFrame () || m_dev == nullptr)
     {
       m_scheduledTxSlot = -1;
       return;
     }
 
-  // Reference to front; do NOT pop/erase until we actually send
-  TxQueueEntry &e = m_queue.front ();
+  // OPNET always services the separate ACK queue before its normal Tx queue.
+  // ACK entries remain stored while a copy is transmitted repeatedly.
+  bool sendingAck = !m_ackQueue.empty ();
+  TxQueueEntry e;
+
+  if (sendingAck)
+    {
+      const AckQueueEntry &ackEntry = m_ackQueue.front ();
+      e.frame = ackEntry.frame->Copy ();
+      e.dest = ackEntry.dest;
+      e.dscp = 0;
+      e.ackable = false;
+    }
+  else
+    {
+      e = m_queue.front ();
+      e.frame = e.frame->Copy ();
+    }
 
   // Peek header for dest / ackable / type (informational)
   CsrHeader hdr;
@@ -841,11 +956,36 @@ CsrMacCore::DoTx ()
         Simulator::Now ());
     }
 
-  // Now we can remove the queue entry
-  m_queue.erase (m_queue.begin ());
+  if (sendingAck)
+    {
+      AckQueueEntry &ackEntry = m_ackQueue.front ();
+      ackEntry.txCount++;
+
+      std::cout << "[MAC " << m_nodeId
+                << "] ACK transmitted"
+                << " dest=" << ackEntry.dest
+                << " seq=" << ackEntry.seq
+                << " txCount=" << ackEntry.txCount
+                << "/" << (MAX_ACK_RESEND + 1)
+                << std::endl;
+
+      if (ackEntry.txCount >= MAX_ACK_RESEND + 1)
+        {
+          std::cout << "[MAC " << m_nodeId
+                    << "] Remove ACK after OPNET resend limit"
+                    << " dest=" << ackEntry.dest
+                    << " seq=" << ackEntry.seq
+                    << std::endl;
+          m_ackQueue.erase (m_ackQueue.begin ());
+        }
+    }
+  else
+    {
+      m_queue.erase (m_queue.begin ());
+    }
 
   // Schedule next TX if any
-  if (!m_queue.empty ())
+  if (HasPendingFrame ())
     {
       // Time-slot counters pause while OPNET MAC is in Tx_st.  Resume the
       // advertised reservation countdown only after this frame finishes.

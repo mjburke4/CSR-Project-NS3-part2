@@ -11,6 +11,8 @@ class CsrMacCore
   {}
 
   static constexpr double TS_HOLDOFF_SECONDS = 0.3;
+  static constexpr uint32_t ACK_QUEUE_SIZE = 256;
+  static constexpr uint32_t MAX_ACK_RESEND = 4;
 
   void SetNodeId (uint16_t id)        { m_nodeId = id; }
   void SetDevice (CsrNetDevice *dev)  { m_dev = dev; }
@@ -143,7 +145,18 @@ class CsrMacCore
 
   uint32_t GetQueuedFrameCount () const
   {
+    return static_cast<uint32_t> (
+      m_queue.size () + m_ackQueue.size ());
+  }
+
+  uint32_t GetDataQueuedFrameCount () const
+  {
     return static_cast<uint32_t> (m_queue.size ());
+  }
+
+  uint32_t GetAckQueuedFrameCount () const
+  {
+    return static_cast<uint32_t> (m_ackQueue.size ());
   }
 
   uint64_t GetTransmittedFrameCount () const
@@ -280,6 +293,15 @@ private:
     bool        ackable;
   };
 
+  struct AckQueueEntry
+  {
+    Ptr<Packet> frame;
+    uint16_t    dest;
+    uint16_t    seq;
+    bool        hasWindow;
+    uint32_t    txCount;
+  };
+
   EventId   m_helloEvent;
   Time      m_helloInterval { Seconds (2.0) };
   uint16_t  m_helloSeq { 0 };
@@ -293,6 +315,8 @@ private:
 
 
   void MaybeScheduleNextTx ();
+  void EnqueueAckFrame (Ptr<Packet> frame, const CsrHeader &header);
+  bool HasPendingFrame () const;
   void ScheduleTxOpportunity (int slot, Time notBefore, bool initialHoldoff);
   void FinishTx ();
   void DoTx ();
@@ -304,6 +328,7 @@ private:
   uint16_t                            m_nodeId;
   CsrNetDevice*                       m_dev;
   std::vector<TxQueueEntry>           m_queue;
+  std::vector<AckQueueEntry>          m_ackQueue;
   EventId                             m_txEvent;
   Callback<void, Ptr<Packet>, double, double>  m_rxCallback;
   Callback<void, uint16_t, uint16_t, Time>     m_txSentCallback;
