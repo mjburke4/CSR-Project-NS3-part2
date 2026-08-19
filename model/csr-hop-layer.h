@@ -17,7 +17,7 @@ public:
     : m_mac (nullptr),
       m_nodeId (0),
       m_resendTime (Seconds (2.0)),
-      m_maxNumResend (3)
+      m_maxNumResend (2)
   {}
 
   void SetMac (CsrMacCore *mac)   { m_mac = mac; }
@@ -229,6 +229,7 @@ private:
 
   void HandleDataFrame (const CsrHeader &hdr, Ptr<Packet> payload, bool firstReception);
   void HandleAckFrame  (const CsrHeader &hdr);
+  void HandleAckWindow (const CsrHeader &hdr);
 
   void HandleDackFrame (const CsrHeader &hdr);
   void ScheduleDackCheck ();
@@ -242,7 +243,8 @@ private:
   void ScheduleResendCheck ();
   void CheckResend ();
   ResendEntry* FindResendEntry (uint16_t dst, uint16_t seq);
-  bool CheckReceivedSeq (uint16_t src, uint16_t seq);
+  bool CheckReceivedSeq (uint16_t src, uint16_t seq, bool dataTraffic);
+  void MarkDataDack (uint16_t src, uint16_t seq);
   static int32_t SeqDiff (uint16_t seq1, uint16_t seq2);
 
   Callback<void, uint16_t, uint16_t> m_nsdpDecrCb;
@@ -356,13 +358,18 @@ private:
   struct RxSeqState
   {
     int32_t  highest { -1 };
-    uint64_t bitmap  { 0 };
+    uint64_t ackBitmap  { 0 };
+    uint64_t dackBitmap { 0 };
   };
 
 
   std::map<uint16_t, FlowCtrlEntry> m_flowCtrlByDest;
 
-  std::map<uint16_t, RxSeqState>                m_rxStateBySrc;
+  // DATA ACK windows must not include reliable routing/control sequence
+  // numbers.  The legacy model maintains independent receive state for these
+  // paths, so keep duplicate suppression separate here as well.
+  std::map<uint16_t, RxSeqState>                m_rxDataStateBySrc;
+  std::map<uint16_t, RxSeqState>                m_rxControlStateBySrc;
 
   Callback<void,
           uint16_t,
@@ -621,12 +628,20 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
                 << " from " << hdr.GetSrc ()
                 << " seq=" << hdr.GetSeq () << std::endl;
 
-      if (hdr.IsDack ())
+      if (hdr.HasAckWindow ())
         {
+          HandleAckWindow (hdr);
+        }
+      else if (hdr.IsDack ())
+        {
+          m_mac->CancelAcknowledgedFrames (
+            hdr.GetSrc (), hdr.GetSeq (), 0, 1);
           HandleDackFrame (hdr);
         }
       else
         {
+          m_mac->CancelAcknowledgedFrames (
+            hdr.GetSrc (), hdr.GetSeq (), 1, 0);
           HandleAckFrame (hdr);
         }
       return;
@@ -640,7 +655,7 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
         }
 
       bool firstReception =
-        CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq ());
+        CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq (), false);
 
       std::cout << "[HOP " << m_nodeId
                 << "] RX reliable NeighborCheck from "
@@ -700,7 +715,8 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
       bool firstReception =
         CheckReceivedSeq (
           hdr.GetSrc (),
-          hdr.GetSeq ());
+          hdr.GetSeq (),
+          false);
 
       std::cout << "[HOP " << m_nodeId
                 << "] RX reliable RoutingControl from "
@@ -758,7 +774,8 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
       return;
     }
   // Duplicate suppression: check if this (src, seq) has been seen before
-  bool firstReception = CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq ());
+  bool firstReception =
+    CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq (), true);
 
   HandleDataFrame (hdr, frame, firstReception);
 }
@@ -799,6 +816,13 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
 
   if (ackable)
   {
+    if (sendDack)
+      {
+        MarkDataDack (src, hdr.GetSeq ());
+      }
+
+    const RxSeqState &rxState = m_rxDataStateBySrc[src];
+
     CsrHeader ackHdr (m_nodeId, src, hdr.GetSeq (),
                         /*dscp*/ 7,
                         /*ackable*/ false,
@@ -808,12 +832,57 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     ackHdr.SetType (sendDack ? CSR_PKT_DACK : CSR_PKT_ACK);
     ackHdr.SetDestType (CSR_DEST_UNICAST);
     ackHdr.SetSpeedKey (8);  // control always uses robust rate key
+    ackHdr.SetHasAckWindow (true);
+    ackHdr.SetAckBitmap (rxState.ackBitmap & ~rxState.dackBitmap);
+    ackHdr.SetDackBitmap (rxState.dackBitmap);
 
 
     Ptr<Packet> ackPkt = Create<Packet> ();
     ackPkt->AddHeader (ackHdr);
      m_mac->EnqueueTxFrame (ackPkt, src, /*dscp*/ 7, /*ackable*/ false);
   }
+}
+
+void
+CsrHopLayer::HandleAckWindow (const CsrHeader &hdr)
+{
+  uint16_t src = hdr.GetSrc ();
+  uint16_t baseSeq = hdr.GetSeq ();
+
+  // DACK wins if a malformed or stale peer marks a sequence in both fields.
+  uint64_t dackBitmap = hdr.GetDackBitmap ();
+  uint64_t ackBitmap = hdr.GetAckBitmap () & ~dackBitmap;
+
+  m_mac->CancelAcknowledgedFrames (
+    src, baseSeq, ackBitmap, dackBitmap);
+
+  for (uint32_t bit = 0; bit < 64; ++bit)
+    {
+      uint64_t mask = 1ULL << bit;
+      bool isDack = (dackBitmap & mask) != 0;
+
+      if (!isDack && (ackBitmap & mask) == 0)
+        {
+          continue;
+        }
+
+      CsrHeader completed = hdr;
+      completed.SetSeq (static_cast<uint16_t> (baseSeq - bit));
+      completed.SetHasAckWindow (false);
+      completed.SetAckBitmap (0);
+      completed.SetDackBitmap (0);
+      completed.SetIsDack (isDack);
+      completed.SetType (isDack ? CSR_PKT_DACK : CSR_PKT_ACK);
+
+      if (isDack)
+        {
+          HandleDackFrame (completed);
+        }
+      else
+        {
+          HandleAckFrame (completed);
+        }
+    }
 }
 
 void
@@ -1484,15 +1553,21 @@ CsrHopLayer::SeqDiff (uint16_t seq1, uint16_t seq2)
 }
 
 bool
-CsrHopLayer::CheckReceivedSeq (uint16_t src, uint16_t seq)
+CsrHopLayer::CheckReceivedSeq (uint16_t src,
+                               uint16_t seq,
+                               bool dataTraffic)
 {
-  RxSeqState &state = m_rxStateBySrc[src];
+  std::map<uint16_t, RxSeqState> &states =
+    dataTraffic ? m_rxDataStateBySrc : m_rxControlStateBySrc;
+
+  RxSeqState &state = states[src];
 
   // First packet ever from this src
   if (state.highest < 0)
     {
       state.highest = static_cast<int32_t> (seq);
-      state.bitmap  = 0x1ULL; // mark this seq as seen
+      state.ackBitmap = 0x1ULL;
+      state.dackBitmap = 0;
       return true;
     }
 
@@ -1504,12 +1579,14 @@ CsrHopLayer::CheckReceivedSeq (uint16_t src, uint16_t seq)
       // New highest sequence number
       if (diff >= 64)
         {
-          // Jumped outside our 64-packet window; reset bitmap
-          state.bitmap = 0x1ULL;
+          // Jumped outside our 64-packet window; reset both registers.
+          state.ackBitmap = 0x1ULL;
+          state.dackBitmap = 0;
         }
       else
         {
-          state.bitmap = (state.bitmap << diff) | 0x1ULL;
+          state.ackBitmap = (state.ackBitmap << diff) | 0x1ULL;
+          state.dackBitmap <<= diff;
         }
       state.highest = static_cast<int32_t> (seq);
       return true;
@@ -1525,7 +1602,7 @@ CsrHopLayer::CheckReceivedSeq (uint16_t src, uint16_t seq)
         }
 
       uint64_t mask = (0x1ULL << idx);
-      if (state.bitmap & mask)
+      if ((state.ackBitmap | state.dackBitmap) & mask)
         {
           // Already seen; duplicate
           return false;
@@ -1533,10 +1610,32 @@ CsrHopLayer::CheckReceivedSeq (uint16_t src, uint16_t seq)
       else
         {
           // Not seen yet within window; mark it
-          state.bitmap |= mask;
+          state.ackBitmap |= mask;
           return true;
         }
     }
+}
+
+void
+CsrHopLayer::MarkDataDack (uint16_t src, uint16_t seq)
+{
+  auto stateIt = m_rxDataStateBySrc.find (src);
+  if (stateIt == m_rxDataStateBySrc.end () || stateIt->second.highest < 0)
+    {
+      return;
+    }
+
+  RxSeqState &state = stateIt->second;
+  int32_t diff = SeqDiff (static_cast<uint16_t> (state.highest), seq);
+
+  if (diff > 0 || -diff >= 64)
+    {
+      return;
+    }
+
+  uint64_t mask = 1ULL << static_cast<uint32_t> (-diff);
+  state.ackBitmap &= ~mask;
+  state.dackBitmap |= mask;
 }
 
 // ------------------------------------------------------------

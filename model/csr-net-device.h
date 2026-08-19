@@ -543,6 +543,58 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
   MaybeScheduleNextTx ();
 }
 
+uint32_t
+CsrMacCore::CancelAcknowledgedFrames (uint16_t neighbor,
+                                      uint16_t baseSeq,
+                                      uint64_t ackBitmap,
+                                      uint64_t dackBitmap)
+{
+  // DACK is also terminal at MAC: HOP moves that packet to its delayed DACK
+  // list, so another queued over-the-air copy must not be transmitted.
+  uint64_t completedBitmap = ackBitmap | dackBitmap;
+  uint32_t removed = 0;
+
+  for (auto it = m_queue.begin (); it != m_queue.end (); )
+    {
+      if (!it->ackable || it->dest != neighbor || it->frame == nullptr)
+        {
+          ++it;
+          continue;
+        }
+
+      CsrHeader queuedHeader;
+      if (!it->frame->PeekHeader (queuedHeader))
+        {
+          ++it;
+          continue;
+        }
+
+      // Unsigned subtraction gives the sequence's age modulo 2^16, matching
+      // the 16-bit legacy sequence space even across wraparound.
+      uint16_t age = static_cast<uint16_t> (
+        baseSeq - queuedHeader.GetSeq ());
+
+      if (age < 64 && (completedBitmap & (1ULL << age)) != 0)
+        {
+          std::cout << "[MAC " << m_nodeId
+                    << "] Cancel queued acknowledged frame"
+                    << " neighbor=" << neighbor
+                    << " seq=" << queuedHeader.GetSeq ()
+                    << " baseSeq=" << baseSeq
+                    << " windowIndex=" << age
+                    << std::endl;
+
+          it = m_queue.erase (it);
+          removed++;
+          continue;
+        }
+
+      ++it;
+    }
+
+  return removed;
+}
+
 void
 CsrMacCore::MaybeScheduleNextTx ()
 {
