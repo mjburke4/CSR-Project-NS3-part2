@@ -41,4 +41,10 @@ OPNET MAC slot scheduling parity test:
 3. Run: ./ns3 run csr-mac-slot-parity-smoke
 4. Expected: PASS: OPNET MAC slot scheduling parity test
 
+OPNET MAC ACK queue parity test:
+1. Copy csr-mac-ack-queue-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-mac-ack-queue-smoke
+3. Run: ./ns3 run csr-mac-ack-queue-smoke
+4. Expected: PASS: OPNET MAC ACK queue parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.
