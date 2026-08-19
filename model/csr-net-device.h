@@ -101,6 +101,12 @@ public:
                    int slot,
                    bool ackable);
 
+  Time SendFramesToPeers (const std::vector<Ptr<Packet>> &frames,
+                          int rateKbps,
+                          PreambleType preamble,
+                          int slot,
+                          bool ackable);
+
 private:
   uint16_t                       m_id {0};
   CsrMacCore                     m_mac;
@@ -323,8 +329,35 @@ CsrNetDevice::SendToPeer (Ptr<Packet> frame,
                           int slot,
                           bool ackable)
 {
+  std::vector<Ptr<Packet>> frames;
+  frames.push_back (frame);
+  return SendFramesToPeers (frames,
+                            rateKbps,
+                            preamble,
+                            slot,
+                            ackable);
+}
 
-  double sizeBits  = frame->GetSize () * 8.0;
+Time
+CsrNetDevice::SendFramesToPeers (
+  const std::vector<Ptr<Packet>> &frames,
+  int rateKbps,
+  PreambleType preamble,
+  int slot,
+  bool ackable)
+{
+  NS_ASSERT_MSG (!frames.empty (), "cannot transmit an empty CSR aggregate");
+
+  uint32_t payloadBytes = 0;
+  std::vector<Ptr<Packet>> frameCopies;
+  frameCopies.reserve (frames.size ());
+  for (const auto &segment : frames)
+    {
+      payloadBytes += segment->GetSize ();
+      frameCopies.push_back (segment->Copy ());
+    }
+
+  double sizeBits  = payloadBytes * 8.0;
   double rbps      = CsrRateKeyToBps (rateKbps);   // exact CSNW rate from Table 1
   //double duration  = sizeBits / rbps;
   // Simple preamble timing model (we will refine later)
@@ -336,14 +369,15 @@ CsrNetDevice::SendToPeer (Ptr<Packet> frame,
 
   // For log: peek header
   CsrHeader hdr;
-  frame->PeekHeader (hdr);
+  frameCopies.front ()->PeekHeader (hdr);
 
   std::cout   << "... type=" << unsigned(hdr.GetType())
               << " speedKey=" << unsigned(hdr.GetSpeedKey())
               << "[t=" << txTime << "] TX from node " << m_id
-              << " to dest " << dest
+              << " to dest " << hdr.GetDst ()
               << " seq " << hdr.GetSeq ()
-              << " size " << frame->GetSize () << " bytes"
+              << " size " << payloadBytes << " bytes"
+              << " segments " << frameCopies.size ()
               << " at slot " << slot
               << " rate " << rateKbps << " kbps"
               << " (" << rbps << " bps)"
@@ -352,7 +386,6 @@ CsrNetDevice::SendToPeer (Ptr<Packet> frame,
               << std::endl;
 
   Ptr<CsrNetDevice> self = this;
-  Ptr<Packet> frameCopy = frame->Copy ();
 
   /*if (ackable)
   {
@@ -377,42 +410,43 @@ std::cout << "[MAC " << m_id
 
   // Peek header once to know src/dst/seq
   CsrHeader hdrOnTx;
-  frameCopy->PeekHeader (hdrOnTx);
+  frameCopies.front ()->PeekHeader (hdrOnTx);
   uint16_t txId   = hdrOnTx.GetSrc ();
-  uint16_t destId = hdrOnTx.GetDst ();
   uint16_t seq    = hdrOnTx.GetSeq ();
 
   Simulator::Schedule (Seconds (propDelay + duration),
-                     [self, frameCopy, rateKbps, preamble, slot, ackable,
-                      txId, destId, seq, txTime, propDelay, duration]() {
+                     [self, frameCopies, rateKbps, preamble, slot, ackable,
+                      txId, seq, txTime, propDelay, duration, payloadBytes]() {
     if (self->m_peers.empty ())
       {
         return;
       }
 
     double tRx = Simulator::Now ().GetSeconds ();
-    uint32_t packetBits = frameCopy->GetSize () * 8;
+    uint32_t packetBits = payloadBytes * 8;
 
     // For each peer, deliver if it is the intended dest
     for (auto const &peer : self->m_peers)
       {
         if (peer == nullptr) { continue; }
 
-        // Unicast: only the peer whose ID matches destId should receive
-        /*if (peer->GetId () != destId)
+        bool receivesFrame = false;
+        bool ackableForPeer = false;
+        for (const auto &segment : frameCopies)
           {
-            continue;
-          }*/
-        
-        bool isBcast = (destId == CSR_BROADCAST_ID);
-        if (!isBcast && peer->GetId() != destId)
-          {
-            continue;
+            CsrHeader segmentHeader;
+            segment->PeekHeader (segmentHeader);
+            bool matches = segmentHeader.GetDst () == CSR_BROADCAST_ID ||
+                           segmentHeader.GetDst () == peer->GetId ();
+            if (matches && peer->GetId () != txId)
+              {
+                receivesFrame = true;
+                ackableForPeer = ackableForPeer ||
+                                 segmentHeader.IsAckable ();
+              }
           }
-        if (isBcast && peer->GetId() == txId)
-          {
-            continue; // don't deliver to self
-          }
+
+        if (!receivesFrame) { continue; }
 
         double rxStart = txTime + propDelay;
         double rxEnd   = rxStart + duration;
@@ -472,11 +506,11 @@ std::cout << "[MAC " << m_id
                   << " pathloss " << d.pathlossDb << " dB"
                   << " snr " << d.snrDb << " dB"
                   << " (slot " << slot
-                  << ", len " << frameCopy->GetSize () << "B"
+                  << ", len " << payloadBytes << "B"
                   << ", ackable=" << (ackable ? 1 : 0) << ")"
                   << std::endl;
 
-        if (ackable)
+        if (ackableForPeer)
           {
             // We just decoded a unicast that needs an ACK.
             // Stay awake long enough to send ACK + any immediate follow-on.
@@ -501,8 +535,17 @@ std::cout << "[MAC " << m_id
         peer->m_mac.NoteNeighborReservedSlot (txId, slot);
 
         // Deliver up into peer MAC (each peer needs its own copy)
-        Ptr<Packet> peerCopy = frameCopy->Copy ();
-        peer->m_mac.DeliverRxFrameToUp (peerCopy, d.pathlossDb, d.snrDb);
+        for (const auto &segment : frameCopies)
+          {
+            CsrHeader segmentHeader;
+            segment->PeekHeader (segmentHeader);
+            if (segmentHeader.GetDst () == CSR_BROADCAST_ID ||
+                segmentHeader.GetDst () == peer->GetId ())
+              {
+                peer->m_mac.DeliverRxFrameToUp (
+                  segment->Copy (), d.pathlossDb, d.snrDb);
+              }
+          }
       }
   });
 
@@ -807,6 +850,46 @@ CsrMacCore::ChoosePreambleForDest (uint16_t dest)
     }
 }
 
+int
+CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
+                                   uint16_t dest,
+                                   bool ackable) const
+{
+  if (!ackable)
+    {
+      return 8;
+    }
+
+  return SelectRateByPerTarget (dest,
+                                frame->GetSize () * 8,
+                                0.50);
+}
+
+uint32_t
+CsrMacCore::GetConcatByteLimit (int rateKbps) const
+{
+  switch (rateKbps)
+    {
+    case 8:   return 256;
+    case 16:  return 512;
+    case 32:  return 1024;
+    case 64:  return 2048;
+    case 128: return 4096;
+    default:  return 0;
+    }
+}
+
+bool
+CsrMacCore::FitsConcatFrame (Ptr<Packet> frame,
+                             int frameRateKbps,
+                             uint32_t byteCount,
+                             int currentRateKbps) const
+{
+  int aggregateRate = std::min (frameRateKbps, currentRateKbps);
+  uint32_t limit = GetConcatByteLimit (aggregateRate);
+  return limit > 0 && byteCount + frame->GetSize () < limit;
+}
+
 void
 CsrMacCore::DoTx ()
 {
@@ -816,35 +899,120 @@ CsrMacCore::DoTx ()
       return;
     }
 
-  // OPNET always services the separate ACK queue before its normal Tx queue.
-  // ACK entries remain stored while a copy is transmitted repeatedly.
-  bool sendingAck = !m_ackQueue.empty ();
-  TxQueueEntry e;
+  std::vector<SelectedTxFrame> selected;
+  uint32_t byteCount = 0;
+  int aggregateRateKbps = 128;
+  bool packingStopped = false;
+  bool concatenate = m_ackQueue.size () + m_queue.size () > 1;
 
-  if (sendingAck)
+  if (concatenate)
     {
-      const AckQueueEntry &ackEntry = m_ackQueue.front ();
-      e.frame = ackEntry.frame->Copy ();
-      e.dest = ackEntry.dest;
-      e.dscp = 0;
-      e.ackable = false;
+      // OPNET scans the ACK queue first and stops at the first entry that
+      // cannot fit at the slowest rate selected so far.
+      for (uint32_t i = 0;
+           i < m_ackQueue.size () && !packingStopped;
+           ++i)
+        {
+          const AckQueueEntry &entry = m_ackQueue[i];
+          int rate = SelectQueuedFrameRate (entry.frame,
+                                            entry.dest,
+                                            false);
+          if (!FitsConcatFrame (entry.frame,
+                                rate,
+                                byteCount,
+                                aggregateRateKbps))
+            {
+              packingStopped = true;
+              break;
+            }
+
+          aggregateRateKbps = std::min (aggregateRateKbps, rate);
+          byteCount += entry.frame->GetSize ();
+          selected.push_back ({entry.frame->Copy (),
+                               entry.dest,
+                               false,
+                               true,
+                               i,
+                               rate});
+        }
+
+      // Data is removed strictly from the priority queue head.  A non-fitting
+      // head blocks every later entry, exactly as in the legacy segmentation
+      // loop.  The 16-segment stop is checked only after adding data.
+      for (uint32_t i = 0;
+           i < m_queue.size () && !packingStopped;
+           ++i)
+        {
+          const TxQueueEntry &entry = m_queue[i];
+          int rate = SelectQueuedFrameRate (entry.frame,
+                                            entry.dest,
+                                            entry.ackable);
+          if (!FitsConcatFrame (entry.frame,
+                                rate,
+                                byteCount,
+                                aggregateRateKbps))
+            {
+              packingStopped = true;
+              break;
+            }
+
+          aggregateRateKbps = std::min (aggregateRateKbps, rate);
+          byteCount += entry.frame->GetSize ();
+          selected.push_back ({entry.frame->Copy (),
+                               entry.dest,
+                               entry.ackable,
+                               false,
+                               i,
+                               rate});
+
+          if (selected.size () >= MAX_CONCAT_SEGMENTS)
+            {
+              packingStopped = true;
+            }
+        }
+    }
+  else if (!m_ackQueue.empty ())
+    {
+      const AckQueueEntry &entry = m_ackQueue.front ();
+      aggregateRateKbps = SelectQueuedFrameRate (entry.frame,
+                                                  entry.dest,
+                                                  false);
+      byteCount = entry.frame->GetSize ();
+      selected.push_back ({entry.frame->Copy (),
+                           entry.dest,
+                           false,
+                           true,
+                           0,
+                           aggregateRateKbps});
     }
   else
     {
-      e = m_queue.front ();
-      e.frame = e.frame->Copy ();
+      const TxQueueEntry &entry = m_queue.front ();
+      aggregateRateKbps = SelectQueuedFrameRate (entry.frame,
+                                                  entry.dest,
+                                                  entry.ackable);
+      byteCount = entry.frame->GetSize ();
+      selected.push_back ({entry.frame->Copy (),
+                           entry.dest,
+                           entry.ackable,
+                           false,
+                           0,
+                           aggregateRateKbps});
     }
 
-  // Peek header for dest / ackable / type (informational)
-  CsrHeader hdr;
-  e.frame->PeekHeader (hdr);
+  if (selected.empty ())
+    {
+      std::cout << "[MAC " << m_nodeId
+                << "] OPNET concatenation could not fit queue head"
+                << std::endl;
+      m_txEvent = Simulator::Schedule (Seconds (1.0),
+                                       &CsrMacCore::DoTx,
+                                       this);
+      return;
+    }
 
-  uint8_t  typePeek = hdr.GetType ();   // may be stale if type is inferred later
-  bool     ackable  = hdr.IsAckable ();
-  uint16_t dest     = hdr.GetDst ();
-
-  // Bits in this frame
-  uint32_t bits = e.frame->GetSize () * 8;
+  uint16_t dest = selected.front ().dest;
+  uint32_t bits = byteCount * 8;
 
   // --- Guard: do not transmit if link is hopeless even at most robust rate ---
   const CsrPhyModel& phy = m_dev->GetPhy ();
@@ -873,57 +1041,43 @@ CsrMacCore::DoTx ()
       return;
     }
 
-  // Rate selection: keep control more robust
-  double targetPer = 0.50;
-  bool isAckOrControl = (!ackable); // in your model, ACK frames are not ackable
+  std::vector<Ptr<Packet>> wireFrames;
+  wireFrames.reserve (selected.size ());
+  bool anyAckable = false;
+  PreambleType pt = PREAMBLE_SHORT;
 
-  int rateKbps = 0;
-  if (isAckOrControl)
+  for (auto &entry : selected)
     {
-      rateKbps = 8;  // robust control rate (tune later)
-    }
-  else
-    {
-      rateKbps = SelectRateByPerTarget (dest, bits, targetPer);
-    }
+      CsrHeader header;
+      entry.frame->RemoveHeader (header);
+      header.SetSpeedKey (aggregateRateKbps);
+      if (header.GetType () == CSR_PKT_DATA ||
+          header.GetType () == CSR_PKT_ACK ||
+          header.GetType () == CSR_PKT_DACK)
+        {
+          header.SetType (header.IsAck ()
+                            ? CSR_PKT_ACK
+                            : (header.IsDack ()
+                                 ? CSR_PKT_DACK
+                                 : CSR_PKT_DATA));
+        }
+      header.SetDestType (entry.dest == CSR_BROADCAST_ID
+                            ? CSR_DEST_BROADCAST
+                            : CSR_DEST_UNICAST);
+      entry.frame->AddHeader (header);
+      wireFrames.push_back (entry.frame);
+      anyAckable = anyAckable || entry.ackable;
 
-  // Remove header so we can stamp final fields (type/speedKey/destType)
-  CsrHeader th;
-  e.frame->RemoveHeader (th);
-
-  // Always stamp the chosen TX rate key
-  th.SetSpeedKey (rateKbps);
-
-  // Preserve control packet types already set (HELLO/DISCOVER/etc.)
-  // Only infer DATA/ACK/DACK for "normal" traffic.
-  if (th.GetType () == CSR_PKT_DATA || th.GetType () == CSR_PKT_ACK || th.GetType () == CSR_PKT_DACK)
-    {
-      th.SetType (th.IsAck () ? CSR_PKT_ACK : (th.IsDack () ? CSR_PKT_DACK : CSR_PKT_DATA));
-    }
-
-  // DestType should match whether we're unicasting or broadcasting
-  th.SetDestType ((dest == CSR_BROADCAST_ID) ? CSR_DEST_BROADCAST : CSR_DEST_UNICAST);
-
-  // --- PREAMBLE SELECTION (UPDATED) ---
-  // In duty-cycled operation, SHORT preamble is only safe for ACK/DACK
-  // because the peer is forced-awake during the exchange window.
-  PreambleType pt = PREAMBLE_LONG;
-
-  if (th.IsAck () || th.IsDack () || typePeek == CSR_PKT_ACK /* fallback */)
-    {
-      pt = PREAMBLE_SHORT;
-    }
-  else
-    {
-      pt = ChoosePreambleForDest (dest); // should return LONG when duty cycling enabled
+      if (!header.IsAck () && !header.IsDack () &&
+          ChoosePreambleForDest (entry.dest) == PREAMBLE_LONG)
+        {
+          pt = PREAMBLE_LONG;
+        }
     }
 
   // OPNET includes a newly selected future reservation in every OTA frame.
   // If another frame is already queued, this is also its countdown slot.
   int nextReservedSlot = PickTxSlot (dest);
-
-  // Put header back
-  e.frame->AddHeader (th);
 
   // Send via device
   std::cout << "[MAC " << m_nodeId
@@ -933,12 +1087,11 @@ CsrMacCore::DoTx ()
             << std::endl;
 
   Time txDuration =
-    m_dev->SendToPeer (e.frame,
-                       dest,
-                       rateKbps,
-                       pt,
-                       nextReservedSlot,
-                       ackable);
+    m_dev->SendFramesToPeers (wireFrames,
+                              aggregateRateKbps,
+                              pt,
+                              nextReservedSlot,
+                              anyAckable);
 
   m_txInProgress = true;
   Simulator::Schedule (txDuration, &CsrMacCore::FinishTx, this);
@@ -948,41 +1101,77 @@ CsrMacCore::DoTx ()
   // OPNET br_mac sends br_Mac_Hop_Inst only after the frame actually enters
   // the transmitter.  HOP uses that sent instant, rather than its enqueue
   // time, as the origin for ACK timeout and retransmission processing.
-  if (ackable && !m_txSentCallback.IsNull ())
+  if (!m_txSentCallback.IsNull ())
     {
-      m_txSentCallback (
-        dest,
-        th.GetSeq (),
-        Simulator::Now ());
-    }
-
-  if (sendingAck)
-    {
-      AckQueueEntry &ackEntry = m_ackQueue.front ();
-      ackEntry.txCount++;
-
-      std::cout << "[MAC " << m_nodeId
-                << "] ACK transmitted"
-                << " dest=" << ackEntry.dest
-                << " seq=" << ackEntry.seq
-                << " txCount=" << ackEntry.txCount
-                << "/" << (MAX_ACK_RESEND + 1)
-                << std::endl;
-
-      if (ackEntry.txCount >= MAX_ACK_RESEND + 1)
+      for (const auto &entry : selected)
         {
-          std::cout << "[MAC " << m_nodeId
-                    << "] Remove ACK after OPNET resend limit"
-                    << " dest=" << ackEntry.dest
-                    << " seq=" << ackEntry.seq
-                    << std::endl;
-          m_ackQueue.erase (m_ackQueue.begin ());
+          if (!entry.ackable)
+            {
+              continue;
+            }
+          CsrHeader header;
+          entry.frame->PeekHeader (header);
+          m_txSentCallback (entry.dest,
+                            header.GetSeq (),
+                            Simulator::Now ());
         }
     }
-  else
+
+  uint32_t selectedAckCount = 0;
+  uint32_t selectedDataCount = 0;
+  for (const auto &entry : selected)
     {
-      m_queue.erase (m_queue.begin ());
+      if (entry.fromAckQueue)
+        {
+          AckQueueEntry &ackEntry = m_ackQueue[entry.queueIndex];
+          ackEntry.txCount++;
+          selectedAckCount++;
+          std::cout << "[MAC " << m_nodeId
+                    << "] ACK transmitted in aggregate"
+                    << " dest=" << ackEntry.dest
+                    << " seq=" << ackEntry.seq
+                    << " txCount=" << ackEntry.txCount
+                    << "/" << (MAX_ACK_RESEND + 1)
+                    << std::endl;
+        }
+      else
+        {
+          selectedDataCount++;
+        }
     }
+
+  m_ackQueue.erase (
+    std::remove_if (
+      m_ackQueue.begin (),
+      m_ackQueue.end (),
+      [this] (const AckQueueEntry &entry) {
+        if (entry.txCount < MAX_ACK_RESEND + 1)
+          {
+            return false;
+          }
+        std::cout << "[MAC " << m_nodeId
+                  << "] Remove ACK after OPNET resend limit"
+                  << " dest=" << entry.dest
+                  << " seq=" << entry.seq
+                  << std::endl;
+        return true;
+      }),
+    m_ackQueue.end ());
+
+  if (selectedDataCount > 0)
+    {
+      m_queue.erase (m_queue.begin (),
+                     m_queue.begin () + selectedDataCount);
+    }
+
+  std::cout << "[MAC " << m_nodeId
+            << "] OPNET aggregate transmitted"
+            << " segments=" << selected.size ()
+            << " ackSegments=" << selectedAckCount
+            << " dataSegments=" << selectedDataCount
+            << " bytes=" << byteCount
+            << " rate=" << aggregateRateKbps
+            << std::endl;
 
   // Schedule next TX if any
   if (HasPendingFrame ())

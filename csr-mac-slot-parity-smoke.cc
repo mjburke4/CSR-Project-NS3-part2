@@ -71,9 +71,12 @@ void
 CheckFirstOpportunity (Ptr<CsrNetDevice> device)
 {
   Require (device->GetMac ().GetTransmittedFrameCount () == 1,
-           "first frame missed its OPNET slot opportunity");
-  Require (g_sequences.size () == 1 && g_sequences[0] == 2,
-           "higher-DSCP frame was not selected at the first opportunity");
+           "first aggregate missed its OPNET slot opportunity");
+  Require (g_sequences.size () == 2 &&
+             g_sequences[0] == 2 && g_sequences[1] == 1,
+           "aggregate did not preserve DSCP queue order");
+  Require (g_txTimes[0] == g_txTimes[1],
+           "queued DATA frames did not share one OTA transmission");
 
   // active_nodes=1 selects a free-slot ordinal in [1,18].  The first frame
   // must therefore start after 0.3 + 2*0.013 and no later than the largest
@@ -105,8 +108,8 @@ CheckReservationResumedAfterTx (Ptr<CsrNetDevice> device)
 void
 CheckFinalState (Ptr<CsrNetDevice> device)
 {
-  Require (device->GetMac ().GetTransmittedFrameCount () == 2,
-           "MAC did not transmit both queued frames");
+  Require (device->GetMac ().GetTransmittedFrameCount () == 1,
+           "MAC did not concatenate both queued frames");
   Require (device->GetMac ().GetQueuedFrameCount () == 0,
            "MAC queue did not drain after the reserved opportunity");
   Require (g_sequences.size () == 2 &&
@@ -114,11 +117,8 @@ CheckFinalState (Ptr<CsrNetDevice> device)
              g_sequences[1] == 1,
            "MAC did not preserve DSCP priority followed by FIFO service");
 
-  const double frameDuration = 0.9 + (31.0 * 8.0 / 125000.0);
-  const double secondGap = g_txTimes[1] - g_txTimes[0];
-  Require (secondGap >= frameDuration + 0.026 &&
-             secondGap <= frameDuration + 0.260,
-           "second TX did not wait for frame completion and reserved slot countdown");
+  Require (g_txTimes[0] == g_txTimes[1],
+           "concatenated frames did not report one shared sent instant");
 }
 
 } // namespace

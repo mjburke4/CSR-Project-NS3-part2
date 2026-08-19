@@ -103,8 +103,8 @@ void
 CheckInitialTransmissions (Ptr<CsrNetDevice> device,
                            Ptr<CsrHopLayer> hop)
 {
-  Require (device->GetMac ().GetTransmittedFrameCount () == 2,
-           "MAC did not transmit both initial DATA frames");
+  Require (device->GetMac ().GetTransmittedFrameCount () == 1,
+           "MAC did not concatenate both initial DATA frames");
   Require (hop->GetPendingDataCount () == 2,
            "initial DATA frames did not occupy two global HOP slots");
   Require (hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 1,
@@ -139,7 +139,7 @@ CheckBothDacksHeld (Ptr<CsrNetDevice> device,
   Require (hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 1 &&
              hop->GetOutstandingDataCount (SECOND_NEIGHBOR) == 1,
            "DACKs did not retain both per-neighbor slots");
-  Require (device->GetMac ().GetTransmittedFrameCount () == 2,
+  Require (device->GetMac ().GetTransmittedFrameCount () == 1,
            "DACKed frames were retransmitted");
   Require (g_nwkWakeups == 0,
            "NWK woke while both DACK holds were active");
@@ -157,7 +157,7 @@ CheckFirstExpiryOnly (Ptr<CsrNetDevice> device,
            "second staggered DACK was released too early");
   Require (g_nwkWakeups == 1,
            "first DACK expiry did not wake NWK exactly once");
-  Require (device->GetMac ().GetTransmittedFrameCount () == 2,
+  Require (device->GetMac ().GetTransmittedFrameCount () == 1,
            "DACKed frames were retransmitted during the hold");
 }
 
@@ -174,7 +174,7 @@ CheckFinalState (Ptr<CsrNetDevice> device,
            "staggered DACK expiries did not wake NWK once each");
   Require (g_nsdpReleases == 2,
            "DACK expiry incorrectly released NSDP a second time");
-  Require (device->GetMac ().GetTransmittedFrameCount () == 2,
+  Require (device->GetMac ().GetTransmittedFrameCount () == 1,
            "OPNET DACK behavior allowed an unexpected retransmission");
   Require (device->GetMac ().GetQueuedFrameCount () == 0,
            "MAC retained a DACKed frame");
