@@ -162,6 +162,17 @@ private:
     HOP_PENDING_MAX_THRESHOLD = 16;
 
 public:
+  uint32_t GetPendingDataCount () const
+  {
+    return m_pendingDataCount;
+  }
+
+  uint32_t GetOutstandingDataCount (uint16_t dest) const
+  {
+    auto it = m_flowCtrlByDest.find (dest);
+    return it == m_flowCtrlByDest.end () ? 0 : it->second.outstanding;
+  }
+
   bool CanAcceptDataGlobally () const
   {
     // Legacy permits one final transfer while pending_pk_count is 16,
