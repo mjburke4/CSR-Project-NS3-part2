@@ -910,9 +910,10 @@ Simulator::Schedule (
 
   // Traffic pattern similar to your earlier log
 
-  // Burst 1 at t=1 s
+  // Flow-control parity regression: four packets make NSDP.count == 4.
+  // NSDP must not gate NWK release; HOP capacity drains the burst.
   Simulator::Schedule (Seconds (1.0), [net0]() {
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 4; ++i)
       {
         uint32_t size = 100 + 20 * i;
         Ptr<Packet> payload = Create<Packet> (size);

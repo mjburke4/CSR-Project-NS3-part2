@@ -162,6 +162,14 @@ private:
     HOP_PENDING_MAX_THRESHOLD = 16;
 
 public:
+  bool CanAcceptDataGlobally () const
+  {
+    // Legacy permits one final transfer while pending_pk_count is 16,
+    // then blocks after SendData() raises the count to 17.
+    return m_pendingDataCount <=
+      HOP_PENDING_MAX_THRESHOLD;
+  }
+
   bool CanSendToHop (uint16_t dest)
   {
     FlowCtrlEntry &e = GetFlowCtrlEntry (dest);
@@ -175,8 +183,7 @@ public:
     // Therefore pending=16 may admit one final packet,
     // producing pending=17 and congestion.
     bool nodeCanSend =
-      m_pendingDataCount <=
-        HOP_PENDING_MAX_THRESHOLD;
+      CanAcceptDataGlobally ();
 
     bool canSend =
       neighborCanSend &&
