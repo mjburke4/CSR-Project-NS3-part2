@@ -467,13 +467,13 @@ public:
             &CsrNetLayer::
               NoteRoutingControlSuccess,
             this));
-              }
 
         m_hop->SetNwkQueueWakeCallback (
           MakeCallback (
             &CsrNetLayer::
               ScheduleCheckNwkQueue,
             this));
+      }
   }
 
   // Net -> App callback: payload + network source node ID
@@ -526,21 +526,6 @@ public:
     m_nwkQueue.insert (it, e);
 
     ScheduleCheckNwkQueue ();
-  }
-
-  bool CanSendForFlow (uint16_t src, uint16_t dst)
-  {
-    NsdpEntry &e = GetNsdpEntry (src, dst);
-
-    // Debug print so we can see when NSDP is gating sends
-    std::cout << "[NWK " << m_nodeId << "] CanSendForFlow "
-              << src << "->" << dst
-              << " NSDP.count=" << e.count
-              << " limit=" << e.limit
-              << " -> " << (e.count < e.limit ? "YES" : "NO")
-              << std::endl;
-
-    return e.count < e.limit;
   }
 
   void DecrementNsdp (uint16_t src, uint16_t dst)
@@ -1243,13 +1228,17 @@ private:
     uint16_t neighbor,
     uint32_t expectedSequence);
 
-  // NSDP: Network Source–Destination Pair entry
+  // Legacy FLOW_CTRL_MAX_THRESHOLD. NSDP uses this only to choose
+  // ACK versus DACK for relayed DATA; it does not gate NWK queue release.
+  static constexpr uint32_t NSDP_DACK_THRESHOLD = 16;
+
+  // NSDP: Network Source-Destination Pair entry
   struct NsdpEntry
   {
     uint16_t src;
     uint16_t dst;
     uint32_t count;
-    uint32_t limit;  // max in-flight packets allowed for this flow
+    uint32_t limit;  // DACK threshold, retained in metrics output
   };
 
   // Keyed by (src,dst)
@@ -1263,7 +1252,7 @@ private:
         e.src   = src;
         e.dst   = dst;
         e.count = 0;
-        e.limit = 4;     // you can tune this; similar magnitude to Hop threshold
+        e.limit = NSDP_DACK_THRESHOLD;
         it = m_nsdp.insert (std::make_pair (key, e)).first;
       }
     return it->second;
@@ -1280,58 +1269,64 @@ private:
 
   void CheckNwkQueue ()
   {
-    // Minimal version of check_nwk_queue():
-    // just push everything down to Hop in priority order for now.
     if (m_hop == nullptr)
       {
         return;
       }
 
-    std::cout << "[NWK " << m_nodeId << "] CheckNwkQueue: size="
-            << m_nwkQueue.size () << std::endl;
+    std::cout << "[NWK " << m_nodeId
+              << "] CheckNwkQueue: size="
+              << m_nwkQueue.size ()
+              << std::endl;
 
-    while (!m_nwkQueue.empty ())
-    {
-      NwkQueueEntry e = m_nwkQueue.front ();
+    // Legacy check_nwk_queue() scans the complete priority queue.
+    // A packet with no route or a saturated next hop does not block
+    // eligible traffic for another destination. NSDP is bookkeeping
+    // for ACK/DACK selection, not a NWK-to-HOP admission gate.
+    for (auto it = m_nwkQueue.begin ();
+         it != m_nwkQueue.end ();)
+      {
+        if (!m_hop->CanAcceptDataGlobally ())
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Global HOP DATA capacity exhausted;"
+                      << " holding "
+                      << m_nwkQueue.size ()
+                      << " queued packets"
+                      << std::endl;
+            break;
+          }
 
-      uint16_t hopDest;
-      if (!LookupNextHop (e.nwkDst, hopDest))
-        {
-          // OPNET-like behavior: if we have data but no route/next hop,
-          // trigger on-demand discovery and keep the packet queued.
-          EnsureDiscoveryForTx ();
+        uint16_t hopDest;
+        if (!LookupNextHop (it->nwkDst, hopDest))
+          {
+            EnsureDiscoveryForTx ();
 
-          std::cout << "[NWK " << m_nodeId << "] No route to nwkDst="
-                    << e.nwkDst << " -> on-demand discovery; holding packet"
-                    << std::endl;
+            std::cout << "[NWK " << m_nodeId
+                      << "] No route to nwkDst="
+                      << it->nwkDst
+                      << " -> on-demand discovery; holding packet"
+                      << std::endl;
 
-          // Do NOT pop; stop draining for now and try again later
-          break;
-        }
+            ++it;
+            continue;
+          }
 
-        // --- NEW: NSDP-based flow gating (per-flow policy) ---
-      if (!CanSendForFlow (e.nwkSrc, e.nwkDst))
-        {
-          // NSDP says we have too many packets in flight for this flow.
-          // Leave this entry in the queue and stop draining for now.
-          std::cout << "[NWK " << m_nodeId << "] NSDP gating flow "
-                    << e.nwkSrc << "->" << e.nwkDst
-                    << " (queue stays at size=" << m_nwkQueue.size () << ")"
-                    << std::endl;
-          break;
-        }
+        if (!m_hop->CanSendToHop (hopDest))
+          {
+            ++it;
+            continue;
+          }
 
-      // Existing Hop flow-control gating (per-next-hop)
-      if (!m_hop->CanSendToHop (hopDest))
-        {
-          // Leave e in the queue; try again later when some ACKs free capacity
-          break;
-        }
+        NwkQueueEntry entry = *it;
+        it = m_nwkQueue.erase (it);
 
-      // Hop can accept another frame → remove from queue and send
-      m_nwkQueue.pop_front ();
-      m_hop->SendData (hopDest, e.dscp, e.payload, e.ack);
-    }
+        m_hop->SendData (
+          hopDest,
+          entry.dscp,
+          entry.payload,
+          entry.ack);
+      }
   }
 
   bool
