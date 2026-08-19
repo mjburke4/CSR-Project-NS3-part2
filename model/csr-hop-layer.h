@@ -301,7 +301,6 @@ private:
   void HandleAckWindow (const CsrHeader &hdr);
 
   void HandleDackFrame (const CsrHeader &hdr);
-  void ScheduleDackCheck ();
   void CheckDack ();
 
   void EnqueueResend (
@@ -398,7 +397,6 @@ private:
   };
 
   std::list<DackEntry> m_dackList;
-  EventId              m_dackEvent;
   Time                 m_dackHoldTime { Seconds(20.0) };  // 10*RESEND_TIME (2s)
 
 
@@ -1182,17 +1180,6 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
 }
 
 void
-CsrHopLayer::ScheduleDackCheck ()
-{
-  if (!m_dackEvent.IsPending () && !m_dackList.empty ())
-    {
-      m_dackEvent = Simulator::Schedule (Seconds (1.0),
-                                         &CsrHopLayer::CheckDack,
-                                         this);
-    }
-}
-
-void
 CsrHopLayer::CheckDack ()
 {
   Time now = Simulator::Now ();
@@ -1261,10 +1248,6 @@ CsrHopLayer::CheckDack ()
         }
     }
 
-  if (!m_dackList.empty ())
-    {
-      ScheduleDackCheck ();
-    }
 }
 
 void
@@ -1338,7 +1321,14 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
 
   m_dackList.push_back (de);
 
-  ScheduleDackCheck ();
+  // OPNET schedules one DACK_TIMER interrupt for each DACK entry at its
+  // absolute expiry.  Do not quantize staggered entries onto a shared polling
+  // cadence: each delayed flow-control slot must be released at its own
+  // 20-second (or doubled 40-second) deadline.
+  Simulator::Schedule (
+    holdTime,
+    &CsrHopLayer::CheckDack,
+    this);
 
   for (auto it = m_resendQueue.begin (); it != m_resendQueue.end (); ++it)
     {

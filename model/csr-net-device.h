@@ -94,7 +94,7 @@ public:
                               m_maxReportedActiveNodes);
   }
 
-  void SendToPeer (Ptr<Packet> frame,
+  Time SendToPeer (Ptr<Packet> frame,
                    uint16_t dest,
                    int rateKbps,
                    PreambleType preamble,
@@ -315,7 +315,7 @@ CsrMacCore::SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targe
   return chosen;
 }
 
-void
+Time
 CsrNetDevice::SendToPeer (Ptr<Packet> frame,
                           uint16_t dest,
                           int rateKbps,
@@ -505,6 +505,8 @@ std::cout << "[MAC " << m_id
         peer->m_mac.DeliverRxFrameToUp (peerCopy, d.pathlossDb, d.snrDb);
       }
   });
+
+  return Seconds (duration);
 }
 
 // ------------------------------------------------------------
@@ -517,6 +519,11 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
                             uint8_t dscp,
                             bool ackable)
 {
+  if (!m_slotTickEnabled)
+    {
+      StartSlotTick (m_slotTickPeriod);
+    }
+
   TxQueueEntry e;
   e.frame   = frame;
   e.dest    = dest;
@@ -613,8 +620,42 @@ CsrMacCore::MaybeScheduleNextTx ()
       return;
     }
 
-  // Schedule immediate TX
-  m_txEvent = Simulator::ScheduleNow (&CsrMacCore::DoTx, this);
+  // OPNET prep_tx(): a newly active transmitter waits through the 300-ms
+  // radio holdoff, then decrements its selected counter once per 13-ms slot.
+  // Transmission occurs only after the counter moves from zero to -1.
+  int slot = PickTxSlot (m_queue.front ().dest);
+  ScheduleTxOpportunity (slot, Seconds (0.0), true);
+}
+
+void
+CsrMacCore::ScheduleTxOpportunity (int slot,
+                                   Time notBefore,
+                                   bool initialHoldoff)
+{
+  m_scheduledTxSlot = slot;
+
+  Time holdoff = initialHoldoff
+    ? Seconds (TS_HOLDOFF_SECONDS)
+    : Seconds (0.0);
+  Time countdown = m_slotTickPeriod * static_cast<uint64_t> (slot + 1);
+  Time delay = notBefore + holdoff + countdown;
+
+  std::cout << "[MAC " << m_nodeId
+            << "] scheduled TX opportunity"
+            << " slot=" << slot
+            << " holdoff=" << holdoff.GetSeconds ()
+            << " countdown=" << countdown.GetSeconds ()
+            << " tx_in=" << delay.GetSeconds ()
+            << "s"
+            << std::endl;
+
+  m_txEvent = Simulator::Schedule (delay, &CsrMacCore::DoTx, this);
+}
+
+void
+CsrMacCore::FinishTx ()
+{
+  m_txInProgress = false;
 }
 
 int
@@ -672,6 +713,7 @@ CsrMacCore::DoTx ()
 {
   if (m_queue.empty () || m_dev == nullptr)
     {
+      m_scheduledTxSlot = -1;
       return;
     }
 
@@ -761,14 +803,30 @@ CsrMacCore::DoTx ()
       pt = ChoosePreambleForDest (dest); // should return LONG when duty cycling enabled
     }
 
-  // Slot selection (independent)
-  int slot = PickTxSlot (dest);
+  // OPNET includes a newly selected future reservation in every OTA frame.
+  // If another frame is already queued, this is also its countdown slot.
+  int nextReservedSlot = PickTxSlot (dest);
 
   // Put header back
   e.frame->AddHeader (th);
 
   // Send via device
-  m_dev->SendToPeer (e.frame, dest, rateKbps, pt, slot, ackable);
+  std::cout << "[MAC " << m_nodeId
+            << "] TX opportunity reached"
+            << " currentSlot=" << m_scheduledTxSlot
+            << " reserveNextSlot=" << nextReservedSlot
+            << std::endl;
+
+  Time txDuration =
+    m_dev->SendToPeer (e.frame,
+                       dest,
+                       rateKbps,
+                       pt,
+                       nextReservedSlot,
+                       ackable);
+
+  m_txInProgress = true;
+  Simulator::Schedule (txDuration, &CsrMacCore::FinishTx, this);
 
   m_transmittedFrameCount++;
 
@@ -789,7 +847,13 @@ CsrMacCore::DoTx ()
   // Schedule next TX if any
   if (!m_queue.empty ())
     {
-      m_txEvent = Simulator::ScheduleNow (&CsrMacCore::DoTx, this);
+      // Time-slot counters pause while OPNET MAC is in Tx_st.  Resume the
+      // advertised reservation countdown only after this frame finishes.
+      ScheduleTxOpportunity (nextReservedSlot, txDuration, false);
+    }
+  else
+    {
+      m_scheduledTxSlot = -1;
     }
 }
 
