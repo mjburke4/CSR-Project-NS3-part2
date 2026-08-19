@@ -47,4 +47,10 @@ OPNET MAC ACK queue parity test:
 3. Run: ./ns3 run csr-mac-ack-queue-smoke
 4. Expected: PASS: OPNET MAC ACK queue parity test
 
+OPNET MAC packet concatenation parity test:
+1. Copy csr-mac-concat-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-mac-concat-smoke
+3. Run: ./ns3 run csr-mac-concat-smoke
+4. Expected: PASS: OPNET MAC packet concatenation parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

@@ -102,8 +102,8 @@ RecordReceivedFrame (Ptr<Packet> frame, double, double)
            "unexpected non-ACK frame type received");
   Require (header.GetSeq () == 77,
            "MAC transmitted the wrong queued data frame");
-  Require (g_ackSequences.size () == 7,
-           "data was transmitted before the ACK queue drained");
+  Require (g_ackSequences.size () == 1,
+           "data was not packed behind the first ACK as OPNET does");
   g_dataFramesReceived++;
 }
 
@@ -125,8 +125,8 @@ CheckCompletedExchange (Ptr<CsrNetDevice> sender)
 
   Require (g_dataFramesReceived == 1,
            "queued data was not transmitted exactly once");
-  Require (sender->GetMac ().GetTransmittedFrameCount () == 8,
-           "expected seven ACK transmissions followed by one DATA transmission");
+  Require (sender->GetMac ().GetTransmittedFrameCount () == 7,
+           "ACK/DATA concatenation did not save one OTA transmission");
   Require (sender->GetMac ().GetAckQueuedFrameCount () == 0,
            "ACK queue did not remove the entry after five replacement sends");
   Require (sender->GetMac ().GetDataQueuedFrameCount () == 0,
@@ -183,8 +183,8 @@ main ()
   receiver->GetPhy ().SetPerModel (noErrors);
   receiver->GetMac ().SetRxCallback (MakeCallback (&RecordReceivedFrame));
 
-  // Enqueue DATA first, then ACKs.  The separate ACK queue must take priority
-  // even though the DATA frame has DSCP 7.
+  // Enqueue DATA first, then ACKs.  OPNET packs the ACK first and DATA behind
+  // it in the same OTA transmission even though DATA was queued earlier.
   g_sender->GetMac ().EnqueueTxFrame (
     BuildData (1, 2, 77), 2, 7, true);
   g_sender->GetMac ().EnqueueTxFrame (

@@ -13,6 +13,7 @@ class CsrMacCore
   static constexpr double TS_HOLDOFF_SECONDS = 0.3;
   static constexpr uint32_t ACK_QUEUE_SIZE = 256;
   static constexpr uint32_t MAX_ACK_RESEND = 4;
+  static constexpr uint32_t MAX_CONCAT_SEGMENTS = 16;
 
   void SetNodeId (uint16_t id)        { m_nodeId = id; }
   void SetDevice (CsrNetDevice *dev)  { m_dev = dev; }
@@ -302,6 +303,16 @@ private:
     uint32_t    txCount;
   };
 
+  struct SelectedTxFrame
+  {
+    Ptr<Packet> frame;
+    uint16_t    dest;
+    bool        ackable;
+    bool        fromAckQueue;
+    uint32_t    queueIndex;
+    int         rateKbps;
+  };
+
   EventId   m_helloEvent;
   Time      m_helloInterval { Seconds (2.0) };
   uint16_t  m_helloSeq { 0 };
@@ -320,6 +331,14 @@ private:
   void ScheduleTxOpportunity (int slot, Time notBefore, bool initialHoldoff);
   void FinishTx ();
   void DoTx ();
+  int SelectQueuedFrameRate (Ptr<Packet> frame,
+                             uint16_t dest,
+                             bool ackable) const;
+  uint32_t GetConcatByteLimit (int rateKbps) const;
+  bool FitsConcatFrame (Ptr<Packet> frame,
+                        int frameRateKbps,
+                        uint32_t byteCount,
+                        int currentRateKbps) const;
 
   int           ChooseRateForDest (uint16_t dest);
   PreambleType  ChoosePreambleForDest (uint16_t dest);
