@@ -141,6 +141,13 @@ class CsrMacCore
                        uint8_t dscp,
                        bool ackable);
 
+  // Remove retransmissions that a cumulative HOP ACK/DACK has already
+  // completed.  This mirrors the legacy br_Mac_Hop_Inst queue cleanup.
+  uint32_t CancelAcknowledgedFrames (uint16_t neighbor,
+                                     uint16_t baseSeq,
+                                     uint64_t ackBitmap,
+                                     uint64_t dackBitmap);
+
   // Called by CsrNetDevice when a frame is successfully received
   void DeliverRxFrameToUp (Ptr<Packet> frame, double pathlossDb, double snrDb)
   {

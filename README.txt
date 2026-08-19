@@ -12,4 +12,9 @@ Setup:
 4. Build: ./ns3 build csr-mac-demo-split
 5. Run: ./ns3 run csr-mac-demo-split
 
+Cumulative ACK/DACK smoke test:
+1. Copy csr-ack-window-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-ack-window-smoke
+3. Run: ./ns3 run csr-ack-window-smoke
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

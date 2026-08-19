@@ -76,6 +76,9 @@ public:
       m_ackable (false),
       m_isAck (false),
       m_isDack (false),
+      m_hasAckWindow (false),
+      m_ackBitmap (0),
+      m_dackBitmap (0),
       m_type (CSR_PKT_DATA),
       m_destType (CSR_DEST_UNICAST),
       m_speedKey (8)
@@ -90,6 +93,9 @@ public:
       m_ackable (ackable),
       m_isAck (isAck),
       m_isDack (false),
+      m_hasAckWindow (false),
+      m_ackBitmap (0),
+      m_dackBitmap (0),
       m_type (isAck ? CSR_PKT_ACK : CSR_PKT_DATA),
       m_destType (CSR_DEST_UNICAST),
       m_speedKey (8)
@@ -114,7 +120,13 @@ public:
     // src(2) + dst(2) + seq(2) + dscp(1) + flags(1)
     //return 2 + 2 + 2 + 1 + 1;
     // src(2) + dst(2) + seq(2) + dscp(1) + flags(1) + type(1) + destType(1) + speedKey(1)
-    return 2 + 2 + 2 + 1 + 1 + 1 + 1 + 1;
+    static constexpr uint32_t baseSize =
+      2 + 2 + 2 + 1 + 1 + 1 + 1 + 1;
+
+    // OPNET ACKs carry two 64-bit cumulative receive registers.  Keep the
+    // fields optional so existing exact ACKs for routing/control traffic retain
+    // their original wire size and behavior.
+    return baseSize + (m_hasAckWindow ? 16 : 0);
 
   }
 
@@ -124,6 +136,7 @@ public:
     if (m_ackable) { flags |= 0x01; }
     if (m_isAck)   { flags |= 0x02; }
     if (m_isDack)  { flags |= 0x04; }
+    if (m_hasAckWindow) { flags |= 0x08; }
 
     start.WriteHtonU16 (m_src);
     start.WriteHtonU16 (m_dst);
@@ -133,6 +146,12 @@ public:
     start.WriteU8 (m_type);
     start.WriteU8 (m_destType);
     start.WriteU8 (m_speedKey);
+
+    if (m_hasAckWindow)
+      {
+        start.WriteHtonU64 (m_ackBitmap);
+        start.WriteHtonU64 (m_dackBitmap);
+      }
   }
 
   virtual uint32_t Deserialize (Buffer::Iterator start) override
@@ -145,11 +164,23 @@ public:
     m_ackable = (flags & 0x01) != 0;
     m_isAck   = (flags & 0x02) != 0;
     m_isDack  = (flags & 0x04) != 0;
+    m_hasAckWindow = (flags & 0x08) != 0;
 
     // Always read the extended fields (Serialize always writes them)
     m_type     = start.ReadU8 ();
     m_destType = start.ReadU8 ();
     m_speedKey = start.ReadU8 ();
+
+    if (m_hasAckWindow)
+      {
+        m_ackBitmap = start.ReadNtohU64 ();
+        m_dackBitmap = start.ReadNtohU64 ();
+      }
+    else
+      {
+        m_ackBitmap = 0;
+        m_dackBitmap = 0;
+      }
 
     return GetSerializedSize ();
   }
@@ -163,9 +194,16 @@ public:
        << " ackable=" << m_ackable
        << " isAck=" << m_isAck
        << " isDack=" << m_isDack
+       << " hasAckWindow=" << m_hasAckWindow
        << " type=" << unsigned(m_type)
        << " destType=" << unsigned(m_destType)
        << " speedKey=" << unsigned(m_speedKey);
+
+    if (m_hasAckWindow)
+      {
+        os << " ackBitmap=0x" << std::hex << m_ackBitmap
+           << " dackBitmap=0x" << m_dackBitmap << std::dec;
+      }
 
   }
 
@@ -190,6 +228,15 @@ public:
   void     SetIsDack (bool v)   { m_isDack = v; }
   bool     IsDack () const      { return m_isDack; }
 
+  void SetHasAckWindow (bool v) { m_hasAckWindow = v; }
+  bool HasAckWindow () const    { return m_hasAckWindow; }
+
+  void SetAckBitmap (uint64_t v) { m_ackBitmap = v; }
+  uint64_t GetAckBitmap () const { return m_ackBitmap; }
+
+  void SetDackBitmap (uint64_t v) { m_dackBitmap = v; }
+  uint64_t GetDackBitmap () const { return m_dackBitmap; }
+
   void SetType (uint8_t v)      { m_type = v; }
   uint8_t GetType () const      { return m_type; }
 
@@ -207,6 +254,9 @@ private:
   bool     m_ackable;
   bool     m_isAck;
   bool     m_isDack;
+  bool     m_hasAckWindow;
+  uint64_t m_ackBitmap;
+  uint64_t m_dackBitmap;
   uint8_t  m_type;
   uint8_t  m_destType;
   uint8_t  m_speedKey;
