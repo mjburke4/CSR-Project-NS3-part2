@@ -1712,7 +1712,8 @@ public:
     uint32_t routingSequence,
     CsrRoutingOperation operation,
     uint8_t routingSection,
-    uint8_t routingTotalSections)
+    uint8_t routingTotalSections,
+    bool lastOfInfo)
   {
     std::cout << "[NWK " << m_nodeId
               << "] Reliable RoutingControl ACKed"
@@ -1725,7 +1726,17 @@ public:
 	              << unsigned (routingSection)
 	              << "/"
 	              << unsigned (routingTotalSections)
+	              << " lastOfInfo="
+	              << (lastOfInfo ? 1 : 0)
 	              << std::endl;
+
+    // One OPNET routing-control transaction may cover several neighbors.
+    // A partial destination ACK is progress, not permission to advance to the
+    // next UPDATE/FLUSH phase.
+    if (!lastOfInfo)
+      {
+        return;
+      }
 
 	    auto snapshotIt =
       m_outboundRoutingSnapshots.find (
@@ -1916,16 +1927,25 @@ public:
 
   void
   NoteRoutingControlFailure (
-    uint16_t neighbor,
+    std::vector<uint16_t> neighbors,
     uint32_t routingSequence,
     CsrRoutingOperation operation,
     uint8_t routingSection,
-    uint8_t routingTotalSections)
+    uint8_t routingTotalSections,
+    bool lastOfInfo)
   {
     std::cout << "[NWK " << m_nodeId
               << "] Reliable RoutingControl failure"
-              << " neighbor="
-              << neighbor
+              << " neighbors=";
+    for (uint32_t i = 0; i < neighbors.size (); ++i)
+      {
+        if (i > 0)
+          {
+            std::cout << ",";
+          }
+        std::cout << neighbors[i];
+      }
+    std::cout
               << " routingSequence="
               << routingSequence
               << " operation="
@@ -1937,6 +1957,8 @@ public:
               << "/"
               << unsigned (
                   routingTotalSections)
+              << " lastOfInfo="
+              << (lastOfInfo ? 1 : 0)
               << std::endl;
 
     // For now, leave recovery to the existing

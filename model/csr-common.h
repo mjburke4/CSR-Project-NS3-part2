@@ -8,6 +8,7 @@
 #include "ns3/random-variable-stream.h"
 #include <map>
 #include <deque>
+#include <vector>
 #include <utility>
 #include <functional>
 #include <cmath>
@@ -58,7 +59,8 @@ enum CsrPktType : uint8_t
 enum CsrDestType : uint8_t
 {
   CSR_DEST_UNICAST   = 0,
-  CSR_DEST_BROADCAST = 1
+  CSR_DEST_BROADCAST = 1,
+  CSR_DEST_MULTICAST = 2
 };
 
 // ------------------------------------------------------------
@@ -68,6 +70,9 @@ enum CsrDestType : uint8_t
 class CsrHeader : public Header
 {
 public:
+  using DestinationSequence = std::pair<uint16_t, uint16_t>;
+  static constexpr uint8_t MAX_DESTINATIONS = 10;
+
   CsrHeader ()
     : m_src (0),
       m_dst (0),
@@ -126,7 +131,15 @@ public:
     // OPNET ACKs carry two 64-bit cumulative receive registers.  Keep the
     // fields optional so existing exact ACKs for routing/control traffic retain
     // their original wire size and behavior.
-    return baseSize + (m_hasAckWindow ? 16 : 0);
+    uint32_t targetListSize =
+      m_destinationSequences.empty ()
+        ? 0
+        : 1 + 4 * static_cast<uint32_t> (
+                    m_destinationSequences.size ());
+
+    return baseSize +
+           (m_hasAckWindow ? 16 : 0) +
+           targetListSize;
 
   }
 
@@ -137,6 +150,7 @@ public:
     if (m_isAck)   { flags |= 0x02; }
     if (m_isDack)  { flags |= 0x04; }
     if (m_hasAckWindow) { flags |= 0x08; }
+    if (!m_destinationSequences.empty ()) { flags |= 0x10; }
 
     start.WriteHtonU16 (m_src);
     start.WriteHtonU16 (m_dst);
@@ -152,6 +166,18 @@ public:
         start.WriteHtonU64 (m_ackBitmap);
         start.WriteHtonU64 (m_dackBitmap);
       }
+
+    if (!m_destinationSequences.empty ())
+      {
+        start.WriteU8 (
+          static_cast<uint8_t> (m_destinationSequences.size ()));
+
+        for (const auto &target : m_destinationSequences)
+          {
+            start.WriteHtonU16 (target.first);
+            start.WriteHtonU16 (target.second);
+          }
+      }
   }
 
   virtual uint32_t Deserialize (Buffer::Iterator start) override
@@ -165,6 +191,7 @@ public:
     m_isAck   = (flags & 0x02) != 0;
     m_isDack  = (flags & 0x04) != 0;
     m_hasAckWindow = (flags & 0x08) != 0;
+    bool hasDestinationSequences = (flags & 0x10) != 0;
 
     // Always read the extended fields (Serialize always writes them)
     m_type     = start.ReadU8 ();
@@ -182,7 +209,35 @@ public:
         m_dackBitmap = 0;
       }
 
-    return GetSerializedSize ();
+    m_destinationSequences.clear ();
+    uint32_t targetListSize = 0;
+
+    if (hasDestinationSequences)
+      {
+        uint8_t count = start.ReadU8 ();
+        NS_ABORT_MSG_IF (
+          count == 0 || count > MAX_DESTINATIONS,
+          "invalid CSR destination/sequence list size");
+
+        targetListSize = 1 + 4 * count;
+        m_destinationSequences.reserve (count);
+
+        for (uint8_t i = 0; i < count; ++i)
+          {
+            uint16_t destination = start.ReadNtohU16 ();
+            uint16_t sequence = start.ReadNtohU16 ();
+            m_destinationSequences.emplace_back (
+              destination,
+              sequence);
+          }
+      }
+
+    static constexpr uint32_t baseSize =
+      2 + 2 + 2 + 1 + 1 + 1 + 1 + 1;
+
+    return baseSize +
+           (m_hasAckWindow ? 16 : 0) +
+           targetListSize;
   }
 
   virtual void Print (std::ostream &os) const override
@@ -203,6 +258,24 @@ public:
       {
         os << " ackBitmap=0x" << std::hex << m_ackBitmap
            << " dackBitmap=0x" << m_dackBitmap << std::dec;
+      }
+
+    if (!m_destinationSequences.empty ())
+      {
+        os << " targets=[";
+        for (uint32_t i = 0;
+             i < m_destinationSequences.size ();
+             ++i)
+          {
+            if (i > 0)
+              {
+                os << ",";
+              }
+            os << m_destinationSequences[i].first
+               << ":"
+               << m_destinationSequences[i].second;
+          }
+        os << "]";
       }
 
   }
@@ -246,6 +319,57 @@ public:
   void SetSpeedKey (uint8_t v)  { m_speedKey = v; }
   uint8_t GetSpeedKey () const  { return m_speedKey; }
 
+  void SetDestinationSequences (
+    const std::vector<DestinationSequence> &targets)
+  {
+    NS_ABORT_MSG_IF (
+      targets.empty () || targets.size () > MAX_DESTINATIONS,
+      "CSR destination/sequence list must contain 1 to 10 entries");
+    m_destinationSequences = targets;
+  }
+
+  bool HasDestinationSequences () const
+  {
+    return !m_destinationSequences.empty ();
+  }
+
+  const std::vector<DestinationSequence>&
+  GetDestinationSequences () const
+  {
+    return m_destinationSequences;
+  }
+
+  bool GetSequenceForDestination (
+    uint16_t destination,
+    uint16_t &sequence) const
+  {
+    bool found = false;
+    for (const auto &target : m_destinationSequences)
+      {
+        if (target.first == destination ||
+            target.first == CSR_BROADCAST_ID)
+          {
+            sequence = target.second;
+            found = true;
+          }
+      }
+    return found;
+  }
+
+  bool IsForDestination (uint16_t destination) const
+  {
+    if (m_destinationSequences.empty ())
+      {
+        return m_dst == CSR_BROADCAST_ID ||
+               m_dst == destination;
+      }
+
+    uint16_t ignoredSequence = 0;
+    return GetSequenceForDestination (
+      destination,
+      ignoredSequence);
+  }
+
 private:
   uint16_t m_src;
   uint16_t m_dst;
@@ -260,6 +384,7 @@ private:
   uint8_t  m_type;
   uint8_t  m_destType;
   uint8_t  m_speedKey;
+  std::vector<DestinationSequence> m_destinationSequences;
 
 };
 

@@ -1,6 +1,7 @@
 #pragma once
 #include "csr-common.h"
 #include "csr-hello-header.h"
+#include <algorithm>
 
 class CsrHopLayer : public Object
 {
@@ -112,24 +113,30 @@ public:
   uint16_t dst,
   Ptr<Packet> payload);
 
+  void SendRoutingControl (
+    const std::vector<uint16_t> &destinations,
+    Ptr<Packet> payload);
+
   void SetRoutingControlSuccessCallback (
     Callback<void,
             uint16_t,
               uint32_t,
               CsrRoutingOperation,
               uint8_t,
-              uint8_t> cb)
+              uint8_t,
+              bool> cb)
   {
     m_routingControlSuccessCb = cb;
   }
 
   void SetRoutingControlFailureCallback (
     Callback<void,
-            uint16_t,
+            std::vector<uint16_t>,
             uint32_t,
             CsrRoutingOperation,
             uint8_t,
-            uint8_t> cb)
+            uint8_t,
+            bool> cb)
   {
     m_routingControlFailureCb = cb;
   }
@@ -173,6 +180,8 @@ private:
     HOP_PENDING_MAX_THRESHOLD = 16;
 
 public:
+  static constexpr uint32_t RESEND_QUEUE_SIZE = 512;
+
   uint32_t GetPendingDataCount () const
   {
     return m_pendingDataCount;
@@ -182,6 +191,16 @@ public:
   {
     auto it = m_flowCtrlByDest.find (dest);
     return it == m_flowCtrlByDest.end () ? 0 : it->second.outstanding;
+  }
+
+  uint32_t GetResendQueueSize () const
+  {
+    return static_cast<uint32_t> (m_resendQueue.size ());
+  }
+
+  uint64_t GetResendQueueOverflowCount () const
+  {
+    return m_resendQueueOverflowCount;
   }
 
   void NotifyMacFrameSent (
@@ -282,6 +301,13 @@ public:
   }
 
 private:
+  struct ResendTarget
+  {
+    uint16_t dest {0};
+    uint16_t seq {0};
+    bool acked {false};
+  };
+
   struct ResendEntry
   {
     uint16_t dest;
@@ -291,6 +317,7 @@ private:
     uint32_t resendCount;
     Time lastTxTime;
     bool initialTxConfirmed {false};
+    std::vector<ResendTarget> targets;
 
     // Legacy network flow control applies to ordinary
     // DATA traffic, not reliable routing/control packets.
@@ -307,6 +334,10 @@ private:
   void EnqueueResend (
     uint16_t dst,
     uint16_t seq,
+    Ptr<Packet> frame,
+    bool flowControlTracked);
+  void EnqueueResend (
+    const std::vector<CsrHeader::DestinationSequence> &targets,
     Ptr<Packet> frame,
     bool flowControlTracked);
   void CheckResend ();
@@ -417,6 +448,7 @@ private:
 
   std::map<uint16_t, uint16_t>                  m_lastSentSeqByDest;
   std::list<ResendEntry>                        m_resendQueue;
+  uint64_t                                      m_resendQueueOverflowCount {0};
   Time                                          m_resendTime;
   uint32_t                                      m_maxNumResend;
 
@@ -442,15 +474,17 @@ private:
           uint32_t,
           CsrRoutingOperation,
           uint8_t,
-          uint8_t>
+          uint8_t,
+          bool>
     m_routingControlSuccessCb;
 
   Callback<void,
-        uint16_t,
+        std::vector<uint16_t>,
         uint32_t,
         CsrRoutingOperation,
         uint8_t,
-        uint8_t>
+        uint8_t,
+        bool>
   m_routingControlFailureCb;
 
 };
@@ -606,46 +640,81 @@ CsrHopLayer::SendRoutingControl (
   uint16_t dst,
   Ptr<Packet> payload)
 {
+  SendRoutingControl (
+    std::vector<uint16_t> {dst},
+    payload);
+}
+
+void
+CsrHopLayer::SendRoutingControl (
+  const std::vector<uint16_t> &destinations,
+  Ptr<Packet> payload)
+{
   NS_ASSERT (m_mac != nullptr);
+  NS_ABORT_MSG_IF (
+    destinations.empty () ||
+      destinations.size () > CsrHeader::MAX_DESTINATIONS,
+    "reliable routing control requires 1 to 10 destinations");
 
-  uint16_t &lastSeq = m_lastSentSeqByDest[dst];
+  std::vector<CsrHeader::DestinationSequence> targets;
+  targets.reserve (destinations.size ());
 
-  uint16_t seq =
-    static_cast<uint16_t> (
-      (lastSeq + 1) & 0xFFFF);
+  for (uint16_t destination : destinations)
+    {
+      uint16_t &lastSeq =
+        m_lastSentSeqByDest[destination];
+      uint16_t sequence =
+        static_cast<uint16_t> (
+          (lastSeq + 1) & 0xFFFF);
+      lastSeq = sequence;
+      targets.emplace_back (
+        destination,
+        sequence);
+    }
 
-  lastSeq = seq;
+  uint16_t primaryDestination =
+    targets.front ().first;
+  uint16_t primarySequence =
+    targets.front ().second;
 
   CsrHeader hdr (
     m_nodeId,
-    dst,
-    seq,
-    7,      // robust control priority
-    true,   // ACKable
+    primaryDestination,
+    primarySequence,
+    7,
+    true,
     false);
 
   hdr.SetType (CSR_PKT_ROUTING_CONTROL);
-  hdr.SetDestType (CSR_DEST_UNICAST);
+  hdr.SetDestType (CSR_DEST_MULTICAST);
   hdr.SetSpeedKey (8);
+  hdr.SetDestinationSequences (targets);
 
   Ptr<Packet> frame = payload->Copy ();
   frame->AddHeader (hdr);
 
   EnqueueResend (
-    dst,
-    seq,
+    targets,
     frame->Copy (),
     false);
 
   std::cout << "[HOP " << m_nodeId
-            << "] TX reliable RoutingControl to "
-            << dst
-            << " seq=" << seq
-            << std::endl;
+            << "] TX reliable RoutingControl targets=";
+  for (uint32_t i = 0; i < targets.size (); ++i)
+    {
+      if (i > 0)
+        {
+          std::cout << ",";
+        }
+      std::cout << targets[i].first
+                << ":"
+                << targets[i].second;
+    }
+  std::cout << std::endl;
 
   m_mac->EnqueueTxFrame (
     frame,
-    dst,
+    primaryDestination,
     7,
     true);
 }
@@ -661,6 +730,22 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
     }
 
   frame->RemoveHeader (hdr);
+
+  if (hdr.HasDestinationSequences ())
+    {
+      uint16_t localSequence = 0;
+      if (!hdr.GetSequenceForDestination (
+            m_nodeId,
+            localSequence))
+        {
+          return;
+        }
+
+      // The OPNET for_me() helper selects the sequence paired with this node
+      // from the destination structure before normal receive processing.
+      hdr.SetDst (m_nodeId);
+      hdr.SetSeq (localSequence);
+    }
 
   UpdateNeighborHeard (hdr.GetSrc (), pathlossDb, snrDb);
   //UpdateNeighborHeard (hdr.GetSrc ());
@@ -966,6 +1051,32 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
       return;
     }
 
+  ResendTarget *acknowledgedTarget = nullptr;
+  for (auto &target : entry->targets)
+    {
+      if (target.dest == src && target.seq == seq)
+        {
+          acknowledgedTarget = &target;
+          break;
+        }
+    }
+
+  if (acknowledgedTarget == nullptr)
+    {
+      return;
+    }
+
+  // Deliberately notify again for a duplicate partial ACK while the group is
+  // still present.  OPNET writes acked[j]=1 without first testing that flag.
+  acknowledgedTarget->acked = true;
+  bool allTargetsAcked =
+    std::all_of (
+      entry->targets.begin (),
+      entry->targets.end (),
+      [] (const ResendTarget &target) {
+        return target.acked;
+      });
+
   bool neighborCheckCompleted = false;
   bool routingControlCompleted = false;
   uint32_t completedRoutingSequence = 0;
@@ -1049,10 +1160,13 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
         }
     }
 
-	  // Inform Net layer that this (nwkSrc,nwkDst) flow completed one packet
-  NotifyNsdpFromFrame (entry->frame);
+	  // Inform Net layer only when the single resend transaction is complete.
+  if (allTargetsAcked)
+    {
+      NotifyNsdpFromFrame (entry->frame);
+    }
 
-  if (entry->flowControlTracked)
+  if (entry->flowControlTracked && allTargetsAcked)
     {
       FlowCtrlEntry &fc =
         GetFlowCtrlEntry (
@@ -1113,7 +1227,7 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
         }
     }
 
-  if (neighborCheckCompleted)
+  if (neighborCheckCompleted && allTargetsAcked)
     {
       std::cout << "[HOP " << m_nodeId
                 << "] Reliable NeighborCheck completed with "
@@ -1138,7 +1252,9 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
   if (routingControlCompleted)
     {
       std::cout << "[HOP " << m_nodeId
-                << "] Reliable RoutingControl completed with "
+                << "] Reliable RoutingControl "
+                << (allTargetsAcked ? "completed" : "ACK progress")
+                << " with "
                 << src
                 << " seq=" << seq
 	                << " routingSequence="
@@ -1157,8 +1273,20 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
             completedRoutingSequence,
             completedRoutingOperation,
             completedRoutingSection,
-            completedRoutingTotalSections);
+            completedRoutingTotalSections,
+            allTargetsAcked);
         }
+    }
+
+  if (!allTargetsAcked)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] RoutingControl partial ACK"
+                << " neighbor=" << src
+                << " seq=" << seq
+                << " resendEntryRetained=1"
+                << std::endl;
+      return;
     }
 
   for (auto it = m_resendQueue.begin (); it != m_resendQueue.end (); ++it)
@@ -1348,10 +1476,45 @@ CsrHopLayer::EnqueueResend (
   Ptr<Packet> frame,
   bool flowControlTracked)
 {
+  EnqueueResend (
+    std::vector<CsrHeader::DestinationSequence> {
+      std::make_pair (dst, seq)},
+    frame,
+    flowControlTracked);
+}
+
+void
+CsrHopLayer::EnqueueResend (
+  const std::vector<CsrHeader::DestinationSequence> &targets,
+  Ptr<Packet> frame,
+  bool flowControlTracked)
+{
+  NS_ABORT_MSG_IF (
+    targets.empty () ||
+      targets.size () > CsrHeader::MAX_DESTINATIONS,
+    "resend entry requires 1 to 10 destinations");
+
+  // OPNET assigns the sequence and updates DATA flow-control state before
+  // discovering that the resend queue is full.  It then forwards the frame to
+  // MAC without a resend record, so callers intentionally do not roll back.
+  if (m_resendQueue.size () >= RESEND_QUEUE_SIZE)
+    {
+      m_resendQueueOverflowCount++;
+
+      std::cout << "[HOP " << m_nodeId
+                << "] Resend entry rejected: OPNET queue limit reached"
+                << " dest=" << targets.front ().first
+                << " seq=" << targets.front ().second
+                << " limit=" << RESEND_QUEUE_SIZE
+                << " overflows=" << m_resendQueueOverflowCount
+                << std::endl;
+      return;
+    }
+
   ResendEntry e;
 
-  e.dest = dst;
-  e.seq = seq;
+  e.dest = targets.front ().first;
+  e.seq = targets.front ().second;
   e.dscp = 0;
   e.frame = frame;
   e.resendCount = 0;
@@ -1359,6 +1522,13 @@ CsrHopLayer::EnqueueResend (
   e.initialTxConfirmed = false;
   e.flowControlTracked =
     flowControlTracked;
+
+  e.targets.reserve (targets.size ());
+  for (const auto &target : targets)
+    {
+      e.targets.push_back (
+        {target.first, target.second, false});
+    }
 
   CsrHeader header;
   if (frame != nullptr && frame->PeekHeader (header))
@@ -1488,12 +1658,23 @@ CsrHopLayer::CheckResend ()
                       if (!m_routingControlFailureCb
                             .IsNull ())
                         {
+                          std::vector<uint16_t>
+                            failedDestinations;
+                          failedDestinations.reserve (
+                            e.targets.size ());
+                          for (const auto &target : e.targets)
+                            {
+                              failedDestinations.push_back (
+                                target.dest);
+                            }
+
                           m_routingControlFailureCb (
-                            e.dest,
+                            failedDestinations,
                             routingSequence,
                             operation,
                             routingSection,
-                            routingTotalSections);
+                            routingTotalSections,
+                            true);
                         }
                     }
                 }
@@ -1591,9 +1772,12 @@ CsrHopLayer::FindResendEntry (uint16_t dst, uint16_t seq)
 {
   for (auto &e : m_resendQueue)
     {
-      if (e.dest == dst && e.seq == seq)
+      for (const auto &target : e.targets)
         {
-          return &e;
+          if (target.dest == dst && target.seq == seq)
+            {
+              return &e;
+            }
         }
     }
   return nullptr;
