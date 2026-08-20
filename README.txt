@@ -53,4 +53,10 @@ OPNET MAC packet concatenation parity test:
 3. Run: ./ns3 run csr-mac-concat-smoke
 4. Expected: PASS: OPNET MAC packet concatenation parity test
 
+OPNET HOP retransmission DSCP parity test:
+1. Copy csr-hop-retry-dscp-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-hop-retry-dscp-smoke
+3. Run: ./ns3 run csr-hop-retry-dscp-smoke
+4. Expected: PASS: OPNET HOP retransmission DSCP parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.
