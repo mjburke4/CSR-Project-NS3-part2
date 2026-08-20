@@ -196,6 +196,82 @@ RunAllFreshScenario ()
 }
 
 void
+RunDutyCycleFreshDestinationScenario ()
+{
+  Ptr<CsrNetDevice> sender = BuildSenderWithPeers ();
+  sender->EnableDutyCycling (true);
+  sender->GetMac ().SetActiveNodesForPostTx (1);
+  sender->GetMac ().NoteHeardFrom (2, 0.0);
+  sender->GetMac ().EnqueueTxFrame (
+    BuildFrame (2, 55, 6), 2, 6, false);
+
+  Simulator::Stop (Seconds (2.0));
+  Simulator::Run ();
+
+  Require (sender->GetMac ().GetTransmittedFrameCount () == 1,
+           "duty-cycle freshness scenario did not transmit once");
+  Require (sender->GetMac ().GetLongPreambleTxCount () == 0 &&
+             sender->GetMac ().GetShortPreambleTxCount () == 1,
+           "duty cycling incorrectly forced LONG for a fresh destination");
+  Simulator::Destroy ();
+}
+
+void
+RunLocalActiveNodeStaleScenario ()
+{
+  Ptr<CsrNetDevice> sender = BuildSenderWithPeers ();
+
+  // OPNET uses local active_nodes=1 for freshness (17.0 seconds), while the
+  // neighbor-reported value only expands the random-slot range.  The prior
+  // hardcoded-eight implementation incorrectly treated this age as fresh.
+  sender->GetMac ().SetActiveNodesForPostTx (1);
+  sender->GetMac ().NoteReportedActiveNodes (10);
+  sender->GetMac ().NoteHeardFrom (2, 0.0);
+
+  Simulator::Schedule (Seconds (18.0), [sender] () {
+    sender->GetMac ().EnqueueTxFrame (
+      BuildFrame (2, 56, 6), 2, 6, false);
+  });
+
+  Simulator::Stop (Seconds (21.0));
+  Simulator::Run ();
+
+  Require (sender->GetMac ().GetTransmittedFrameCount () == 1,
+           "local-active-node stale scenario did not transmit once");
+  Require (sender->GetMac ().GetLongPreambleTxCount () == 1 &&
+             sender->GetMac ().GetShortPreambleTxCount () == 0,
+           "freshness used a hardcoded or reported active-node count");
+  Simulator::Destroy ();
+}
+
+void
+RunExpandedFreshnessWindowScenario ()
+{
+  Ptr<CsrNetDevice> sender = BuildSenderWithPeers ();
+
+  // With local active_nodes=10, OPNET's freshness window is 30.5 seconds.
+  // A destination last heard at t=0 must therefore still receive SHORT when
+  // this frame reaches the MAC shortly after t=28.
+  sender->GetMac ().SetActiveNodesForPostTx (10);
+  sender->GetMac ().NoteHeardFrom (2, 0.0);
+
+  Simulator::Schedule (Seconds (28.0), [sender] () {
+    sender->GetMac ().EnqueueTxFrame (
+      BuildFrame (2, 57, 6), 2, 6, false);
+  });
+
+  Simulator::Stop (Seconds (32.0));
+  Simulator::Run ();
+
+  Require (sender->GetMac ().GetTransmittedFrameCount () == 1,
+           "expanded-freshness scenario did not transmit once");
+  Require (sender->GetMac ().GetLongPreambleTxCount () == 0 &&
+             sender->GetMac ().GetShortPreambleTxCount () == 1,
+           "local active-node count did not expand the freshness window");
+  Simulator::Destroy ();
+}
+
+void
 RunAckUnknownDestinationScenario ()
 {
   Ptr<CsrNetDevice> sender = BuildSenderWithPeers ();
@@ -230,8 +306,11 @@ main ()
   RunGroupedUnknownDestinationScenario ();
   RunStaleLaterSegmentScenario ();
   RunAllFreshScenario ();
+  RunDutyCycleFreshDestinationScenario ();
+  RunLocalActiveNodeStaleScenario ();
+  RunExpandedFreshnessWindowScenario ();
   RunAckUnknownDestinationScenario ();
-  std::cout << "PASS: OPNET aggregate preamble selection parity test"
+  std::cout << "PASS: OPNET preamble freshness and aggregate selection parity test"
             << std::endl;
   return 0;
 }
