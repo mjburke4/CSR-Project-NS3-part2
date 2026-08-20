@@ -286,6 +286,7 @@ private:
   {
     uint16_t dest;
     uint16_t seq;
+    uint8_t dscp;
     Ptr<Packet> frame;
     uint32_t resendCount;
     Time lastTxTime;
@@ -1351,12 +1352,21 @@ CsrHopLayer::EnqueueResend (
 
   e.dest = dst;
   e.seq = seq;
+  e.dscp = 0;
   e.frame = frame;
   e.resendCount = 0;
   e.lastTxTime = Seconds (0.0);
   e.initialTxConfirmed = false;
   e.flowControlTracked =
     flowControlTracked;
+
+  CsrHeader header;
+  if (frame != nullptr && frame->PeekHeader (header))
+    {
+      // OPNET retransmits a copy of the original packet, so MAC reads the
+      // original DSCP again when it places that copy into its priority queue.
+      e.dscp = header.GetDscp ();
+    }
 
   m_resendQueue.push_back (e);
 }
@@ -1557,6 +1567,7 @@ CsrHopLayer::CheckResend ()
         {
           NS_LOG_INFO ("Hop " << m_nodeId << " resending dest="
                               << e.dest << " seq=" << e.seq
+                              << " dscp=" << unsigned (e.dscp)
                               << " attempt=" << (e.resendCount + 1));
 
           e.resendCount++;
@@ -1567,7 +1578,7 @@ CsrHopLayer::CheckResend ()
           e.lastTxTime = now;
 
           m_mac->EnqueueTxFrame (e.frame->Copy (), e.dest,
-                                 /*dscp*/ 5, /*ackable*/ true);
+                                 e.dscp, /*ackable*/ true);
         }
 
       ++it;
