@@ -171,6 +171,16 @@ class CsrMacCore
     return m_transmittedFrameCount;
   }
 
+  uint64_t GetLongPreambleTxCount () const
+  {
+    return m_longPreambleTxCount;
+  }
+
+  uint64_t GetShortPreambleTxCount () const
+  {
+    return m_shortPreambleTxCount;
+  }
+
   int32_t GetNeighborReservationCounter (uint16_t neighbor) const
   {
     auto it = m_neighbors.find (neighbor);
@@ -345,6 +355,9 @@ private:
                         int frameRateKbps,
                         uint32_t byteCount,
                         int currentRateKbps) const;
+  PreambleType SelectAggregatePreamble (
+    const std::vector<SelectedTxFrame> &selected,
+    bool concatenating);
 
   int           ChooseRateForDest (uint16_t dest);
   PreambleType  ChoosePreambleForDest (uint16_t dest);
@@ -358,6 +371,8 @@ private:
   Callback<void, Ptr<Packet>, double, double>  m_rxCallback;
   Callback<void, uint16_t, uint16_t, Time>     m_txSentCallback;
   uint64_t                            m_transmittedFrameCount {0};
+  uint64_t                            m_longPreambleTxCount {0};
+  uint64_t                            m_shortPreambleTxCount {0};
   uint64_t                            m_dataQueueDropCount {0};
   int                                 m_scheduledTxSlot {-1};
   bool                                m_txInProgress {false};

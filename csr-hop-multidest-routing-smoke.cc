@@ -347,7 +347,9 @@ TestReceiverSelectsItsSequence ()
   Require (responder->GetMac ().GetAckQueuedFrameCount () == 1,
            "targeted receiver did not queue a routing ACK");
 
-  Simulator::Stop (Seconds (0.9));
+  // The observer is unknown to the responder, so OPNET sends this exact ACK
+  // with a long preamble.  Allow the first ACK to finish over the air.
+  Simulator::Stop (Seconds (1.8));
   Simulator::Run ();
 
   Require (g_autoAckSequence == 9,

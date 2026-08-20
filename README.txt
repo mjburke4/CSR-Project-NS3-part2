@@ -71,4 +71,10 @@ OPNET multidestination routing ACK parity test:
 3. Run: ./ns3 run csr-hop-multidest-routing-smoke
 4. Expected: PASS: OPNET multidestination routing ACK parity test
 
+OPNET aggregate preamble selection parity test:
+1. Copy csr-mac-preamble-selection-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-mac-preamble-selection-smoke
+3. Run: ./ns3 run csr-mac-preamble-selection-smoke
+4. Expected: PASS: OPNET aggregate preamble selection parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.
