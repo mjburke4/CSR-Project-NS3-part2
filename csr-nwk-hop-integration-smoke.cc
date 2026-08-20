@@ -99,9 +99,9 @@ CheckFinalState (Ptr<CsrNetLayer> sourceNwk,
   Require (g_receivedSizes.size () == BURST_SIZE,
            "destination did not receive the four-packet burst");
 
-  const std::vector<uint32_t> expectedSizes {100, 120, 140, 160};
+  const std::vector<uint32_t> expectedSizes {160, 140, 120, 100};
   Require (g_receivedSizes == expectedSizes,
-           "equal-DSCP packets were not delivered in NWK FIFO order");
+           "positive-DSCP packets did not preserve OPNET NWK head insertion");
 
   Require (sourceNwk->GetNwkQueueSize () == 0,
            "source NWK queue did not drain");
@@ -201,7 +201,7 @@ main ()
       }
   });
 
-  // ScheduleNow() queue checks execute before this one-microsecond checkpoint.
+  // OPNET's one-TIC queue check executes before this one-microsecond checkpoint.
   Simulator::Schedule (MicroSeconds (1),
                        &CheckInitialAdmission,
                        nwk0,
