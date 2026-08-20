@@ -425,12 +425,16 @@ std::cout << "[MAC " << m_id
     double tRx = Simulator::Now ().GetSeconds ();
     uint32_t packetBits = payloadBytes * 8;
 
-    // For each peer, deliver if it is the intended dest
+    // A CSR transmission occupies the shared wireless medium.  Every awake
+    // peer in range therefore attempts to decode the aggregate, even when no
+    // segment names that peer as a destination.  OPNET forwards every decoded
+    // MAC payload to HOP and lets HOP discard traffic addressed elsewhere.
     for (auto const &peer : self->m_peers)
       {
         if (peer == nullptr) { continue; }
+        if (peer->GetId () == txId) { continue; }
 
-        bool receivesFrame = false;
+        bool addressedFrame = false;
         bool ackableForPeer = false;
         for (const auto &segment : frameCopies)
           {
@@ -438,15 +442,13 @@ std::cout << "[MAC " << m_id
             segment->PeekHeader (segmentHeader);
             bool matches =
               segmentHeader.IsForDestination (peer->GetId ());
-            if (matches && peer->GetId () != txId)
+            if (matches)
               {
-                receivesFrame = true;
+                addressedFrame = true;
                 ackableForPeer = ackableForPeer ||
                                  segmentHeader.IsAckable ();
               }
           }
-
-        if (!receivesFrame) { continue; }
 
         double rxStart = txTime + propDelay;
         double rxEnd   = rxStart + duration;
@@ -498,7 +500,9 @@ std::cout << "[MAC " << m_id
             continue;
           }
 
-        std::cout << "[t=" << tRx << "] RX at node " << peer->GetId ()
+        std::cout << "[t=" << tRx << "] "
+                  << (addressedFrame ? "RX" : "RX OVERHEARD")
+                  << " at node " << peer->GetId ()
                   << " from node " << txId
                   << " seq " << seq
                   << " rate " << rateKbps << " kbps"
@@ -534,16 +538,13 @@ std::cout << "[MAC " << m_id
         peer->m_mac.SetNeighborPathloss (txId, d.pathlossDb);
         peer->m_mac.NoteNeighborReservedSlot (txId, slot);
 
-        // Deliver up into peer MAC (each peer needs its own copy)
+        // Forward every decoded segment to HOP.  HOP first updates its
+        // source-neighbor observation and then applies destination filtering,
+        // matching OPNET's MAC_TO_HOP processing order.
         for (const auto &segment : frameCopies)
           {
-            CsrHeader segmentHeader;
-            segment->PeekHeader (segmentHeader);
-            if (segmentHeader.IsForDestination (peer->GetId ()))
-              {
-                peer->m_mac.DeliverRxFrameToUp (
-                  segment->Copy (), d.pathlossDb, d.snrDb);
-              }
+            peer->m_mac.DeliverRxFrameToUp (
+              segment->Copy (), d.pathlossDb, d.snrDb);
           }
       }
   });
@@ -846,13 +847,6 @@ PreambleType
 CsrMacCore::ChoosePreambleForDest (uint16_t dest)
 {
   auto it = m_neighbors.find (dest);
-  
-  // If receivers are duty-cycling, SHORT is not reliable unless we have an
-  // explicit "receiver is awake" handshake context. Be conservative.
-  if (m_dev && m_dev->IsDutyCyclingEnabled ())
-    {
-      return PREAMBLE_LONG;
-    }
 
   if (it == m_neighbors.end ())
     {
@@ -862,8 +856,12 @@ CsrMacCore::ChoosePreambleForDest (uint16_t dest)
   double lastHeard = it->second.lastHeardSec;
   double now       = Simulator::Now ().GetSeconds ();
 
-  // Rough analog of STAY_AWAKE_BASE_TIME + 1.5*active_nodes + GUARD
-  double threshold = 15.0 + 1.5 * 8 + 0.5; // 27.5 s
+  // OPNET chooses the preamble from neighbor freshness even when duty
+  // cycling is enabled.  It uses the current local active_nodes value here,
+  // not max_reported_active_nodes (the latter only expands slot selection).
+  // This is the same expression as br_mac's POST_TX_WAIT_TIME macro.
+  double threshold =
+    15.0 + 1.5 * static_cast<double> (m_activeNodesForPostTx) + 0.5;
 
   if (lastHeard < 0.0 || (now - lastHeard) > threshold)
     {

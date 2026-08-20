@@ -114,6 +114,35 @@ public:
 
   void PrintNeighbors () const;
 
+  bool HasNeighbor (uint16_t neighbor) const
+  {
+    return m_neighbors.find (neighbor) != m_neighbors.end ();
+  }
+
+  double GetNeighborLastHeardSeconds (uint16_t neighbor) const
+  {
+    auto it = m_neighbors.find (neighbor);
+    return it == m_neighbors.end ()
+      ? -1.0
+      : it->second.lastHeardSec;
+  }
+
+  double GetNeighborPathlossDb (uint16_t neighbor) const
+  {
+    auto it = m_neighbors.find (neighbor);
+    return it == m_neighbors.end ()
+      ? std::numeric_limits<double>::quiet_NaN ()
+      : it->second.lastPathlossDb;
+  }
+
+  double GetNeighborSnrDb (uint16_t neighbor) const
+  {
+    auto it = m_neighbors.find (neighbor);
+    return it == m_neighbors.end ()
+      ? std::numeric_limits<double>::quiet_NaN ()
+      : it->second.lastSnrDb;
+  }
+
   void SendRoutingControl (
   uint16_t dst,
   Ptr<Packet> payload);
@@ -738,6 +767,11 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
   frame->RemoveHeader (hdr);
 
+  // OPNET update_neighbor() runs for every packet successfully decoded by
+  // MAC, before HOP checks whether the packet is addressed to this node.
+  // This preserves passive link learning from wireless overhearing.
+  UpdateNeighborHeard (hdr.GetSrc (), pathlossDb, snrDb);
+
   if (hdr.HasDestinationSequences ())
     {
       uint16_t localSequence = 0;
@@ -753,9 +787,6 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
       hdr.SetDst (m_nodeId);
       hdr.SetSeq (localSequence);
     }
-
-  UpdateNeighborHeard (hdr.GetSrc (), pathlossDb, snrDb);
-  //UpdateNeighborHeard (hdr.GetSrc ());
 
   // HELLO is discovery/control; no further processing needed yet
   /*if (hdr.GetType () == CSR_PKT_HELLO)
@@ -776,6 +807,20 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           m_rxHelloFromHopCb (frame, hdr.GetSrc (), pathlossDb, snrDb);
         }
 
+      return;
+    }
+
+  // Non-HELLO traffic addressed elsewhere has already contributed its link
+  // observation above, but must not affect ACK/resend, duplicate suppression,
+  // routing control, or NWK delivery at this node.
+  if (hdr.GetDst () != m_nodeId)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Overheard frame from " << hdr.GetSrc ()
+                << " for " << hdr.GetDst ()
+                << " type=" << unsigned (hdr.GetType ())
+                << " ignored after neighbor update"
+                << std::endl;
       return;
     }
 

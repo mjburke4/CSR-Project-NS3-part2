@@ -71,11 +71,17 @@ OPNET multidestination routing ACK parity test:
 3. Run: ./ns3 run csr-hop-multidest-routing-smoke
 4. Expected: PASS: OPNET multidestination routing ACK parity test
 
-OPNET aggregate preamble selection parity test:
+OPNET preamble freshness and aggregate selection parity test:
 1. Copy csr-mac-preamble-selection-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-mac-preamble-selection-smoke
 3. Run: ./ns3 run csr-mac-preamble-selection-smoke
-4. Expected: PASS: OPNET aggregate preamble selection parity test
+4. Expected: PASS: OPNET preamble freshness and aggregate selection parity test
+
+OPNET wireless overhearing parity test:
+1. Copy csr-wireless-overhearing-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-wireless-overhearing-smoke
+3. Run: ./ns3 run csr-wireless-overhearing-smoke
+4. Expected: PASS: OPNET wireless overhearing parity test
 
 OPNET no-route relay custody/ACK parity test:
 1. Copy csr-hop-no-route-relay-smoke.cc to ns-3-dev/scratch/
