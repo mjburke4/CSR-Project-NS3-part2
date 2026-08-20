@@ -11,6 +11,7 @@ class CsrMacCore
   {}
 
   static constexpr double TS_HOLDOFF_SECONDS = 0.3;
+  static constexpr uint32_t TX_QUEUE_SIZE = 512;
   static constexpr uint32_t ACK_QUEUE_SIZE = 256;
   static constexpr uint32_t MAX_ACK_RESEND = 4;
   static constexpr uint32_t MAX_CONCAT_SEGMENTS = 16;
@@ -153,6 +154,11 @@ class CsrMacCore
   uint32_t GetDataQueuedFrameCount () const
   {
     return static_cast<uint32_t> (m_queue.size ());
+  }
+
+  uint64_t GetDataQueueDropCount () const
+  {
+    return m_dataQueueDropCount;
   }
 
   uint32_t GetAckQueuedFrameCount () const
@@ -352,6 +358,7 @@ private:
   Callback<void, Ptr<Packet>, double, double>  m_rxCallback;
   Callback<void, uint16_t, uint16_t, Time>     m_txSentCallback;
   uint64_t                            m_transmittedFrameCount {0};
+  uint64_t                            m_dataQueueDropCount {0};
   int                                 m_scheduledTxSlot {-1};
   bool                                m_txInProgress {false};
   std::map<uint16_t, NeighborInfo>    m_neighbors;

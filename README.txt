@@ -59,4 +59,16 @@ OPNET HOP retransmission DSCP parity test:
 3. Run: ./ns3 run csr-hop-retry-dscp-smoke
 4. Expected: PASS: OPNET HOP retransmission DSCP parity test
 
+OPNET MAC/HOP queue-limit parity test:
+1. Copy csr-mac-hop-queue-limit-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-mac-hop-queue-limit-smoke
+3. Run: ./ns3 run csr-mac-hop-queue-limit-smoke
+4. Expected: PASS: OPNET MAC/HOP queue-limit parity test
+
+OPNET multidestination routing ACK parity test:
+1. Copy csr-hop-multidest-routing-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-hop-multidest-routing-smoke
+3. Run: ./ns3 run csr-hop-multidest-routing-smoke
+4. Expected: PASS: OPNET multidestination routing ACK parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

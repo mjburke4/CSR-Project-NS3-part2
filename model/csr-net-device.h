@@ -436,8 +436,8 @@ std::cout << "[MAC " << m_id
           {
             CsrHeader segmentHeader;
             segment->PeekHeader (segmentHeader);
-            bool matches = segmentHeader.GetDst () == CSR_BROADCAST_ID ||
-                           segmentHeader.GetDst () == peer->GetId ();
+            bool matches =
+              segmentHeader.IsForDestination (peer->GetId ());
             if (matches && peer->GetId () != txId)
               {
                 receivesFrame = true;
@@ -539,8 +539,7 @@ std::cout << "[MAC " << m_id
           {
             CsrHeader segmentHeader;
             segment->PeekHeader (segmentHeader);
-            if (segmentHeader.GetDst () == CSR_BROADCAST_ID ||
-                segmentHeader.GetDst () == peer->GetId ())
+            if (segmentHeader.IsForDestination (peer->GetId ()))
               {
                 peer->m_mac.DeliverRxFrameToUp (
                   segment->Copy (), d.pathlossDb, d.snrDb);
@@ -663,6 +662,23 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
       return;
     }
 
+  // OPNET checks the non-ACK Tx queue limit before DSCP insertion.  A newly
+  // arriving high-priority frame is dropped rather than displacing an older
+  // lower-priority frame already occupying one of the 512 entries.
+  if (m_queue.size () >= TX_QUEUE_SIZE)
+    {
+      m_dataQueueDropCount++;
+
+      std::cout << "[MAC " << m_nodeId
+                << "] Drop TX: OPNET data queue limit reached"
+                << " dest=" << dest
+                << " dscp=" << unsigned (dscp)
+                << " limit=" << TX_QUEUE_SIZE
+                << " drops=" << m_dataQueueDropCount
+                << std::endl;
+      return;
+    }
+
   TxQueueEntry e;
   e.frame   = frame;
   e.dest    = dest;
@@ -710,6 +726,15 @@ CsrMacCore::CancelAcknowledgedFrames (uint16_t neighbor,
 
       CsrHeader queuedHeader;
       if (!it->frame->PeekHeader (queuedHeader))
+        {
+          ++it;
+          continue;
+        }
+
+      // OPNET's exact-ACK MAC cleanup compares the outer integer
+      // destination.  A routing-control packet with a destination structure
+      // is therefore left intact, even after one member of the group ACKs.
+      if (queuedHeader.HasDestinationSequences ())
         {
           ++it;
           continue;
@@ -858,6 +883,25 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
   if (!ackable)
     {
       return 8;
+    }
+
+  CsrHeader header;
+  if (frame != nullptr &&
+      frame->PeekHeader (header) &&
+      header.HasDestinationSequences ())
+    {
+      int selectedRate = 128;
+      for (const auto &target :
+           header.GetDestinationSequences ())
+        {
+          selectedRate = std::min (
+            selectedRate,
+            SelectRateByPerTarget (
+              target.first,
+              frame->GetSize () * 8,
+              0.50));
+        }
+      return selectedRate;
     }
 
   return SelectRateByPerTarget (dest,
@@ -1061,9 +1105,12 @@ CsrMacCore::DoTx ()
                                  ? CSR_PKT_DACK
                                  : CSR_PKT_DATA));
         }
-      header.SetDestType (entry.dest == CSR_BROADCAST_ID
-                            ? CSR_DEST_BROADCAST
-                            : CSR_DEST_UNICAST);
+      header.SetDestType (
+        header.HasDestinationSequences ()
+          ? CSR_DEST_MULTICAST
+          : (entry.dest == CSR_BROADCAST_ID
+               ? CSR_DEST_BROADCAST
+               : CSR_DEST_UNICAST));
       entry.frame->AddHeader (header);
       wireFrames.push_back (entry.frame);
       anyAckable = anyAckable || entry.ackable;
