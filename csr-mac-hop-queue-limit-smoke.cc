@@ -156,9 +156,9 @@ TestMacDropLeavesInitialResendUnarmed ()
   hop->SetNodeId (1);
   hop->SetMac (&device->GetMac ());
 
-  CsrPerModelFn unavailable =
+  CsrPerModelFn alwaysDrops =
     [] (int, double, uint32_t) { return 1.0; };
-  device->GetPhy ().SetPerModel (unavailable);
+  device->GetPhy ().SetPerModel (alwaysDrops);
 
   for (uint16_t sequence = 1;
        sequence <= CsrMacCore::TX_QUEUE_SIZE;
@@ -185,8 +185,11 @@ TestMacDropLeavesInitialResendUnarmed ()
            "unconfirmed initial HOP frame retried or timed out");
   Require (hop->GetPendingDataCount () == 1,
            "unconfirmed initial HOP frame released pending flow control");
-  Require (device->GetMac ().GetTransmittedFrameCount () == 0,
-           "hopeless-link MAC unexpectedly transmitted a blocker");
+  Require (device->GetMac ().GetTransmittedFrameCount () > 0,
+           "PER=1 incorrectly suppressed all MAC transmissions");
+  Require (device->GetMac ().GetDataQueuedFrameCount () <
+             CsrMacCore::TX_QUEUE_SIZE,
+           "PER=1 prevented the accepted blocker queue from draining");
 
   Simulator::Destroy ();
 }

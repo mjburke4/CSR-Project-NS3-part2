@@ -1091,34 +1091,6 @@ CsrMacCore::DoTx ()
     }
 
   uint16_t dest = selected.front ().dest;
-  uint32_t bits = byteCount * 8;
-
-  // --- Guard: do not transmit if link is hopeless even at most robust rate ---
-  const CsrPhyModel& phy = m_dev->GetPhy ();
-  uint16_t txId = m_dev->GetId ();
-
-  double snrDb = phy.PredictSnrDb (txId, dest, phy.profile.txPowerDbm);
-  double perAtMinRate = phy.EstimatePer (8 /*kbps*/, snrDb, bits);
-
-  // Processing gain (matches what you're printing elsewhere)
-  double rb = CsrRateKeyToBps (8);
-  double procGainDb = 10.0 * std::log10 (m_dev->GetPhy ().profile.rxBwHz / (2.0 * rb));
-  double effSnrDb = snrDb + procGainDb;
-
-  if (perAtMinRate >= 0.99)
-    {
-      std::cout << "[MAC] Deferring TX tx=" << txId
-                << " dest=" << dest
-                << " snr=" << snrDb
-                << " effSnr=" << effSnrDb
-                << " per@8=" << perAtMinRate
-                << " (hopeless link)"
-                << std::endl;
-
-      // Coarse backoff; packet stays at the front of the queue
-      m_txEvent = Simulator::Schedule (Seconds (1.0), &CsrMacCore::DoTx, this);
-      return;
-    }
 
   std::vector<Ptr<Packet>> wireFrames;
   wireFrames.reserve (selected.size ());

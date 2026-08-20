@@ -461,6 +461,9 @@ public:
         m_hop->SetShouldDackCallback (
           MakeCallback (&CsrNetLayer::ShouldDack, this));
 
+        m_hop->SetRelayRouteAvailableCallback (
+          MakeCallback (&CsrNetLayer::HasRelayRoute, this));
+
         m_hop->SetLinkFailureCallback (
           MakeCallback (&CsrNetLayer::NoteLinkFailure, this));
 
@@ -491,6 +494,12 @@ public:
   void SetRxFromNetCallback (Callback<void, Ptr<Packet>, uint16_t> cb)
   {
     m_rxFromNetCb = cb;
+  }
+
+  bool HasRelayRoute (uint16_t nwkDst)
+  {
+    uint16_t nextHop;
+    return LookupNextHop (nwkDst, nextHop);
   }
 
   bool ShouldDack (uint16_t src, uint16_t dst)
