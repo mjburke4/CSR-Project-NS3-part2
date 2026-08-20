@@ -82,11 +82,14 @@ public:
       m_isAck (false),
       m_isDack (false),
       m_hasAckWindow (false),
+      m_hasLinkControl (false),
       m_ackBitmap (0),
       m_dackBitmap (0),
       m_type (CSR_PKT_DATA),
       m_destType (CSR_DEST_UNICAST),
-      m_speedKey (8)
+      m_speedKey (8),
+      m_txPowerDbmX10 (0),
+      m_rxPowerDbmX10 (0)
   {}
 
   CsrHeader (uint16_t src, uint16_t dst, uint16_t seq,
@@ -99,11 +102,14 @@ public:
       m_isAck (isAck),
       m_isDack (false),
       m_hasAckWindow (false),
+      m_hasLinkControl (false),
       m_ackBitmap (0),
       m_dackBitmap (0),
       m_type (isAck ? CSR_PKT_ACK : CSR_PKT_DATA),
       m_destType (CSR_DEST_UNICAST),
-      m_speedKey (8)
+      m_speedKey (8),
+      m_txPowerDbmX10 (0),
+      m_rxPowerDbmX10 (0)
   {}
 
   static TypeId GetTypeId (void)
@@ -139,6 +145,7 @@ public:
 
     return baseSize +
            (m_hasAckWindow ? 16 : 0) +
+           (m_hasLinkControl ? 4 : 0) +
            targetListSize;
 
   }
@@ -151,6 +158,7 @@ public:
     if (m_isDack)  { flags |= 0x04; }
     if (m_hasAckWindow) { flags |= 0x08; }
     if (!m_destinationSequences.empty ()) { flags |= 0x10; }
+    if (m_hasLinkControl) { flags |= 0x20; }
 
     start.WriteHtonU16 (m_src);
     start.WriteHtonU16 (m_dst);
@@ -165,6 +173,14 @@ public:
       {
         start.WriteHtonU64 (m_ackBitmap);
         start.WriteHtonU64 (m_dackBitmap);
+      }
+
+    if (m_hasLinkControl)
+      {
+        start.WriteHtonU16 (
+          static_cast<uint16_t> (m_txPowerDbmX10));
+        start.WriteHtonU16 (
+          static_cast<uint16_t> (m_rxPowerDbmX10));
       }
 
     if (!m_destinationSequences.empty ())
@@ -192,6 +208,7 @@ public:
     m_isDack  = (flags & 0x04) != 0;
     m_hasAckWindow = (flags & 0x08) != 0;
     bool hasDestinationSequences = (flags & 0x10) != 0;
+    m_hasLinkControl = (flags & 0x20) != 0;
 
     // Always read the extended fields (Serialize always writes them)
     m_type     = start.ReadU8 ();
@@ -207,6 +224,19 @@ public:
       {
         m_ackBitmap = 0;
         m_dackBitmap = 0;
+      }
+
+    if (m_hasLinkControl)
+      {
+        m_txPowerDbmX10 =
+          static_cast<int16_t> (start.ReadNtohU16 ());
+        m_rxPowerDbmX10 =
+          static_cast<int16_t> (start.ReadNtohU16 ());
+      }
+    else
+      {
+        m_txPowerDbmX10 = 0;
+        m_rxPowerDbmX10 = 0;
       }
 
     m_destinationSequences.clear ();
@@ -237,6 +267,7 @@ public:
 
     return baseSize +
            (m_hasAckWindow ? 16 : 0) +
+           (m_hasLinkControl ? 4 : 0) +
            targetListSize;
   }
 
@@ -250,9 +281,18 @@ public:
        << " isAck=" << m_isAck
        << " isDack=" << m_isDack
        << " hasAckWindow=" << m_hasAckWindow
+       << " hasLinkControl=" << m_hasLinkControl
        << " type=" << unsigned(m_type)
        << " destType=" << unsigned(m_destType)
        << " speedKey=" << unsigned(m_speedKey);
+
+    if (m_hasLinkControl)
+      {
+        os << " txPowerDbm="
+           << static_cast<double> (m_txPowerDbmX10) / 10.0
+           << " rxPowerDbm="
+           << static_cast<double> (m_rxPowerDbmX10) / 10.0;
+      }
 
     if (m_hasAckWindow)
       {
@@ -318,6 +358,30 @@ public:
 
   void SetSpeedKey (uint8_t v)  { m_speedKey = v; }
   uint8_t GetSpeedKey () const  { return m_speedKey; }
+
+  void SetLinkControl (uint8_t speedKey,
+                       double txPowerDbm,
+                       double rxPowerDbm)
+  {
+    m_speedKey = speedKey;
+    m_txPowerDbmX10 = static_cast<int16_t> (
+      std::round (txPowerDbm * 10.0));
+    m_rxPowerDbmX10 = static_cast<int16_t> (
+      std::round (rxPowerDbm * 10.0));
+    m_hasLinkControl = true;
+  }
+
+  bool HasLinkControl () const { return m_hasLinkControl; }
+
+  double GetTxPowerDbm () const
+  {
+    return static_cast<double> (m_txPowerDbmX10) / 10.0;
+  }
+
+  double GetRxPowerDbm () const
+  {
+    return static_cast<double> (m_rxPowerDbmX10) / 10.0;
+  }
 
   void SetDestinationSequences (
     const std::vector<DestinationSequence> &targets)
@@ -394,11 +458,14 @@ private:
   bool     m_isAck;
   bool     m_isDack;
   bool     m_hasAckWindow;
+  bool     m_hasLinkControl;
   uint64_t m_ackBitmap;
   uint64_t m_dackBitmap;
   uint8_t  m_type;
   uint8_t  m_destType;
   uint8_t  m_speedKey;
+  int16_t  m_txPowerDbmX10;
+  int16_t  m_rxPowerDbmX10;
   std::vector<DestinationSequence> m_destinationSequences;
 
 };
