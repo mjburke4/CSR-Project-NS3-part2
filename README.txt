@@ -23,6 +23,12 @@ NWK/HOP integration parity test:
 3. Run: ./ns3 run csr-nwk-hop-integration-smoke
 4. Expected: PASS: NWK/HOP integration parity test
 
+Strict OPNET NWK legacy behavior test:
+1. Copy csr-nwk-legacy-strict-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-nwk-legacy-strict-smoke
+3. Run: ./ns3 run csr-nwk-legacy-strict-smoke
+4. Expected: PASS: strict OPNET NWK legacy behavior test
+
 MAC/HOP sent-time parity test:
 1. Copy csr-hop-mac-sent-time-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-hop-mac-sent-time-smoke

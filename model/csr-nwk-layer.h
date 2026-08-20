@@ -524,7 +524,7 @@ public:
   void Send (uint16_t dst,
              uint8_t dscp,
              Ptr<Packet> payload,
-             bool ack)
+             bool ackRequested)
   {
     // Wrap the app payload in a CsrNetHeader carrying nwk src/dst/DSCP.
     Ptr<Packet> framed = payload->Copy ();
@@ -535,8 +535,20 @@ public:
     e.nwkSrc  = m_nodeId;
     e.nwkDst  = dst;
     e.dscp    = dscp;
-    e.ack     = ack;
+    // This OPNET build has ENABLE_ACK_RESEND set globally.  Every
+    // br_Hop DATA packet is therefore ACKable and Resendable; the
+    // application cannot opt an individual DATA packet out of reliability.
+    e.ack     = true;
     e.payload = framed;
+
+    if (!ackRequested)
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] Ignoring non-ACKable DATA request"
+                  << " dst=" << dst
+                  << " to match legacy ENABLE_ACK_RESEND"
+                  << std::endl;
+      }
 
     // NSDP: increment count for (nwkSrc, nwkDst)
     NsdpEntry &nsdp = GetNsdpEntry (e.nwkSrc, e.nwkDst);
@@ -546,16 +558,17 @@ public:
             << "->" << e.nwkDst << ") incremented to "
             << nsdp.count << std::endl;
 
-    // Simple priority: higher DSCP closer to front
-    auto it = m_nwkQueue.begin ();
-    for (; it != m_nwkQueue.end (); ++it)
+    // OPNET does not numerically sort positive DSCP values here.  Every
+    // positive-DSCP arrival is inserted at the head, while DSCP zero is
+    // appended at the tail.  This intentionally makes positive traffic LIFO.
+    if (dscp > 0)
       {
-        if (dscp > it->dscp)
-          {
-            break;
-          }
+        m_nwkQueue.push_front (e);
       }
-    m_nwkQueue.insert (it, e);
+    else
+      {
+        m_nwkQueue.push_back (e);
+      }
 
     ScheduleCheckNwkQueue ();
   }
@@ -646,16 +659,16 @@ public:
         NsdpEntry &nsdp = GetNsdpEntry (e.nwkSrc, e.nwkDst);
         nsdp.count++;
 
-        // Priority insert by DSCP
-        auto it = m_nwkQueue.begin ();
-        for (; it != m_nwkQueue.end (); ++it)
+        // Match proc_hop_pk(): all positive DSCP relay traffic goes to the
+        // head, and best-effort traffic goes to the tail.
+        if (dscp > 0)
           {
-            if (dscp > it->dscp)
-              {
-                break;
-              }
+            m_nwkQueue.push_front (e);
           }
-        m_nwkQueue.insert (it, e);
+        else
+          {
+            m_nwkQueue.push_back (e);
+          }
 
         ScheduleCheckNwkQueue ();
       }
@@ -1295,7 +1308,10 @@ private:
     if (!m_checkNwkQueueEvent.IsPending ())
       {
         m_checkNwkQueueEvent =
-          Simulator::ScheduleNow (&CsrNetLayer::CheckNwkQueue, this);
+          Simulator::Schedule (
+            Seconds (1.0 / 36.0e6),
+            &CsrNetLayer::CheckNwkQueue,
+            this);
       }
   }
 
@@ -1332,12 +1348,10 @@ private:
         uint16_t hopDest;
         if (!LookupNextHop (it->nwkDst, hopDest))
           {
-            EnsureDiscoveryForTx ();
-
             std::cout << "[NWK " << m_nodeId
                       << "] No route to nwkDst="
                       << it->nwkDst
-                      << " -> on-demand discovery; holding packet"
+                      << " -> holding packet without implicit discovery"
                       << std::endl;
 
             ++it;
@@ -2155,8 +2169,6 @@ private:
     uint32_t discoverySequence = 0,
     uint32_t routingSequence = 0);
 
-  void EnsureDiscoveryForTx ();
-
   std::set<uint16_t>
   ProcessRoutesPayload (
     const CsrHelloHeader &hh,
@@ -2808,7 +2820,7 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
                   linkCost,
                   0,
                   src,   // learned from the neighbor itself
-                  0);
+                  static_cast<uint8_t> (senderType));
 
     // ------------------------------------------------------------
     // 3) Advertised route from HELLO sender
@@ -4675,17 +4687,6 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
   // by ProcessHello() before this subtype handler was called.
 }
 
-void CsrNetLayer::EnsureDiscoveryForTx ()
-{
-  if (m_discState != DiscoveryState::IDLE)
-    {
-      return;
-    }
-
-  std::cout << "[NWK " << m_nodeId << "] No route/next-hop -> starting on-demand discovery\n";
-  StartDiscovery (Seconds (0.0), Seconds (30.0));
-}
-
 void CsrNetLayer::SetRepeatDiscoveryHello (bool enable)
 {
   m_repeatDiscoveryHello = enable;
@@ -5023,20 +5024,10 @@ CsrNetLayer::SendHelloBroadcast (
 uint32_t
 CsrNetLayer::GetActiveNodeCount () const
 {
-  uint32_t activeCount = 1; // local node
-
-  for (const auto &kv : m_nwkNeighbors)
-    {
-      const NwkNeighborEntry &neighbor = kv.second;
-
-      if (neighbor.lastHeardSec >= 0.0 &&
-          !neighbor.stale)
-        {
-          activeCount++;
-        }
-    }
-
-  return activeCount;
+  // OPNET raises active_nodes from neighbor-list size + 1 and never lowers
+  // it when a known neighbor becomes inactive.  Neighbor records are kept
+  // across ClearRoutes(), so their count is the legacy historical maximum.
+  return static_cast<uint32_t> (m_nwkNeighbors.size ()) + 1;
 }
 
 uint32_t
