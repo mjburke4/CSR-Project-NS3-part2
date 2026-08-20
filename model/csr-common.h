@@ -339,6 +339,22 @@ public:
     return m_destinationSequences;
   }
 
+  std::vector<uint16_t> EnumerateDestinations () const
+  {
+    if (m_destinationSequences.empty ())
+      {
+        return {m_dst};
+      }
+
+    std::vector<uint16_t> destinations;
+    destinations.reserve (m_destinationSequences.size ());
+    for (const auto &target : m_destinationSequences)
+      {
+        destinations.push_back (target.first);
+      }
+    return destinations;
+  }
+
   bool GetSequenceForDestination (
     uint16_t destination,
     uint16_t &sequence) const
@@ -358,16 +374,15 @@ public:
 
   bool IsForDestination (uint16_t destination) const
   {
-    if (m_destinationSequences.empty ())
+    for (uint16_t target : EnumerateDestinations ())
       {
-        return m_dst == CSR_BROADCAST_ID ||
-               m_dst == destination;
+        if (target == CSR_BROADCAST_ID ||
+            target == destination)
+          {
+            return true;
+          }
       }
-
-    uint16_t ignoredSequence = 0;
-    return GetSequenceForDestination (
-      destination,
-      ignoredSequence);
+    return false;
   }
 
 private:

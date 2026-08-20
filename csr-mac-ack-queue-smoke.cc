@@ -197,10 +197,13 @@ main ()
   Require (g_sender->GetMac ().GetDataQueuedFrameCount () == 1,
            "ACK coalescing disturbed the ordinary data queue");
 
-  Simulator::Schedule (Seconds (6.0),
+  // ACK destinations now participate in OPNET preamble selection.  Node 1 has
+  // not heard node 2, so all seven transmissions legitimately carry the
+  // 0.9-second long preamble and need a wider observation window.
+  Simulator::Schedule (Seconds (9.0),
                        &CheckCompletedExchange,
                        g_sender);
-  Simulator::Stop (Seconds (6.1));
+  Simulator::Stop (Seconds (9.1));
   Simulator::Run ();
   Simulator::Destroy ();
 

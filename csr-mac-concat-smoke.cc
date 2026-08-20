@@ -98,8 +98,10 @@ RunMixedAckDataScenario ()
   sender->GetMac ().EnqueueTxFrame (BuildFrame (100, true), 2, 0, false);
   sender->GetMac ().EnqueueTxFrame (BuildFrame (101, true), 2, 0, false);
 
-  Simulator::Schedule (Seconds (5.5), &CheckMixedAggregate, sender);
-  Simulator::Stop (Seconds (5.6));
+  // Unknown ACK receivers require OPNET long preambles, including the four
+  // ACK-only retry aggregates after the initial mixed aggregate.
+  Simulator::Schedule (Seconds (7.5), &CheckMixedAggregate, sender);
+  Simulator::Stop (Seconds (7.6));
   Simulator::Run ();
   Simulator::Destroy ();
 }

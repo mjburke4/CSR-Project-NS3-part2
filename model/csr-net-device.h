@@ -886,18 +886,15 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
     }
 
   CsrHeader header;
-  if (frame != nullptr &&
-      frame->PeekHeader (header) &&
-      header.HasDestinationSequences ())
+  if (frame != nullptr && frame->PeekHeader (header))
     {
       int selectedRate = 128;
-      for (const auto &target :
-           header.GetDestinationSequences ())
+      for (uint16_t target : header.EnumerateDestinations ())
         {
           selectedRate = std::min (
             selectedRate,
             SelectRateByPerTarget (
-              target.first,
+              target,
               frame->GetSize () * 8,
               0.50));
         }
@@ -932,6 +929,44 @@ CsrMacCore::FitsConcatFrame (Ptr<Packet> frame,
   int aggregateRate = std::min (frameRateKbps, currentRateKbps);
   uint32_t limit = GetConcatByteLimit (aggregateRate);
   return limit > 0 && byteCount + frame->GetSize () < limit;
+}
+
+PreambleType
+CsrMacCore::SelectAggregatePreamble (
+  const std::vector<SelectedTxFrame> &selected,
+  bool concatenating)
+{
+  // Preserve a legacy limitation: outside the concatenation branch OPNET
+  // reads only the packet's scalar/primary destination, even when the packet
+  // also contains a destination structure.
+  if (!concatenating)
+    {
+      return ChoosePreambleForDest (selected.front ().dest);
+    }
+
+  // OPNET keeps the earliest last_rcvd_time while it packs ACKs and then DATA.
+  // Destination structures are walked member by member, so any stale or
+  // unknown receiver represented anywhere in the aggregate requires LONG.
+  for (const auto &entry : selected)
+    {
+      CsrHeader header;
+      if (entry.frame != nullptr && entry.frame->PeekHeader (header))
+        {
+          for (uint16_t destination : header.EnumerateDestinations ())
+            {
+              if (ChoosePreambleForDest (destination) == PREAMBLE_LONG)
+                {
+                  return PREAMBLE_LONG;
+                }
+            }
+        }
+      else if (ChoosePreambleForDest (entry.dest) == PREAMBLE_LONG)
+        {
+          return PREAMBLE_LONG;
+        }
+    }
+
+  return PREAMBLE_SHORT;
 }
 
 void
@@ -1088,7 +1123,7 @@ CsrMacCore::DoTx ()
   std::vector<Ptr<Packet>> wireFrames;
   wireFrames.reserve (selected.size ());
   bool anyAckable = false;
-  PreambleType pt = PREAMBLE_SHORT;
+  PreambleType pt = SelectAggregatePreamble (selected, concatenate);
 
   for (auto &entry : selected)
     {
@@ -1114,12 +1149,15 @@ CsrMacCore::DoTx ()
       entry.frame->AddHeader (header);
       wireFrames.push_back (entry.frame);
       anyAckable = anyAckable || entry.ackable;
+    }
 
-      if (!header.IsAck () && !header.IsDack () &&
-          ChoosePreambleForDest (entry.dest) == PREAMBLE_LONG)
-        {
-          pt = PREAMBLE_LONG;
-        }
+  if (pt == PREAMBLE_LONG)
+    {
+      m_longPreambleTxCount++;
+    }
+  else
+    {
+      m_shortPreambleTxCount++;
     }
 
   // OPNET includes a newly selected future reservation in every OTA frame.
