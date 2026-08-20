@@ -77,4 +77,10 @@ OPNET aggregate preamble selection parity test:
 3. Run: ./ns3 run csr-mac-preamble-selection-smoke
 4. Expected: PASS: OPNET aggregate preamble selection parity test
 
+OPNET no-route relay custody/ACK parity test:
+1. Copy csr-hop-no-route-relay-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-hop-no-route-relay-smoke
+3. Run: ./ns3 run csr-hop-no-route-relay-smoke
+4. Expected: PASS: no-route relay custody/ACK parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

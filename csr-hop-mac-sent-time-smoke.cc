@@ -11,6 +11,8 @@ using namespace ns3;
 namespace
 {
 
+constexpr uint32_t BLOCKER_COUNT = 3;
+
 uint32_t g_nsdpReleases = 0;
 uint32_t g_linkFailures = 0;
 
@@ -40,27 +42,37 @@ ReportLinkFailure (uint16_t neighbor)
   g_linkFailures++;
 }
 
-void
-CheckDeferredInitialFrame (Ptr<CsrNetDevice> device,
-                           Ptr<CsrHopLayer> hop)
+Ptr<Packet>
+BuildBlockerFrame (uint16_t sequence)
 {
-  Require (device->GetMac ().GetTransmittedFrameCount () == 0,
-           "MAC transmitted while the test link was unavailable");
-  Require (device->GetMac ().GetQueuedFrameCount () == 1,
+  CsrHeader header (1, 2, sequence, 7, false, false);
+  header.SetType (CSR_PKT_DATA);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetSpeedKey (8);
+
+  Ptr<Packet> frame = Create<Packet> (200);
+  frame->AddHeader (header);
+  return frame;
+}
+
+void
+CheckInitialFrameBehindBlockers (Ptr<CsrNetDevice> device,
+                                 Ptr<CsrHopLayer> hop)
+{
+  Require (device->GetMac ().GetTransmittedFrameCount () == 2,
+           "MAC did not transmit the expected leading blockers");
+  Require (device->GetMac ().GetQueuedFrameCount () == 2,
            "HOP enqueued a premature retransmission before the initial TX");
   Require (hop->GetPendingDataCount () == 1,
            "deferred initial frame did not retain its HOP pending slot");
-
-  CsrPerModelFn noErrors =
-    [] (int, double, uint32_t) { return 0.0; };
-  device->GetPhy ().SetPerModel (noErrors);
 }
 
 void
 CheckBeforeFirstRetry (Ptr<CsrNetDevice> device,
                        Ptr<CsrHopLayer> hop)
 {
-  Require (device->GetMac ().GetTransmittedFrameCount () == 1,
+  Require (device->GetMac ().GetTransmittedFrameCount () ==
+             BLOCKER_COUNT + 1,
            "first retry was scheduled from HOP enqueue time instead of MAC sent time");
   Require (device->GetMac ().GetQueuedFrameCount () <= 1,
            "more than one retry was queued behind MAC slot contention");
@@ -71,14 +83,16 @@ CheckBeforeFirstRetry (Ptr<CsrNetDevice> device,
 void
 CheckFirstRetry (Ptr<CsrNetDevice> device)
 {
-  Require (device->GetMac ().GetTransmittedFrameCount () == 2,
+  Require (device->GetMac ().GetTransmittedFrameCount () ==
+             BLOCKER_COUNT + 2,
            "first OPNET resend did not occur two seconds after actual TX");
 }
 
 void
 CheckSecondRetry (Ptr<CsrNetDevice> device)
 {
-  Require (device->GetMac ().GetTransmittedFrameCount () == 3,
+  Require (device->GetMac ().GetTransmittedFrameCount () ==
+             BLOCKER_COUNT + 3,
            "second OPNET resend did not occur two seconds after the first resend");
 }
 
@@ -97,7 +111,8 @@ void
 CheckFinalTimeout (Ptr<CsrNetDevice> device,
                    Ptr<CsrHopLayer> hop)
 {
-  Require (device->GetMac ().GetTransmittedFrameCount () == 3,
+  Require (device->GetMac ().GetTransmittedFrameCount () ==
+             BLOCKER_COUNT + 3,
            "OPNET parity requires one initial TX plus exactly two resends");
   Require (device->GetMac ().GetQueuedFrameCount () == 0,
            "MAC retained a frame after final HOP timeout");
@@ -125,11 +140,22 @@ main ()
   hop->SetNsdpDecrementCallback (MakeCallback (&ReleaseNsdp));
   hop->SetLinkFailureCallback (MakeCallback (&ReportLinkFailure));
 
-  // Keep the original frame in MAC for three seconds.  OPNET does not start
-  // the HOP resend timer until MAC confirms the actual transmission instant.
-  CsrPerModelFn unavailable =
+  // OPNET still transmits when the predicted link PER is one.  Three large,
+  // higher-priority frames provide ordinary MAC contention so the DATA frame
+  // remains queued long enough to verify that HOP starts its timer at the
+  // actual transmission instant rather than the enqueue instant.
+  CsrPerModelFn alwaysDrops =
     [] (int, double, uint32_t) { return 1.0; };
-  device->GetPhy ().SetPerModel (unavailable);
+  device->GetPhy ().SetPerModel (alwaysDrops);
+
+  for (uint16_t index = 0; index < BLOCKER_COUNT; ++index)
+    {
+      device->GetMac ().EnqueueTxFrame (
+        BuildBlockerFrame (100 + index),
+        2,
+        7,
+        false);
+    }
 
   Ptr<Packet> payload = Create<Packet> (32);
   CsrNetHeader networkHeader (1, 3, 5);
@@ -138,31 +164,31 @@ main ()
   hop->SendData (2, 5, payload, true);
 
   Simulator::Schedule (Seconds (2.5),
-                       &CheckDeferredInitialFrame,
+                       &CheckInitialFrameBehindBlockers,
                        device,
                        hop);
-  // Once the link becomes available, the initial frame must first reach its
-  // selected MAC slot.  Each HOP retry then enters a fresh 300-ms holdoff and
-  // slot countdown; use windows that cover every OPNET slot in [1,18].
-  Simulator::Schedule (Seconds (4.4),
+  // The initial frame follows all three blockers. Each HOP retry then enters
+  // a fresh 300-ms holdoff and slot countdown; these checkpoints cover every
+  // OPNET slot in [1,18].
+  Simulator::Schedule (Seconds (5.7),
                        &CheckBeforeFirstRetry,
                        device,
                        hop);
-  Simulator::Schedule (Seconds (6.1),
+  Simulator::Schedule (Seconds (7.3),
                        &CheckFirstRetry,
                        device);
-  Simulator::Schedule (Seconds (8.7),
+  Simulator::Schedule (Seconds (9.9),
                        &CheckSecondRetry,
                        device);
-  Simulator::Schedule (Seconds (11.0),
+  Simulator::Schedule (Seconds (12.2),
                        &CheckFinalGraceStillHeld,
                        hop);
-  Simulator::Schedule (Seconds (12.7),
+  Simulator::Schedule (Seconds (13.9),
                        &CheckFinalTimeout,
                        device,
                        hop);
 
-  Simulator::Stop (Seconds (13.0));
+  Simulator::Stop (Seconds (14.2));
   Simulator::Run ();
   Simulator::Destroy ();
 

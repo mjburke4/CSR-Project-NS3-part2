@@ -72,6 +72,11 @@ public:
     m_shouldDackCb = cb;
   }
 
+  void SetRelayRouteAvailableCallback (Callback<bool, uint16_t> cb)
+  {
+    m_relayRouteAvailableCb = cb;
+  }
+
   void SetLinkFailureCallback (Callback<void, uint16_t> cb)
   {
     m_linkFailureCb = cb;
@@ -351,6 +356,8 @@ private:
   Callback<void, Ptr<Packet>, uint16_t, double, double> m_rxHelloFromHopCb;
 
   Callback<bool, uint16_t, uint16_t> m_shouldDackCb;
+
+  Callback<bool, uint16_t> m_relayRouteAvailableCb;
 
   Callback<void, uint16_t> m_linkFailureCb;
 
@@ -945,6 +952,29 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
   {
     return;
   }
+
+  // Legacy proc_mac_pk() records the sequence before consulting the route
+  // table.  A first reception that cannot be relayed is discarded without an
+  // ACK; a retry is therefore recognized as a duplicate and receives an ACK.
+  if (firstReception &&
+      !m_relayRouteAvailableCb.IsNull ())
+    {
+      CsrNetHeader nwkHeader;
+      if (payload->PeekHeader (nwkHeader) &&
+          nwkHeader.GetDst () != m_nodeId &&
+          !m_relayRouteAvailableCb (nwkHeader.GetDst ()))
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop first relay DATA without onward route"
+                    << " nwkSrc=" << nwkHeader.GetSrc ()
+                    << " nwkDst=" << nwkHeader.GetDst ()
+                    << " hopSrc=" << src
+                    << " seq=" << hdr.GetSeq ()
+                    << " ACK suppressed"
+                    << std::endl;
+          return;
+        }
+    }
 
   // 1) Deliver up on first reception (lets Net update NSDP for relays)
   if (firstReception && !m_rxFromHopCb.IsNull ())
