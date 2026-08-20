@@ -21,6 +21,16 @@ class CsrMacCore
   int SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const;
   void PrintNeighbors () const;
 
+  int GetLastTxRateKbps () const
+  {
+    return m_lastTxRateKbps;
+  }
+
+  double GetLastTxPowerDbm () const
+  {
+    return m_lastTxPowerDbm;
+  }
+
   void NoteReportedActiveNodes (uint32_t n)
   {
     uint32_t reported = std::max<uint32_t> (1, n);
@@ -327,6 +337,7 @@ private:
     bool        fromAckQueue;
     uint32_t    queueIndex;
     int         rateKbps;
+    double      txPowerDbm;
   };
 
   EventId   m_helloEvent;
@@ -350,6 +361,7 @@ private:
   int SelectQueuedFrameRate (Ptr<Packet> frame,
                              uint16_t dest,
                              bool ackable) const;
+  double SelectQueuedFrameTxPower (Ptr<Packet> frame) const;
   uint32_t GetConcatByteLimit (int rateKbps) const;
   bool FitsConcatFrame (Ptr<Packet> frame,
                         int frameRateKbps,
@@ -374,6 +386,8 @@ private:
   uint64_t                            m_longPreambleTxCount {0};
   uint64_t                            m_shortPreambleTxCount {0};
   uint64_t                            m_dataQueueDropCount {0};
+  int                                 m_lastTxRateKbps {0};
+  double                              m_lastTxPowerDbm {0.0};
   int                                 m_scheduledTxSlot {-1};
   bool                                m_txInProgress {false};
   std::map<uint16_t, NeighborInfo>    m_neighbors;

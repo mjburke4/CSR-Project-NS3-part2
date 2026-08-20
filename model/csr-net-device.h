@@ -97,12 +97,14 @@ public:
   Time SendToPeer (Ptr<Packet> frame,
                    uint16_t dest,
                    int rateKbps,
+                   double txPowerDbm,
                    PreambleType preamble,
                    int slot,
                    bool ackable);
 
   Time SendFramesToPeers (const std::vector<Ptr<Packet>> &frames,
                           int rateKbps,
+                          double txPowerDbm,
                           PreambleType preamble,
                           int slot,
                           bool ackable);
@@ -325,6 +327,7 @@ Time
 CsrNetDevice::SendToPeer (Ptr<Packet> frame,
                           uint16_t dest,
                           int rateKbps,
+                          double txPowerDbm,
                           PreambleType preamble,
                           int slot,
                           bool ackable)
@@ -333,6 +336,7 @@ CsrNetDevice::SendToPeer (Ptr<Packet> frame,
   frames.push_back (frame);
   return SendFramesToPeers (frames,
                             rateKbps,
+                            txPowerDbm,
                             preamble,
                             slot,
                             ackable);
@@ -342,6 +346,7 @@ Time
 CsrNetDevice::SendFramesToPeers (
   const std::vector<Ptr<Packet>> &frames,
   int rateKbps,
+  double txPowerDbm,
   PreambleType preamble,
   int slot,
   bool ackable)
@@ -380,6 +385,7 @@ CsrNetDevice::SendFramesToPeers (
               << " segments " << frameCopies.size ()
               << " at slot " << slot
               << " rate " << rateKbps << " kbps"
+              << " txPower " << txPowerDbm << " dBm"
               << " (" << rbps << " bps)"
               << " preamble " << (preamble == PREAMBLE_LONG ? "LONG" : "SHORT")
               << " duration " << duration << " s"
@@ -415,7 +421,8 @@ std::cout << "[MAC " << m_id
   uint16_t seq    = hdrOnTx.GetSeq ();
 
   Simulator::Schedule (Seconds (propDelay + duration),
-                     [self, frameCopies, rateKbps, preamble, slot, ackable,
+                     [self, frameCopies, rateKbps, txPowerDbm,
+                      preamble, slot, ackable,
                       txId, seq, txTime, propDelay, duration, payloadBytes]() {
     if (self->m_peers.empty ())
       {
@@ -467,6 +474,7 @@ std::cout << "[MAC " << m_id
         CsrRxDecision d = peer->m_phy.EvaluateRx (txId,
                                                 peer->GetId (),
                                                 rateKbps,
+                                                txPowerDbm,
                                                 packetBits,
                                                 peer->m_rng);
 
@@ -506,6 +514,7 @@ std::cout << "[MAC " << m_id
                   << " from node " << txId
                   << " seq " << seq
                   << " rate " << rateKbps << " kbps"
+                  << " txPower " << txPowerDbm << " dBm"
                   << " preamble " << (preamble == PREAMBLE_LONG ? "LONG" : "SHORT")
                   << " pathloss " << d.pathlossDb << " dB"
                   << " snr " << d.snrDb << " dB"
@@ -878,14 +887,29 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
                                    uint16_t dest,
                                    bool ackable) const
 {
-  if (!ackable)
-    {
-      return 8;
-    }
-
   CsrHeader header;
   if (frame != nullptr && frame->PeekHeader (header))
     {
+      if (header.HasLinkControl ())
+        {
+          switch (header.GetSpeedKey ())
+            {
+            case 8:
+            case 16:
+            case 32:
+            case 64:
+            case 128:
+              return header.GetSpeedKey ();
+            default:
+              return 8;
+            }
+        }
+
+      if (!ackable)
+        {
+          return 8;
+        }
+
       int selectedRate = 128;
       for (uint16_t target : header.EnumerateDestinations ())
         {
@@ -899,9 +923,29 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
       return selectedRate;
     }
 
+  if (!ackable)
+    {
+      return 8;
+    }
+
   return SelectRateByPerTarget (dest,
                                 frame->GetSize () * 8,
                                 0.50);
+}
+
+double
+CsrMacCore::SelectQueuedFrameTxPower (Ptr<Packet> frame) const
+{
+  CsrHeader header;
+  if (frame != nullptr && frame->PeekHeader (header) &&
+      header.HasLinkControl ())
+    {
+      return header.GetTxPowerDbm ();
+    }
+
+  return m_dev == nullptr
+    ? 0.0
+    : m_dev->GetPhy ().profile.txPowerDbm;
 }
 
 uint32_t
@@ -1010,7 +1054,8 @@ CsrMacCore::DoTx ()
                                false,
                                true,
                                i,
-                               rate});
+                               rate,
+                               SelectQueuedFrameTxPower (entry.frame)});
         }
 
       // Data is removed strictly from the priority queue head.  A non-fitting
@@ -1040,7 +1085,8 @@ CsrMacCore::DoTx ()
                                entry.ackable,
                                false,
                                i,
-                               rate});
+                               rate,
+                               SelectQueuedFrameTxPower (entry.frame)});
 
           if (selected.size () >= MAX_CONCAT_SEGMENTS)
             {
@@ -1060,7 +1106,8 @@ CsrMacCore::DoTx ()
                            false,
                            true,
                            0,
-                           aggregateRateKbps});
+                           aggregateRateKbps,
+                           SelectQueuedFrameTxPower (entry.frame)});
     }
   else
     {
@@ -1074,7 +1121,8 @@ CsrMacCore::DoTx ()
                            entry.ackable,
                            false,
                            0,
-                           aggregateRateKbps});
+                           aggregateRateKbps,
+                           SelectQueuedFrameTxPower (entry.frame)});
     }
 
   if (selected.empty ())
@@ -1090,6 +1138,24 @@ CsrMacCore::DoTx ()
 
   uint16_t dest = selected.front ().dest;
 
+  int powerSelectionRateKbps = selected.front ().rateKbps;
+  double aggregateTxPowerDbm = selected.front ().txPowerDbm;
+
+  for (uint32_t i = 1; i < selected.size (); ++i)
+    {
+      const SelectedTxFrame &entry = selected[i];
+      if (entry.rateKbps < powerSelectionRateKbps)
+        {
+          powerSelectionRateKbps = entry.rateKbps;
+          aggregateTxPowerDbm = entry.txPowerDbm;
+        }
+      else if (entry.rateKbps == powerSelectionRateKbps)
+        {
+          aggregateTxPowerDbm = std::max (aggregateTxPowerDbm,
+                                          entry.txPowerDbm);
+        }
+    }
+
   std::vector<Ptr<Packet>> wireFrames;
   wireFrames.reserve (selected.size ());
   bool anyAckable = false;
@@ -1099,7 +1165,17 @@ CsrMacCore::DoTx ()
     {
       CsrHeader header;
       entry.frame->RemoveHeader (header);
-      header.SetSpeedKey (aggregateRateKbps);
+      if (header.HasLinkControl ())
+        {
+          header.SetLinkControl (
+            static_cast<uint8_t> (aggregateRateKbps),
+            aggregateTxPowerDbm,
+            header.GetRxPowerDbm ());
+        }
+      else
+        {
+          header.SetSpeedKey (aggregateRateKbps);
+        }
       if (header.GetType () == CSR_PKT_DATA ||
           header.GetType () == CSR_PKT_ACK ||
           header.GetType () == CSR_PKT_DACK)
@@ -1144,9 +1220,13 @@ CsrMacCore::DoTx ()
   Time txDuration =
     m_dev->SendFramesToPeers (wireFrames,
                               aggregateRateKbps,
+                              aggregateTxPowerDbm,
                               pt,
                               nextReservedSlot,
                               anyAckable);
+
+  m_lastTxRateKbps = aggregateRateKbps;
+  m_lastTxPowerDbm = aggregateTxPowerDbm;
 
   m_txInProgress = true;
   Simulator::Schedule (txDuration, &CsrMacCore::FinishTx, this);

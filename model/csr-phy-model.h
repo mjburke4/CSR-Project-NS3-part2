@@ -72,21 +72,23 @@ public:
     return profile.refLossDb + 10.0 * profile.pathlossExp * std::log10 (distMeters);
   }
 
-  double ComputeSnrDb (double pathlossDb) const
+  double ComputeSnrDb (double pathlossDb,
+                       double txPowerDbm) const
   {
-    double rxPowerDbm = profile.txPowerDbm - pathlossDb;
+    double rxPowerDbm = txPowerDbm - pathlossDb;
     return rxPowerDbm - profile.noiseFloorDbm;
   }
 
   CsrRxDecision EvaluateRx (uint16_t txId,
                             uint16_t rxId,
                             int rateKbps,
+                            double txPowerDbm,
                             uint32_t packetBits,
                             const Ptr<UniformRandomVariable>& rng) const
   {
     double dist = GetDistanceMeters (txId, rxId);
     double plDb = ComputePathlossDb (dist);
-    double snrDb = ComputeSnrDb (plDb);
+    double snrDb = ComputeSnrDb (plDb, txPowerDbm);
 
     // IMPORTANT: use the scaled PER (depends on packetBits)
     double per = EstimatePer (rateKbps, snrDb, packetBits);
@@ -268,4 +270,3 @@ private:
 // ------------------------------------------------------------
 // CsrNetDevice: wraps a MAC and models the channel
 // ------------------------------------------------------------
-

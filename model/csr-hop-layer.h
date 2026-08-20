@@ -143,6 +143,17 @@ public:
       : it->second.lastSnrDb;
   }
 
+  uint32_t GetNeighborLinkCost (uint16_t neighbor) const
+  {
+    auto it = m_neighbors.find (neighbor);
+    return it == m_neighbors.end () ? 0 : it->second.linkCost;
+  }
+
+  void SetNeighborFailureCount (uint16_t neighbor, uint32_t failures)
+  {
+    m_neighbors[neighbor].numFailures = failures;
+  }
+
   void SendRoutingControl (
   uint16_t dst,
   Ptr<Packet> payload);
@@ -437,11 +448,29 @@ private:
     double lastHeardSec { -1.0 };
     double lastPathlossDb  { std::numeric_limits<double>::quiet_NaN() };
     double lastSnrDb       { std::numeric_limits<double>::quiet_NaN() };
+    double s0PowerDbm      { std::numeric_limits<double>::quiet_NaN() };
+    uint32_t numFailures   {0};
+    uint32_t linkCost      {0};
+  };
+
+  struct LinkControlResult
+  {
+    int speedKbps {8};
+    double txPowerDbm {30.0};
+    double rxPowerDbm {-105.0};
+    uint32_t linkCost {0};
   };
 
   std::map<uint16_t, NeighborInfo> m_neighbors;
 
-  void UpdateNeighborHeard (uint16_t src, double pathlossDb, double snrDb)
+  LinkControlResult ComputeLinkControl (uint16_t dest);
+  void ApplyLinkControl (CsrHeader &header,
+                         const std::vector<uint16_t> &destinations);
+
+  void UpdateNeighborHeard (uint16_t src,
+                            double pathlossDb,
+                            double snrDb,
+                            double advertisedS0PowerDbm)
   {
     double now = Simulator::Now ().GetSeconds ();
     auto &ni = m_neighbors[src];
@@ -449,6 +478,10 @@ private:
     ni.lastHeardSec = now;
     ni.lastPathlossDb = pathlossDb;
     ni.lastSnrDb = snrDb;
+    if (std::isfinite (advertisedS0PowerDbm))
+      {
+        ni.s0PowerDbm = advertisedS0PowerDbm;
+      }
 
     if (isNew)
       {
@@ -475,9 +508,14 @@ private:
 
   // HELLO broadcast config (OPNET-style)
   double   m_maxPower     { 30.0 };    // max TX power dBm
-  double   m_minSpeed     { 8.0 };     // min speed key
-  double   m_rxS0Base     { -100.0 };  // RX_S0_BASE_LEVEL dBm
+  double   m_minPower     { 0.0 };     // min TX power dBm
+  int      m_maxSpeed     { 128 };     // max speed key
+  int      m_minSpeed     { 8 };       // min speed key
+  double   m_rxS0Base     { -115.0 };  // RX_S0_BASE_LEVEL dBm
+  double   m_rxNoise      { -106.975 };// RX_NOISE_FLOOR dBm
+  double   m_rxNoiseFloor { -106.975 };// legacy nominal noise floor
   double   m_linkMargin   { 10.0 };    // link margin dB
+  double   m_txAmpBreakpoint { 14.0 }; // low/high-power crossover dBm
   uint8_t  m_capability   { 0 };       // capability flags
   uint16_t m_activeNodes  { 0 };       // active node count
   CsrHopLayer* m_hop      { nullptr }; // self-reference for SendHelloBroadcast
@@ -525,6 +563,160 @@ private:
 
 };
 
+CsrHopLayer::LinkControlResult
+CsrHopLayer::ComputeLinkControl (uint16_t dest)
+{
+  LinkControlResult result;
+
+  double interferenceDb = std::max (0.0,
+                                    m_rxNoise - m_rxNoiseFloor);
+  result.rxPowerDbm = m_rxS0Base + m_linkMargin + interferenceDb;
+  result.txPowerDbm = m_maxPower;
+  result.speedKbps = m_minSpeed;
+
+  auto neighborIt = m_neighbors.find (dest);
+  if (dest == CSR_BROADCAST_ID ||
+      neighborIt == m_neighbors.end () ||
+      !std::isfinite (neighborIt->second.lastPathlossDb))
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] link_control dest=" << dest
+                << " neighborKnown=0"
+                << " speed=" << result.speedKbps
+                << " txPower=" << result.txPowerDbm
+                << " rxPower=" << result.rxPowerDbm
+                << std::endl;
+      return result;
+    }
+
+  NeighborInfo &neighbor = neighborIt->second;
+  double remoteS0PowerDbm = std::isfinite (neighbor.s0PowerDbm)
+    ? neighbor.s0PowerDbm
+    : result.rxPowerDbm;
+  double tx0PowerDbm = remoteS0PowerDbm + neighbor.lastPathlossDb;
+  double marginAt8Kbps = m_maxPower - tx0PowerDbm;
+
+  if (marginAt8Kbps >= 23.0)      { result.speedKbps = 1000; }
+  else if (marginAt8Kbps >= 20.0) { result.speedKbps = 500; }
+  else if (marginAt8Kbps >= 12.0) { result.speedKbps = 128; }
+  else if (marginAt8Kbps >= 9.0)  { result.speedKbps = 64; }
+  else if (marginAt8Kbps >= 6.0)  { result.speedKbps = 32; }
+  else if (marginAt8Kbps >= 3.0)  { result.speedKbps = 16; }
+  else if (marginAt8Kbps > 0.0)   { result.speedKbps = 8; }
+  else                            { result.speedKbps = m_minSpeed; }
+
+  result.speedKbps = std::clamp (result.speedKbps,
+                                 m_minSpeed,
+                                 m_maxSpeed);
+
+  double speedPowerOffsetDb = 0.0;
+  switch (result.speedKbps)
+    {
+    case 1000: speedPowerOffsetDb = 23.0; break;
+    case 500:  speedPowerOffsetDb = 20.0; break;
+    case 128:  speedPowerOffsetDb = 12.0; break;
+    case 64:   speedPowerOffsetDb = 9.0;  break;
+    case 32:   speedPowerOffsetDb = 6.0;  break;
+    case 16:   speedPowerOffsetDb = 3.0;  break;
+    case 8:
+    default:   speedPowerOffsetDb = 0.0;  break;
+    }
+
+  double txmPowerDbm = tx0PowerDbm;
+  switch (m_minSpeed)
+    {
+    case 1000: txmPowerDbm += 23.0; break;
+    case 500:  txmPowerDbm += 20.0; break;
+    case 128:  txmPowerDbm += 12.0; break;
+    case 64:   txmPowerDbm += 9.0;  break;
+    case 32:   txmPowerDbm += 6.0;  break;
+    case 16:   txmPowerDbm += 3.0;  break;
+    case 8:
+    default:                            break;
+    }
+
+  double unclampedTxPowerDbm = tx0PowerDbm + speedPowerOffsetDb;
+  double totalMarginDb = m_maxPower - txmPowerDbm;
+  double speedMarginDb = m_maxPower - unclampedTxPowerDbm;
+
+  double selectedTxPowerDbm = std::clamp (unclampedTxPowerDbm,
+                                          m_minPower,
+                                          m_maxPower);
+
+  int estimatedDistance = selectedTxPowerDbm <= m_txAmpBreakpoint
+    ? 75
+    : static_cast<int> (
+        std::floor (
+          std::pow (10.0,
+                    (selectedTxPowerDbm - m_txAmpBreakpoint) / 40.0) *
+          100.0));
+
+  uint32_t cost = static_cast<uint32_t> (
+    std::floor (static_cast<double> (estimatedDistance) * 100.0 /
+                static_cast<double> (result.speedKbps)));
+
+  if ((totalMarginDb - 3.0 * neighbor.numFailures) < 0.0)
+    {
+      cost *= 2;
+    }
+  if ((speedMarginDb - 3.0 * neighbor.numFailures) > 3.0)
+    {
+      cost = static_cast<uint32_t> (
+        std::floor (static_cast<double> (cost) / 2.0));
+    }
+
+  result.txPowerDbm = std::ceil (selectedTxPowerDbm);
+  result.linkCost = cost;
+  neighbor.linkCost = cost;
+
+  std::cout << "[HOP " << m_nodeId
+            << "] link_control dest=" << dest
+            << " neighborKnown=1"
+            << " s0=" << remoteS0PowerDbm
+            << " pathloss=" << neighbor.lastPathlossDb
+            << " failures=" << neighbor.numFailures
+            << " speed=" << result.speedKbps
+            << " txPower=" << result.txPowerDbm
+            << " rxPower=" << result.rxPowerDbm
+            << " cost=" << result.linkCost
+            << std::endl;
+
+  return result;
+}
+
+void
+CsrHopLayer::ApplyLinkControl (
+  CsrHeader &header,
+  const std::vector<uint16_t> &destinations)
+{
+  NS_ABORT_MSG_IF (destinations.empty (),
+                   "link control requires at least one destination");
+
+  LinkControlResult selected =
+    ComputeLinkControl (destinations.front ());
+
+  for (uint32_t i = 1; i < destinations.size (); ++i)
+    {
+      LinkControlResult candidate =
+        ComputeLinkControl (destinations[i]);
+
+      if (candidate.speedKbps < selected.speedKbps)
+        {
+          selected = candidate;
+        }
+      else if (candidate.speedKbps == selected.speedKbps &&
+               candidate.txPowerDbm > selected.txPowerDbm)
+        {
+          selected = candidate;
+        }
+    }
+
+  header.SetLinkControl (
+    static_cast<uint8_t> (selected.speedKbps),
+    selected.txPowerDbm,
+    selected.rxPowerDbm);
+}
+
 void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
 {
   NS_ASSERT (m_mac != nullptr);
@@ -541,7 +733,7 @@ void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
   h.SetAckable (false);
   h.SetType (CSR_PKT_HELLO);
   h.SetDestType (CSR_DEST_BROADCAST);
-  h.SetSpeedKey (8); // or map from helloPayload->Speed later
+  ApplyLinkControl (h, {CSR_BROADCAST_ID});
 
   helloPayload->AddHeader (h);
 
@@ -589,7 +781,7 @@ CsrHopLayer::SendData (uint16_t dst, uint8_t dscp,
   CsrHeader hdr (m_nodeId, dst, seq, dscp, ack, false);
   hdr.SetType(CSR_PKT_DATA);
   hdr.SetDestType(CSR_DEST_UNICAST);
-  hdr.SetSpeedKey(8);   // default, will be updated by MAC layer
+  ApplyLinkControl (hdr, {dst});
   Ptr<Packet> frame = payload->Copy ();
   frame->AddHeader (hdr);
 
@@ -649,7 +841,7 @@ CsrHopLayer::SendNeighborCheck (uint16_t dst, Ptr<Packet> payload)
 
   hdr.SetType (CSR_PKT_NEIGHBOR_CHECK);
   hdr.SetDestType (CSR_DEST_UNICAST);
-  hdr.SetSpeedKey (8);
+  ApplyLinkControl (hdr, {dst});
 
   Ptr<Packet> frame = payload->Copy ();
   frame->AddHeader (hdr);
@@ -723,8 +915,8 @@ CsrHopLayer::SendRoutingControl (
 
   hdr.SetType (CSR_PKT_ROUTING_CONTROL);
   hdr.SetDestType (CSR_DEST_MULTICAST);
-  hdr.SetSpeedKey (8);
   hdr.SetDestinationSequences (targets);
+  ApplyLinkControl (hdr, destinations);
 
   Ptr<Packet> frame = payload->Copy ();
   frame->AddHeader (hdr);
@@ -770,7 +962,13 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
   // OPNET update_neighbor() runs for every packet successfully decoded by
   // MAC, before HOP checks whether the packet is addressed to this node.
   // This preserves passive link learning from wireless overhearing.
-  UpdateNeighborHeard (hdr.GetSrc (), pathlossDb, snrDb);
+  UpdateNeighborHeard (
+    hdr.GetSrc (),
+    pathlossDb,
+    snrDb,
+    hdr.HasLinkControl ()
+      ? hdr.GetRxPowerDbm ()
+      : std::numeric_limits<double>::quiet_NaN ());
 
   if (hdr.HasDestinationSequences ())
     {
@@ -888,7 +1086,7 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
           ackHdr.SetType (CSR_PKT_ACK);
           ackHdr.SetDestType (CSR_DEST_UNICAST);
-          ackHdr.SetSpeedKey (8);
+          ApplyLinkControl (ackHdr, {hdr.GetSrc ()});
 
           Ptr<Packet> ackPkt = Create<Packet> ();
           ackPkt->AddHeader (ackHdr);
@@ -954,7 +1152,7 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           ackHdr.SetType (CSR_PKT_ACK);
           ackHdr.SetDestType (
             CSR_DEST_UNICAST);
-          ackHdr.SetSpeedKey (8);
+          ApplyLinkControl (ackHdr, {hdr.GetSrc ()});
 
           Ptr<Packet> ackPkt =
             Create<Packet> ();
@@ -1057,7 +1255,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     // OPNET-parity metadata
     ackHdr.SetType (sendDack ? CSR_PKT_DACK : CSR_PKT_ACK);
     ackHdr.SetDestType (CSR_DEST_UNICAST);
-    ackHdr.SetSpeedKey (8);  // control always uses robust rate key
+    ApplyLinkControl (ackHdr, {src});
     ackHdr.SetHasAckWindow (true);
     ackHdr.SetAckBitmap (rxState.ackBitmap & ~rxState.dackBitmap);
     ackHdr.SetDackBitmap (rxState.dackBitmap);

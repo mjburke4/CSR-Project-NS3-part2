@@ -122,6 +122,12 @@ public:
     ne.nodeId = nextHop;
     ne.numFailures++;
 
+    if (m_hop != nullptr)
+      {
+        m_hop->SetNeighborFailureCount (nextHop,
+                                        ne.numFailures);
+      }
+
     std::cout << "[NWK " << m_nodeId
               << "] Link failure to nextHop=" << nextHop
               << " numFailures=" << ne.numFailures
@@ -176,6 +182,12 @@ public:
     if (ne.numFailures > 0)
       {
         ne.numFailures--;
+      }
+
+    if (m_hop != nullptr)
+      {
+        m_hop->SetNeighborFailureCount (neighbor,
+                                        ne.numFailures);
       }
 
     std::cout << "[NWK " << m_nodeId

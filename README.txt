@@ -83,6 +83,12 @@ OPNET wireless overhearing parity test:
 3. Run: ./ns3 run csr-wireless-overhearing-smoke
 4. Expected: PASS: OPNET wireless overhearing parity test
 
+OPNET HOP/MAC live link-control parity test:
+1. Copy csr-hop-mac-link-control-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-hop-mac-link-control-smoke
+3. Run: ./ns3 run csr-hop-mac-link-control-smoke
+4. Expected: PASS: OPNET HOP/MAC live link-control parity test
+
 OPNET no-route relay custody/ACK parity test:
 1. Copy csr-hop-no-route-relay-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-hop-no-route-relay-smoke
