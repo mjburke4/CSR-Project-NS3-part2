@@ -38,7 +38,7 @@ void
 ReportLinkFailure (uint16_t neighbor)
 {
   Require (neighbor == 2,
-           "final timeout reported the wrong failed neighbor");
+           "unexpected link-failure callback named the wrong neighbor");
   g_linkFailures++;
 }
 
@@ -122,8 +122,8 @@ CheckFinalTimeout (Ptr<CsrNetDevice> device,
            "final timeout did not release per-neighbor flow control");
   Require (g_nsdpReleases == 1,
            "final timeout did not release NSDP exactly once");
-  Require (g_linkFailures == 1,
-           "final timeout did not report exactly one link failure");
+  Require (g_linkFailures == 0,
+           "DATA timeout was incorrectly reported as a routing-link failure");
 }
 
 } // namespace

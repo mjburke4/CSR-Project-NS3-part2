@@ -32,6 +32,7 @@ uint32_t g_receivedAt3 = 0;
 uint16_t g_sequenceAt2 = 0;
 uint16_t g_sequenceAt3 = 0;
 uint16_t g_autoAckSequence = 0;
+uint32_t g_linkFailures = 0;
 
 void
 Require (bool condition, const char* message)
@@ -53,6 +54,13 @@ ResetObservations ()
   g_sequenceAt2 = 0;
   g_sequenceAt3 = 0;
   g_autoAckSequence = 0;
+  g_linkFailures = 0;
+}
+
+void
+RecordLinkFailure (uint16_t)
+{
+  g_linkFailures++;
 }
 
 void
@@ -373,6 +381,8 @@ CheckGroupFailure (Ptr<CsrHopLayer> hop)
            "routing failure did not retain the original ordered target list");
   Require (g_failureEvents[0].lastOfInfo,
            "routing group failure did not set lastOfInfo");
+  Require (g_linkFailures == 0,
+           "group timeout incorrectly penalized its already-ACKed primary target");
   Require (hop->GetResendQueueSize () == 0,
            "timed-out routing group remained in resend queue");
 }
@@ -393,6 +403,8 @@ TestGroupFailure ()
     MakeCallback (&RecordSuccess));
   hop->SetRoutingControlFailureCallback (
     MakeCallback (&RecordFailure));
+  hop->SetLinkFailureCallback (
+    MakeCallback (&RecordLinkFailure));
 
   sender->AddPeer (receiver2);
   sender->AddPeer (receiver3);

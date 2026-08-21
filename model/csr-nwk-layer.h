@@ -107,6 +107,16 @@ public:
     return it == m_nsdp.end () ? 0 : it->second.count;
   }
 
+  /**
+   * Get the cost of the currently selected route.
+   *
+   * @param destination Network destination.
+   * @param costOut Selected route cost when a route is available.
+   * @return True when a selected route is available.
+   */
+  bool GetSelectedRouteCost (uint16_t destination,
+                             uint32_t &costOut) const;
+
   void
   SendNoPath (uint16_t neighbor, uint16_t unreachableDest)
   {
@@ -1240,26 +1250,6 @@ private:
     int16_t remoteTempLowCx10 {0};
     int16_t remoteTempHighCx10 {0};
 
-    bool negotiatedLinkProfileValid {
-      false
-    };
-
-    bool negotiatedSpeedCompatible {
-      false
-    };
-
-    bool negotiatedPowerCompatible {
-      false
-    };
-
-    uint16_t negotiatedMinSpeedKbps {0};
-    uint16_t negotiatedMaxSpeedKbps {0};
-
-    int16_t negotiatedMinPowerDbmX10 {0};
-    int16_t negotiatedMaxPowerDbmX10 {0};
-
-    int16_t negotiatedLinkMarginDbX10 {0};
-    int16_t negotiatedLowPowerDbmX10 {0};
       };
 
   Ptr<Packet> BuildRoutingRequestPayload (
@@ -1473,9 +1463,7 @@ private:
                    double *txPowerOut = nullptr,
                    int *estDistanceOut = nullptr,
                    double *speedMarginOut = nullptr,
-                   double *totalMarginOut = nullptr,
-                   const NwkNeighborEntry *neighborProfile =
-                    nullptr) const
+                   double *totalMarginOut = nullptr) const
   {
     // Port of legacy OPNET br_hop.link_calc(), simplified for NS-3.
     // TX0_power is the power needed to meet link margin at 8 kbps.
@@ -1495,42 +1483,6 @@ private:
 
     double effectiveTxAmpBreakpointDbm =
       m_txAmpBreakpointDbm;
-
-    bool usingNegotiatedProfile =
-      neighborProfile != nullptr &&
-      neighborProfile->
-        negotiatedLinkProfileValid;
-
-    if (usingNegotiatedProfile)
-      {
-        effectiveMinSpeedKbps =
-          static_cast<int> (
-            neighborProfile->
-              negotiatedMinSpeedKbps);
-
-        effectiveMaxSpeedKbps =
-          static_cast<int> (
-            neighborProfile->
-              negotiatedMaxSpeedKbps);
-
-        effectiveMinTxPowerDbm =
-          static_cast<double> (
-            neighborProfile->
-              negotiatedMinPowerDbmX10) /
-          10.0;
-
-        effectiveMaxTxPowerDbm =
-          static_cast<double> (
-            neighborProfile->
-              negotiatedMaxPowerDbmX10) /
-          10.0;
-
-        effectiveTxAmpBreakpointDbm =
-          static_cast<double> (
-            neighborProfile->
-              negotiatedLowPowerDbmX10) /
-          10.0;
-      }
 
     // Txm_power is power required at configured minimum speed.
     double txmPowerDbm = tx0PowerDbm;
@@ -1668,10 +1620,6 @@ private:
 
     return 1;
   }
-
-  void
-  UpdateNegotiatedLinkProfile (
-    NwkNeighborEntry &neighbor);
 
  /*uint32_t
   ComputeNeighborHopCost (
@@ -2583,204 +2531,10 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
       &chosenTxPower,
       &estDistance,
       &speedMargin,
-      &totalMargin,
-      nullptr);
+      &totalMargin);
 
   uint32_t linkCost =
     localDirectionalCost;
-
-  uint32_t remoteDirectionalCost = 0;
-
-  bool usingBidirectionalCost = false;
-
-  // Preserve the local-direction results before combining
-  // them with the reverse direction.
-  int localSpeed =
-    chosenSpeed;
-
-  double localTxPower =
-    chosenTxPower;
-
-  int localEstDistance =
-    estDistance;
-
-  double localSpeedMargin =
-    speedMargin;
-
-  double localTotalMargin =
-    totalMargin;
-
-  // The remote configuration must be internally valid.
-  // This is different from requiring the local and remote
-  // ranges to be identical.
-  bool remoteLimitsValid =
-    ne.routingInfoValid &&
-    ne.remoteMinSpeedKbps > 0 &&
-    ne.remoteMinSpeedKbps <=
-      ne.remoteMaxSpeedKbps &&
-    ne.remoteMinPowerDbmX10 <=
-      ne.remoteMaxPowerDbmX10;
-
-  int remoteSpeed = 0;
-  double remoteTxPower = 0.0;
-  int remoteEstDistance = 0;
-  double remoteSpeedMargin = 0.0;
-  double remoteTotalMargin = 0.0;
-
-  if (remoteLimitsValid)
-    {
-      // ComputeLinkCost already accepts a profile through
-      // its negotiated fields. Use a temporary profile to
-      // represent the remote transmitter's actual limits.
-      NwkNeighborEntry remoteTxProfile;
-
-      remoteTxProfile
-        .negotiatedLinkProfileValid =
-          true;
-
-      remoteTxProfile
-        .negotiatedMinSpeedKbps =
-          ne.remoteMinSpeedKbps;
-
-      remoteTxProfile
-        .negotiatedMaxSpeedKbps =
-          ne.remoteMaxSpeedKbps;
-
-      remoteTxProfile
-        .negotiatedMinPowerDbmX10 =
-          ne.remoteMinPowerDbmX10;
-
-      remoteTxProfile
-        .negotiatedMaxPowerDbmX10 =
-          ne.remoteMaxPowerDbmX10;
-
-      remoteTxProfile
-        .negotiatedLowPowerDbmX10 =
-          ne.remoteLowPowerDbmX10;
-
-      // Reverse direction:
-      // The neighbor transmits to this node, so use our
-      // local receiver threshold and the remote TX limits.
-      double localS0PowerDbm =
-        m_rxS0BaseLevelDbm +
-        m_linkMarginDb;
-
-      remoteDirectionalCost =
-        ComputeLinkCost (
-          localS0PowerDbm,
-          pathlossDb,
-          ne.numFailures,
-          &remoteSpeed,
-          &remoteTxPower,
-          &remoteEstDistance,
-          &remoteSpeedMargin,
-          &remoteTotalMargin,
-          &remoteTxProfile);
-
-      // Legacy behavior uses the weakest characteristic
-      // of the two directions:
-      //   lowest speed
-      //   lowest margins
-      //   highest required distance/energy estimate
-      chosenSpeed =
-        std::min (
-          localSpeed,
-          remoteSpeed);
-
-      estDistance =
-        std::max (
-          localEstDistance,
-          remoteEstDistance);
-
-      speedMargin =
-        std::min (
-          localSpeedMargin,
-          remoteSpeedMargin);
-
-      totalMargin =
-        std::min (
-          localTotalMargin,
-          remoteTotalMargin);
-
-      // chosenTxPower describes this node's own
-      // transmission requirement, so retain the local
-      // directional value.
-      chosenTxPower =
-        localTxPower;
-
-      double failureMarginDb =
-        3.0 *
-        static_cast<double> (
-          ne.numFailures);
-
-      double adjustedTotalMarginDb =
-        totalMargin -
-        failureMarginDb;
-
-      double adjustedSpeedMarginDb =
-        speedMargin -
-        failureMarginDb;
-
-      // Legacy routesComputeHopCost() adjusts the
-      // required distance BEFORE dividing by speed.
-      // Keep x100 units explicitly to preserve the
-      // original integer cost semantics.
-      uint64_t adjustedDistanceX100 =
-        static_cast<uint64_t> (
-          std::max (
-            0,
-            estDistance)) *
-        100ULL;
-
-      // Legacy:
-      //   if total margin is negative,
-      //       double required link distance;
-      //   else if speed margin is at least 3 dB,
-      //       halve required link distance.
-      if (adjustedTotalMarginDb < 0.0)
-        {
-          adjustedDistanceX100 *= 2ULL;
-        }
-      else if (adjustedSpeedMarginDb >= 3.0)
-        {
-          adjustedDistanceX100 /= 2ULL;
-        }
-
-      if (chosenSpeed > 0)
-        {
-          uint64_t rawCost =
-            adjustedDistanceX100 /
-            static_cast<uint64_t> (
-              chosenSpeed);
-
-          linkCost =
-            static_cast<uint32_t> (
-              std::min<uint64_t> (
-                rawCost,
-                std::numeric_limits<uint32_t>::max ()));
-        }
-      else
-        {
-          linkCost = 1;
-        }
-
-      std::cout << "[NWK " << m_nodeId
-                << "] legacy hop-cost adjustment"
-                << " neighbor=" << src
-                << " failures="
-                << ne.numFailures
-                << " adjustedTotalMarginDb="
-                << adjustedTotalMarginDb
-                << " adjustedSpeedMarginDb="
-                << adjustedSpeedMarginDb
-                << " adjustedDistanceX100="
-                << adjustedDistanceX100
-                << " speed="
-                << chosenSpeed
-                << " cost="
-                << linkCost
-                << std::endl;
-    }
 
   std::cout << "[NWK " << m_nodeId
               << "] link_calc neighbor=" << src
@@ -2792,22 +2546,7 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
               << " estDistance=" << estDistance
               << " speedMargin=" << speedMargin
               << " totalMargin=" << totalMargin
-              << " costMode="
-              << (usingBidirectionalCost
-                    ? "bidirectional"
-                    : "local-only")
-              << " localDirectionalCost="
-              << localDirectionalCost
-              << " remoteDirectionalCost="
-              << remoteDirectionalCost
-              << " localSpeed="
-              << localSpeed
-              << " remoteSpeed="
-              << remoteSpeed
-              << " localDistance="
-              << localEstDistance
-              << " remoteDistance="
-              << remoteEstDistance
+              << " costMode=local-only"
               << " cost="
               << linkCost
               << std::endl;
@@ -3510,9 +3249,6 @@ CsrNetLayer::ProcessRoutingUpdate (
         neighbor.remoteTempHighCx10 =
           info.tempHighCx10;
 
-        UpdateNegotiatedLinkProfile (
-          neighbor);
-
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingSnapshot INFO received"
                   << " from=" << helloSrc
@@ -4140,10 +3876,6 @@ CsrNetLayer::CheckNeighborFreshness ()
           // exchange must re-establish them.
           ne.routingInfoValid = false;
           ne.routingInfoSequence = 0;
-
-          ne.negotiatedLinkProfileValid = false;
-          ne.negotiatedSpeedCompatible = false;
-          ne.negotiatedPowerCompatible = false;
 
           std::cout << "[NWK " << m_nodeId
                     << "] Cleared stale RoutingInfo"
@@ -6588,6 +6320,23 @@ TrySendAutomaticRouteUpdates ()
       this);
 }
 
+bool
+CsrNetLayer::GetSelectedRouteCost (
+  uint16_t destination,
+  uint32_t &costOut) const
+{
+  const RouteEntry *best =
+    FindBestRoute (destination);
+
+  if (best == nullptr)
+    {
+      return false;
+    }
+
+  costOut = best->cost;
+  return true;
+}
+
 void
 CsrNetLayer::DumpBestRoute (
   uint16_t destination) const
@@ -6647,158 +6396,6 @@ CsrNetLayer::DumpBestRoute (
 
 void
 CsrNetLayer::
-UpdateNegotiatedLinkProfile (
-  NwkNeighborEntry &neighbor)
-{
-  neighbor.negotiatedLinkProfileValid =
-    false;
-
-  neighbor.negotiatedSpeedCompatible =
-    false;
-
-  neighbor.negotiatedPowerCompatible =
-    false;
-
-  if (!neighbor.routingInfoValid)
-    {
-      return;
-    }
-
-  uint16_t localMinSpeed =
-    static_cast<uint16_t> (
-      std::clamp (
-        m_minCfgSpeedKbps,
-        0,
-        65535));
-
-  uint16_t localMaxSpeed =
-    static_cast<uint16_t> (
-      std::clamp (
-        m_maxCfgSpeedKbps,
-        0,
-        65535));
-
-  neighbor.negotiatedMinSpeedKbps =
-    std::max (
-      localMinSpeed,
-      neighbor.remoteMinSpeedKbps);
-
-  neighbor.negotiatedMaxSpeedKbps =
-    std::min (
-      localMaxSpeed,
-      neighbor.remoteMaxSpeedKbps);
-
-  neighbor.negotiatedSpeedCompatible =
-    neighbor.negotiatedMinSpeedKbps <=
-      neighbor.negotiatedMaxSpeedKbps &&
-    neighbor.negotiatedMaxSpeedKbps > 0;
-
-  int16_t localMinPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (
-        m_minTxPowerDbm * 10.0));
-
-  int16_t localMaxPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (
-        m_maxTxPowerDbm * 10.0));
-
-  neighbor.negotiatedMinPowerDbmX10 =
-    std::max (
-      localMinPowerDbmX10,
-      neighbor.remoteMinPowerDbmX10);
-
-  neighbor.negotiatedMaxPowerDbmX10 =
-    std::min (
-      localMaxPowerDbmX10,
-      neighbor.remoteMaxPowerDbmX10);
-
-  neighbor.negotiatedPowerCompatible =
-    neighbor.negotiatedMinPowerDbmX10 <=
-      neighbor.negotiatedMaxPowerDbmX10;
-
-  int16_t localLinkMarginDbX10 =
-    static_cast<int16_t> (
-      std::round (
-        m_linkMarginDb * 10.0));
-
-  neighbor.negotiatedLinkMarginDbX10 =
-    std::max (
-      localLinkMarginDbX10,
-      neighbor.remoteLinkMarginDbX10);
-
-  int16_t localLowPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (
-        m_txAmpBreakpointDbm * 10.0));
-
-  neighbor.negotiatedLowPowerDbmX10 =
-    std::max (
-      localLowPowerDbmX10,
-      neighbor.remoteLowPowerDbmX10);
-
-  // Keep the crossover inside the mutually
-  // supported transmit-power range.
-  if (neighbor.negotiatedPowerCompatible)
-    {
-      neighbor.negotiatedLowPowerDbmX10 =
-        std::clamp (
-          neighbor.negotiatedLowPowerDbmX10,
-          neighbor.negotiatedMinPowerDbmX10,
-          neighbor.negotiatedMaxPowerDbmX10);
-    }
-  else
-    {
-      // No valid power overlap exists, so there
-      // is no meaningful crossover value.
-      neighbor.negotiatedLowPowerDbmX10 = 0;
-    }
-
-  neighbor.negotiatedLinkProfileValid =
-    neighbor.negotiatedSpeedCompatible &&
-    neighbor.negotiatedPowerCompatible;
-
-  std::cout << "[NWK " << m_nodeId
-            << "] Negotiated link profile"
-            << " neighbor=" << neighbor.nodeId
-            << " valid="
-            << (neighbor
-                  .negotiatedLinkProfileValid
-                  ? 1
-                  : 0)
-            << " speedCompatible="
-            << (neighbor
-                  .negotiatedSpeedCompatible
-                  ? 1
-                  : 0)
-            << " speedKbps="
-            << neighbor
-                 .negotiatedMinSpeedKbps
-            << "-"
-            << neighbor
-                 .negotiatedMaxSpeedKbps
-            << " powerCompatible="
-            << (neighbor
-                  .negotiatedPowerCompatible
-                  ? 1
-                  : 0)
-            << " powerDbmX10="
-            << neighbor
-                 .negotiatedMinPowerDbmX10
-            << "-"
-            << neighbor
-                 .negotiatedMaxPowerDbmX10
-            << " marginDbX10="
-            << neighbor
-                 .negotiatedLinkMarginDbX10
-            << " lowPowerDbmX10="
-            << neighbor
-                 .negotiatedLowPowerDbmX10
-            << std::endl;
-}
-
-void
-CsrNetLayer::
 RecomputeRoutesViaNextHop (
   uint16_t nextHop)
 {
@@ -6846,12 +6443,8 @@ RecomputeRoutesViaNextHop (
         }
     }
 
-  // ----------------------------------------------------------
-  // Recompute the neighbor cost using the same bidirectional
-  // rules used when ProcessHello() originally learns the link.
-  // Legacy routesReroute() calls routesComputeHopCost(), so a
-  // reroute must not fall back to a one-direction-only cost.
-  // ----------------------------------------------------------
+  // Legacy linkCharGetCost() reports only the locally measured
+  // direction as valid, including during routesReroute().
 
   double remoteS0PowerDbm =
     static_cast<double> (
@@ -6882,159 +6475,10 @@ RecomputeRoutesViaNextHop (
       &localTxPower,
       &localDistance,
       &localSpeedMargin,
-      &localTotalMargin,
-      nullptr);
+      &localTotalMargin);
 
   uint32_t newLinkCost =
     localDirectionalCost;
-
-  bool usingBidirectionalCost =
-    false;
-
-  uint32_t remoteDirectionalCost = 0;
-
-  bool remoteLimitsValid =
-    neighbor.routingInfoValid &&
-    neighbor.remoteMinSpeedKbps > 0 &&
-    neighbor.remoteMinSpeedKbps <=
-      neighbor.remoteMaxSpeedKbps &&
-    neighbor.remoteMinPowerDbmX10 <=
-      neighbor.remoteMaxPowerDbmX10;
-
-  if (remoteLimitsValid)
-    {
-      NwkNeighborEntry remoteTxProfile;
-
-      remoteTxProfile
-        .negotiatedLinkProfileValid =
-          true;
-
-      remoteTxProfile
-        .negotiatedMinSpeedKbps =
-          neighbor.remoteMinSpeedKbps;
-
-      remoteTxProfile
-        .negotiatedMaxSpeedKbps =
-          neighbor.remoteMaxSpeedKbps;
-
-      remoteTxProfile
-        .negotiatedMinPowerDbmX10 =
-          neighbor.remoteMinPowerDbmX10;
-
-      remoteTxProfile
-        .negotiatedMaxPowerDbmX10 =
-          neighbor.remoteMaxPowerDbmX10;
-
-      remoteTxProfile
-        .negotiatedLowPowerDbmX10 =
-          neighbor.remoteLowPowerDbmX10;
-
-      // Reverse direction:
-      // neighbor transmits to this node.
-      double localS0PowerDbm =
-        m_rxS0BaseLevelDbm +
-        m_linkMarginDb;
-
-      int remoteSpeed = 0;
-      double remoteTxPower = 0.0;
-      int remoteDistance = 0;
-      double remoteSpeedMargin = 0.0;
-      double remoteTotalMargin = 0.0;
-
-      remoteDirectionalCost =
-        ComputeLinkCost (
-          localS0PowerDbm,
-          neighbor.lastPathlossDb,
-          neighbor.numFailures,
-          &remoteSpeed,
-          &remoteTxPower,
-          &remoteDistance,
-          &remoteSpeedMargin,
-          &remoteTotalMargin,
-          &remoteTxProfile);
-
-      // Legacy routesComputeHopCost() takes the
-      // pessimistic characteristic of both directions.
-      int chosenSpeed =
-        std::min (
-          localSpeed,
-          remoteSpeed);
-
-      int estimatedDistance =
-        std::max (
-          localDistance,
-          remoteDistance);
-
-      double speedMargin =
-        std::min (
-          localSpeedMargin,
-          remoteSpeedMargin);
-
-      double totalMargin =
-        std::min (
-          localTotalMargin,
-          remoteTotalMargin);
-
-      // Apply the legacy 3-dB-per-failure adjustment
-      // before converting distance to route cost.
-      double failureMarginDb =
-        3.0 *
-        static_cast<double> (
-          neighbor.numFailures);
-
-      double adjustedTotalMarginDb =
-        totalMargin -
-        failureMarginDb;
-
-      double adjustedSpeedMarginDb =
-        speedMargin -
-        failureMarginDb;
-
-      uint64_t adjustedDistanceX100 =
-        static_cast<uint64_t> (
-          std::max (
-            0,
-            estimatedDistance)) *
-        100ULL;
-
-      if (adjustedTotalMarginDb < 0.0)
-        {
-          adjustedDistanceX100 *=
-            2ULL;
-        }
-      else if (adjustedSpeedMarginDb >= 3.0)
-        {
-          adjustedDistanceX100 /=
-            2ULL;
-        }
-
-      if (chosenSpeed > 0)
-        {
-          uint64_t rawCost =
-            adjustedDistanceX100 /
-            static_cast<uint64_t> (
-              chosenSpeed);
-
-          newLinkCost =
-            static_cast<uint32_t> (
-              std::min<uint64_t> (
-                rawCost,
-                std::numeric_limits<
-                  uint32_t>::max ()));
-        }
-      else
-        {
-          newLinkCost = 1;
-        }
-
-      newLinkCost =
-        std::max<uint32_t> (
-          1,
-          newLinkCost);
-
-      usingBidirectionalCost =
-        true;
-    }
 
   std::cout << "[NWK " << m_nodeId
             << "] recompute hop-cost"
@@ -7042,14 +6486,7 @@ RecomputeRoutesViaNextHop (
             << nextHop
             << " failures="
             << neighbor.numFailures
-            << " costMode="
-            << (usingBidirectionalCost
-                  ? "bidirectional"
-                  : "local-only")
-            << " localDirectionalCost="
-            << localDirectionalCost
-            << " remoteDirectionalCost="
-            << remoteDirectionalCost
+            << " costMode=local-only"
             << " newLinkCost="
             << newLinkCost
             << std::endl;
