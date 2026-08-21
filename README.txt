@@ -101,4 +101,10 @@ OPNET no-route relay custody/ACK parity test:
 3. Run: ./ns3 run csr-hop-no-route-relay-smoke
 4. Expected: PASS: no-route relay custody/ACK parity test
 
+ARL routing byte-stream and reassembly parity test:
+1. Copy csr-nwk-arl-routing-stream-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-nwk-arl-routing-stream-smoke
+3. Run: ./ns3 run csr-nwk-arl-routing-stream-smoke
+4. Expected: PASS: ARL routing byte-stream parity test
+
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

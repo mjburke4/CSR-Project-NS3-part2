@@ -2,8 +2,10 @@ build_lib(
   LIBNAME csr
   SOURCE_FILES
     model/csr-module.cc
+    model/csr-arl-routing-message.cc
     model/csr-hello-header.cc
   HEADER_FILES
+    model/csr-arl-routing-message.h
     model/csr-common.h
     model/csr-hello-header.h
     model/csr-phy-model.h
