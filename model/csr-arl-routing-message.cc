@@ -123,7 +123,7 @@ CsrArlRoutingMessage::Builder::AddInfo (
 
 bool
 CsrArlRoutingMessage::Builder::AddDelete (
-  uint32_t nodeId,
+  CsrNodeId nodeId,
   std::string *error)
 {
   if (nodeId > MAX_NODE_ID)
@@ -140,11 +140,11 @@ CsrArlRoutingMessage::Builder::AddDelete (
 
 bool
 CsrArlRoutingMessage::Builder::AddUpdate (
-  uint32_t nodeId,
+  CsrNodeId nodeId,
   uint8_t capability,
   uint16_t hopCount,
   uint32_t cost,
-  const std::vector<uint32_t> &path,
+  const std::vector<CsrNodeId> &path,
   std::string *error)
 {
   if (nodeId > MAX_NODE_ID)
@@ -160,7 +160,7 @@ CsrArlRoutingMessage::Builder::AddUpdate (
       return false;
     }
 
-  for (uint32_t hop : path)
+  for (CsrNodeId hop : path)
     {
       if (hop > MAX_NODE_ID)
         {
@@ -176,7 +176,7 @@ CsrArlRoutingMessage::Builder::AddUpdate (
   AppendU16 (m_stream, hopCount);
   AppendU32 (m_stream, cost);
 
-  for (uint32_t hop : path)
+  for (CsrNodeId hop : path)
     {
       AppendU24 (m_stream, hop);
     }

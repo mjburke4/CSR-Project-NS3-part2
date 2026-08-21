@@ -43,12 +43,14 @@ namespace ns3 {
   }
 
   void
-  CsrHelloHeader::SetNeighborCheckTarget (uint16_t target)
+  CsrHelloHeader::SetNeighborCheckTarget (CsrNodeId target)
   {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (target),
+                     "CSR neighbor-check target exceeds 24 bits");
     m_neighborCheckTarget = target;
   }
 
-  uint16_t
+  CsrNodeId
   CsrHelloHeader::GetNeighborCheckTarget () const
   {
     return m_neighborCheckTarget;
@@ -96,8 +98,15 @@ namespace ns3 {
     return static_cast<CsrArlRouteMsgType> (m_arlRouteMsgType);
   }
 
-  void CsrHelloHeader::SetNodeId (uint16_t id) { m_nodeId = id; }
-  uint16_t CsrHelloHeader::GetNodeId () const { return m_nodeId; }
+  void
+  CsrHelloHeader::SetNodeId (CsrNodeId id)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
+                     "CSR HELLO node identifier exceeds 24 bits");
+    m_nodeId = id;
+  }
+
+  CsrNodeId CsrHelloHeader::GetNodeId () const { return m_nodeId; }
 
   void CsrHelloHeader::SetHelloSeq (uint16_t s) { m_helloSeq = s; }
   uint16_t CsrHelloHeader::GetHelloSeq () const { return m_helloSeq; }
@@ -115,7 +124,7 @@ namespace ns3 {
   CsrHelloHeader::GetSerializedSize () const
   {
     uint32_t size =
-        2  // nodeId
+        3  // nodeId
       + 2  // helloSeq
       + 1  // speedKey
       + 2  // rxPowerDbmX10
@@ -123,17 +132,17 @@ namespace ns3 {
       + 1  // nodeType
       + 1  // arlRouteMsgType
       + 1  // neighborCheckType
-      + 2  // neighborCheckTarget
+      + 3  // neighborCheckTarget
       + 1  // discoverType
       + 4  // discoverySequence
       + 4  // routingSequence
       + 1  // routingSection
       + 1  // routingTotalSections
       + 1  // routingOperation
-      + 2  // routingTarget
+      + 3  // routingTarget
       + 1  // chirpNeighborCount
       + static_cast<uint32_t> (
-          m_chirpNeighbors.size ()) * 2
+          m_chirpNeighbors.size ()) * 3
       + 1; // routeCount
 
     uint8_t routeCount =
@@ -156,14 +165,14 @@ namespace ns3 {
               CSR_MAX_ROUTE_PATH_HOPS));
 
         size +=
-            2  // destination
+            3  // destination
           + 1  // hops
           + 4  // cost
           + 2  // pathloss
           + 1  // capability
           + 1  // pathCount
           + static_cast<uint32_t> (
-              pathCount) * 2;
+              pathCount) * 3;
       }
 
     if (GetRoutingOperation () ==
@@ -178,7 +187,7 @@ namespace ns3 {
   void
   CsrHelloHeader::Serialize (Buffer::Iterator i) const
   {
-    i.WriteHtonU16 (m_nodeId);
+    CsrWriteNodeId (i, m_nodeId);
     i.WriteHtonU16 (m_helloSeq);
     i.WriteU8 (m_speedKey);
     i.WriteHtonU16 (static_cast<uint16_t> (m_rxPowerDbmX10));
@@ -186,14 +195,14 @@ namespace ns3 {
     i.WriteU8 (m_nodeType);
     i.WriteU8 (m_arlRouteMsgType);
     i.WriteU8 (m_neighborCheckType);
-    i.WriteHtonU16 (m_neighborCheckTarget);
+    CsrWriteNodeId (i, m_neighborCheckTarget);
     i.WriteU8 (m_discoverType);
     i.WriteHtonU32 (m_discoverySequence);
     i.WriteHtonU32 (m_routingSequence);
     i.WriteU8 (m_routingSection);
     i.WriteU8 (m_routingTotalSections);
     i.WriteU8 (m_routingOperation);
-    i.WriteHtonU16 (m_routingTarget);
+    CsrWriteNodeId (i, m_routingTarget);
 
     if (GetRoutingOperation () ==
         CsrRoutingOperation::Info)
@@ -237,7 +246,7 @@ namespace ns3 {
 
     for (uint8_t index = 0; index < chirpCount; ++index)
       {
-        i.WriteHtonU16 (m_chirpNeighbors[index]);
+        CsrWriteNodeId (i, m_chirpNeighbors[index]);
       }
 
     uint8_t count = static_cast<uint8_t> (
@@ -249,7 +258,7 @@ namespace ns3 {
       {
         const auto &ar = m_advertisedRoutes[idx];
 
-        i.WriteHtonU16 (ar.dst);
+        CsrWriteNodeId (i, ar.dst);
         i.WriteU8 (ar.hops);
         i.WriteHtonU32 (ar.cost);
         i.WriteHtonU16 (static_cast<uint16_t> (ar.pathlossDbX10));
@@ -267,8 +276,7 @@ namespace ns3 {
             pathIndex < pathCount;
             ++pathIndex)
           {
-            i.WriteHtonU16 (
-              ar.path[pathIndex]);
+            CsrWriteNodeId (i, ar.path[pathIndex]);
           }
       }
   }
@@ -278,7 +286,7 @@ namespace ns3 {
   {
     Buffer::Iterator start = i;
 
-    m_nodeId = i.ReadNtohU16 ();
+    m_nodeId = CsrReadNodeId (i);
     m_helloSeq = i.ReadNtohU16 ();
     m_speedKey = i.ReadU8 ();
     m_rxPowerDbmX10 = static_cast<int16_t> (i.ReadNtohU16 ());
@@ -286,7 +294,7 @@ namespace ns3 {
     m_nodeType = i.ReadU8 ();
     m_arlRouteMsgType = i.ReadU8 ();
     m_neighborCheckType = i.ReadU8 ();
-    m_neighborCheckTarget = i.ReadNtohU16 ();
+    m_neighborCheckTarget = CsrReadNodeId (i);
 
     m_discoverType = i.ReadU8 ();
     m_discoverySequence = i.ReadNtohU32 ();
@@ -302,7 +310,7 @@ namespace ns3 {
         m_routingTotalSections = 1;
       }
     m_routingOperation = i.ReadU8 ();
-    m_routingTarget = i.ReadNtohU16 ();
+    m_routingTarget = CsrReadNodeId (i);
 
     m_routingInfo =
   RoutingInfo {};
@@ -347,7 +355,7 @@ namespace ns3 {
 
     for (uint8_t index = 0; index < chirpCount; ++index)
       {
-        m_chirpNeighbors.push_back (i.ReadNtohU16 ());
+        m_chirpNeighbors.push_back (CsrReadNodeId (i));
       }
 
     m_advertisedRoutes.clear ();
@@ -361,8 +369,7 @@ namespace ns3 {
       {
         AdvertisedRoute route;
 
-        route.dst =
-          i.ReadNtohU16 ();
+        route.dst = CsrReadNodeId (i);
 
         route.hops =
           i.ReadU8 ();
@@ -384,8 +391,7 @@ namespace ns3 {
             pathIndex < wirePathCount;
             ++pathIndex)
           {
-            uint16_t hop =
-              i.ReadNtohU16 ();
+            CsrNodeId hop = CsrReadNodeId (i);
 
             if (pathIndex <
                   CSR_MAX_ROUTE_PATH_HOPS)
@@ -439,19 +445,32 @@ namespace ns3 {
 
   bool
   CsrHelloHeader::AddAdvertisedRoute (
-    uint16_t dst,
+    CsrNodeId dst,
     uint8_t hops,
     uint32_t cost,
     int16_t pathlossDbX10,
     uint8_t capability,
-    const std::vector<uint16_t> &path)
+    const std::vector<CsrNodeId> &path)
   {
+    if (!CsrIsValidNodeId (dst))
+      {
+        return false;
+      }
+
+    for (CsrNodeId pathNode : path)
+      {
+        if (!CsrIsValidNodeId (pathNode))
+          {
+            return false;
+          }
+      }
+
     if (m_advertisedRoutes.size () >= MAX_ADVERTISED_ROUTES)
       {
         return false;
       }
 
-    if (dst == 0xFFFF)
+    if (dst == CSR_BROADCAST_ID)
       {
         return false;
       }
@@ -526,9 +545,10 @@ namespace ns3 {
   }
 
   bool
-  CsrHelloHeader::AddChirpNeighbor (uint16_t nodeId)
+  CsrHelloHeader::AddChirpNeighbor (CsrNodeId nodeId)
   {
-    if (nodeId == 0xFFFF ||
+    if (!CsrIsValidNodeId (nodeId) ||
+        nodeId == CSR_BROADCAST_ID ||
         m_chirpNeighbors.size () >= MAX_CHIRP_NEIGHBORS)
       {
         return false;
@@ -551,12 +571,12 @@ namespace ns3 {
     return static_cast<uint8_t> (m_chirpNeighbors.size ());
   }
 
-  uint16_t
+  CsrNodeId
   CsrHelloHeader::GetChirpNeighbor (uint8_t index) const
   {
     if (index >= m_chirpNeighbors.size ())
       {
-        return 0xFFFF;
+        return CSR_BROADCAST_ID;
       }
 
     return m_chirpNeighbors[index];
@@ -564,12 +584,14 @@ namespace ns3 {
 
   void
   CsrHelloHeader::SetRoutingTarget (
-    uint16_t target)
+    CsrNodeId target)
   {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (target),
+                     "CSR routing target exceeds 24 bits");
     m_routingTarget = target;
   }
 
-  uint16_t
+  CsrNodeId
   CsrHelloHeader::GetRoutingTarget () const
   {
     return m_routingTarget;

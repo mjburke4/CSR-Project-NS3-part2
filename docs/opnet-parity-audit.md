@@ -4,11 +4,11 @@ Updated: 2026-08-21
 
 ## Scope and confidence limits
 
-Battery/energy behavior is excluded because it was experimental and was not
-part of the deployed system. BBN routing is also excluded; the target is the
-`__ARL_ROUTING__` configuration selected by the supplied `csr_api.h`. This
-audit compares the supplied OPNET process, pipeline, ARL API, and packet-model
-files with the ns-3 model.
+Battery/energy and supervisory-layer behavior are excluded because they were
+experimental and were not part of the deployed system. BBN routing is also
+excluded; the target is the `__ARL_ROUTING__` configuration selected by the
+supplied `csr_api.h`. This audit compares the supplied OPNET process, pipeline,
+ARL API, and packet-model files with the ns-3 model.
 
 `br_nwk.pr.c` delegates core routing decisions to an external routing library
 through functions such as `routesCreate`, `routesRcvMsg`, `routesProcess`, and
@@ -24,8 +24,8 @@ traces.
 
 | Area | Estimated parity | Evidence and remaining uncertainty |
 | --- | ---: | --- |
-| Visible NWK wrapper behavior | 90-94% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, discovery/control wrappers, active-node accounting, and automatic changed-route propagation are covered. Exact gateway-driven SNMP discovery coordination remains. |
-| Full NWK routing behavior | 80-88% | ARL byte-stream exchange and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing, packet-model serialization, and untested edge cases rather than an unavailable routing implementation. |
+| Visible NWK wrapper behavior | 92-95% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, active-node accounting, and automatic changed-route propagation are covered. |
+| Full NWK routing behavior | 84-90% | ARL byte-stream exchange, 24-bit node identifiers, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing, non-address packet-model fields, and untested edge cases rather than an unavailable routing implementation. |
 | HOP | 85-90% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, and OPNET DATA-versus-control timeout effects are covered. |
 | MAC transmit/control | 80-90% | Slot selection, holdoff, ACK priority, queue limits, concatenation, rate/power aggregation, preamble selection, and freshness are covered. |
 | Full MAC including receive contention | 55-65% | OPNET Idle/Search/Track receive state, acquisition, overlapping signals, capture/collision, and RX-induced slot freezing are not yet reproduced. |
@@ -53,6 +53,9 @@ completion.
 - NWK/HOP admission, NSDP ACK/DACK selection, and global pending-DATA state.
 - Legacy ARL INFO/UPDATE/FLUSH byte streams, six-byte section prefixes,
   out-of-order atomic reassembly, and independent reliable HOP sections.
+- End-to-end 24-bit node IDs with `0xFFFFFF` broadcast, exact big-endian node
+  serialization in NWK/HOP/HELLO/SNMP headers, and golden 24/16/32-bit ARL
+  record tests. HOP sequence and ARL hop-count fields remain 16-bit.
 - Automatic ARL changed-route propagation and deterministic bidirectional
   three-node convergence from empty route tables without static routes.
 - Relay custody, reverse routes, invalidation, alternate paths, and no-route
@@ -71,17 +74,12 @@ completion.
 
 ## Highest-priority remaining non-PHY work
 
-1. Audit ns-3 serialization against the newly supplied `br_*.pk.m` field
-   definitions, especially routing-operation widths, target/broadcast values,
-   and aggregate nesting.
-2. Reproduce the exact gateway-driven SNMP discovery cascade, including the
-   three one-second discovery broadcasts, relay ordering/holdoff, completion
-   signaling, and cooldown/restart timing. The convergence test currently
-   starts discovery locally on every node, equivalent to each node receiving
-   `SNMP_START_DISCOVERY`.
-3. Resolve the remaining ARL wrappers, especially `KeyRequest`, relay-holdoff
-   signaling, and address or broadcast-width differences.
-4. Audit extra NWK queue wakeups and edge-case route transitions against
+1. Finish the non-address packet-model audit, especially aggregate nesting and
+   fields represented by the ns-3 compatibility envelopes rather than direct
+   `br_*.pk.m` equivalents.
+2. Resolve the remaining ARL wrappers, especially `KeyRequest` and
+   relay-holdoff signaling/control ordering.
+3. Audit extra NWK queue wakeups and edge-case route transitions against
    differential traces from identical OPNET/ns-3 topologies and seeds.
 
 ## Deferred MAC/PHY work
@@ -97,17 +95,16 @@ completion.
 
 ## Missing high-value scenarios
 
-1. Gateway-only startup that drives the complete SNMP discovery cascade.
-2. Duplicate DATA that re-ACKs without a second NWK enqueue or NSDP increment.
-3. Route loss and recovery while mixed-DSCP traffic is held in NWK.
-4. Sequence wraparound and cumulative windows older than 64 packets.
-5. Sustained lossy overload across all queue limits with counter invariants.
-6. Hidden-terminal and sleep/wake boundary cases after MAC/PHY work begins.
-7. Differential traces using identical OPNET/ns-3 topology, traffic, and seed.
+1. Duplicate DATA that re-ACKs without a second NWK enqueue or NSDP increment.
+2. Route loss and recovery while mixed-DSCP traffic is held in NWK.
+3. Sequence wraparound and cumulative windows older than 64 packets.
+4. Sustained lossy overload across all queue limits with counter invariants.
+5. Hidden-terminal and sleep/wake boundary cases after MAC/PHY work begins.
+6. Differential traces using identical OPNET/ns-3 topology, traffic, and seed.
 
 ## Current regression baseline
 
-The complete ns-3 build, all 17 focused parity smoke tests, and
+The complete ns-3 build, all 18 focused parity smoke tests, and
 `csr-mac-demo-split` pass on this audit revision. The autonomous convergence
 test covers a lossless 0-1-2 line with no static routes, complete ARL snapshot
 ACK/reassembly state, bidirectional two-hop learning, and exactly-once DATA

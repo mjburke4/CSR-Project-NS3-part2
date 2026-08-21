@@ -6,6 +6,7 @@
 #include "ns3/packet.h"
 #include "ns3/callback.h"
 #include "ns3/random-variable-stream.h"
+#include "csr-wire-format.h"
 #include <map>
 #include <deque>
 #include <vector>
@@ -18,8 +19,6 @@
 using namespace ns3;
 
 static std::ofstream g_rxCsv;
-
-static const uint16_t CSR_BROADCAST_ID = 0xFFFF;
 
 static void
 OpenRxCsv (const std::string& path)
@@ -78,7 +77,7 @@ enum CsrSnmpCommand : uint8_t
 class CsrHeader : public Header
 {
 public:
-  using DestinationSequence = std::pair<uint16_t, uint16_t>;
+  using DestinationSequence = std::pair<CsrNodeId, uint16_t>;
   static constexpr uint8_t MAX_DESTINATIONS = 10;
 
   CsrHeader ()
@@ -100,7 +99,7 @@ public:
       m_rxPowerDbmX10 (0)
   {}
 
-  CsrHeader (uint16_t src, uint16_t dst, uint16_t seq,
+  CsrHeader (CsrNodeId src, CsrNodeId dst, uint16_t seq,
              uint8_t dscp, bool ackable, bool isAck)
     : m_src (src),
       m_dst (dst),
@@ -118,7 +117,11 @@ public:
       m_speedKey (8),
       m_txPowerDbmX10 (0),
       m_rxPowerDbmX10 (0)
-  {}
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (src) ||
+                     !CsrIsValidNodeId (dst),
+                     "CSR header address exceeds the legacy 24-bit field");
+  }
 
   static TypeId GetTypeId (void)
   {
@@ -136,11 +139,10 @@ public:
 
   virtual uint32_t GetSerializedSize () const override
   {
-    // src(2) + dst(2) + seq(2) + dscp(1) + flags(1)
-    //return 2 + 2 + 2 + 1 + 1;
-    // src(2) + dst(2) + seq(2) + dscp(1) + flags(1) + type(1) + destType(1) + speedKey(1)
+    // src(3) + dst(3) + seq(2) + dscp(1) + flags(1)
+    // + type(1) + destType(1) + speedKey(1)
     static constexpr uint32_t baseSize =
-      2 + 2 + 2 + 1 + 1 + 1 + 1 + 1;
+      3 + 3 + 2 + 1 + 1 + 1 + 1 + 1;
 
     // OPNET ACKs carry two 64-bit cumulative receive registers.  Keep the
     // fields optional so existing exact ACKs for routing/control traffic retain
@@ -148,7 +150,7 @@ public:
     uint32_t targetListSize =
       m_destinationSequences.empty ()
         ? 0
-        : 1 + 4 * static_cast<uint32_t> (
+        : 1 + 5 * static_cast<uint32_t> (
                     m_destinationSequences.size ());
 
     return baseSize +
@@ -168,8 +170,8 @@ public:
     if (!m_destinationSequences.empty ()) { flags |= 0x10; }
     if (m_hasLinkControl) { flags |= 0x20; }
 
-    start.WriteHtonU16 (m_src);
-    start.WriteHtonU16 (m_dst);
+    CsrWriteNodeId (start, m_src);
+    CsrWriteNodeId (start, m_dst);
     start.WriteHtonU16 (m_seq);
     start.WriteU8 (m_dscp);
     start.WriteU8 (flags);
@@ -198,7 +200,7 @@ public:
 
         for (const auto &target : m_destinationSequences)
           {
-            start.WriteHtonU16 (target.first);
+            CsrWriteNodeId (start, target.first);
             start.WriteHtonU16 (target.second);
           }
       }
@@ -206,8 +208,8 @@ public:
 
   virtual uint32_t Deserialize (Buffer::Iterator start) override
   {
-    m_src  = start.ReadNtohU16 ();
-    m_dst  = start.ReadNtohU16 ();
+    m_src  = CsrReadNodeId (start);
+    m_dst  = CsrReadNodeId (start);
     m_seq  = start.ReadNtohU16 ();
     m_dscp = start.ReadU8 ();
     uint8_t flags = start.ReadU8 ();
@@ -257,12 +259,12 @@ public:
           count == 0 || count > MAX_DESTINATIONS,
           "invalid CSR destination/sequence list size");
 
-        targetListSize = 1 + 4 * count;
+        targetListSize = 1 + 5 * count;
         m_destinationSequences.reserve (count);
 
         for (uint8_t i = 0; i < count; ++i)
           {
-            uint16_t destination = start.ReadNtohU16 ();
+            CsrNodeId destination = CsrReadNodeId (start);
             uint16_t sequence = start.ReadNtohU16 ();
             m_destinationSequences.emplace_back (
               destination,
@@ -271,7 +273,7 @@ public:
       }
 
     static constexpr uint32_t baseSize =
-      2 + 2 + 2 + 1 + 1 + 1 + 1 + 1;
+      3 + 3 + 2 + 1 + 1 + 1 + 1 + 1;
 
     return baseSize +
            (m_hasAckWindow ? 16 : 0) +
@@ -328,11 +330,21 @@ public:
 
   }
 
-  void     SetSrc (uint16_t v)  { m_src = v; }
-  uint16_t GetSrc () const      { return m_src; }
+  void SetSrc (CsrNodeId v)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (v),
+                     "CSR source exceeds the legacy 24-bit field");
+    m_src = v;
+  }
+  CsrNodeId GetSrc () const { return m_src; }
 
-  void     SetDst (uint16_t v)  { m_dst = v; }
-  uint16_t GetDst () const      { return m_dst; }
+  void SetDst (CsrNodeId v)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (v),
+                     "CSR destination exceeds the legacy 24-bit field");
+    m_dst = v;
+  }
+  CsrNodeId GetDst () const { return m_dst; }
 
   void     SetSeq (uint16_t v)  { m_seq = v; }
   uint16_t GetSeq () const      { return m_seq; }
@@ -397,6 +409,12 @@ public:
     NS_ABORT_MSG_IF (
       targets.empty () || targets.size () > MAX_DESTINATIONS,
       "CSR destination/sequence list must contain 1 to 10 entries");
+    for (const auto &target : targets)
+      {
+        NS_ABORT_MSG_IF (
+          !CsrIsValidNodeId (target.first),
+          "CSR target destination exceeds the legacy 24-bit field");
+      }
     m_destinationSequences = targets;
   }
 
@@ -411,14 +429,14 @@ public:
     return m_destinationSequences;
   }
 
-  std::vector<uint16_t> EnumerateDestinations () const
+  std::vector<CsrNodeId> EnumerateDestinations () const
   {
     if (m_destinationSequences.empty ())
       {
         return {m_dst};
       }
 
-    std::vector<uint16_t> destinations;
+    std::vector<CsrNodeId> destinations;
     destinations.reserve (m_destinationSequences.size ());
     for (const auto &target : m_destinationSequences)
       {
@@ -428,7 +446,7 @@ public:
   }
 
   bool GetSequenceForDestination (
-    uint16_t destination,
+    CsrNodeId destination,
     uint16_t &sequence) const
   {
     bool found = false;
@@ -444,9 +462,9 @@ public:
     return found;
   }
 
-  bool IsForDestination (uint16_t destination) const
+  bool IsForDestination (CsrNodeId destination) const
   {
-    for (uint16_t target : EnumerateDestinations ())
+    for (CsrNodeId target : EnumerateDestinations ())
       {
         if (target == CSR_BROADCAST_ID ||
             target == destination)
@@ -458,8 +476,8 @@ public:
   }
 
 private:
-  uint16_t m_src;
-  uint16_t m_dst;
+  CsrNodeId m_src;
+  CsrNodeId m_dst;
   uint16_t m_seq;
   uint8_t  m_dscp;
   bool     m_ackable;
@@ -492,11 +510,15 @@ public:
       m_dscp (0)
   {}
 
-  CsrNetHeader (uint16_t src, uint16_t dst, uint8_t dscp)
+  CsrNetHeader (CsrNodeId src, CsrNodeId dst, uint8_t dscp)
     : m_src (src),
       m_dst (dst),
       m_dscp (dscp)
-  {}
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (src) ||
+                     !CsrIsValidNodeId (dst),
+                     "CSR NWK address exceeds the legacy 24-bit field");
+  }
 
   static TypeId GetTypeId (void)
   {
@@ -514,21 +536,21 @@ public:
 
   virtual uint32_t GetSerializedSize () const override
   {
-    // src(2) + dst(2) + dscp(1)
-    return 2 + 2 + 1;
+    // src(3) + dst(3) + dscp(1)
+    return 3 + 3 + 1;
   }
 
   virtual void Serialize (Buffer::Iterator start) const override
   {
-    start.WriteHtonU16 (m_src);
-    start.WriteHtonU16 (m_dst);
+    CsrWriteNodeId (start, m_src);
+    CsrWriteNodeId (start, m_dst);
     start.WriteU8 (m_dscp);
   }
 
   virtual uint32_t Deserialize (Buffer::Iterator start) override
   {
-    m_src  = start.ReadNtohU16 ();
-    m_dst  = start.ReadNtohU16 ();
+    m_src  = CsrReadNodeId (start);
+    m_dst  = CsrReadNodeId (start);
     m_dscp = start.ReadU8 ();
     return GetSerializedSize ();
   }
@@ -540,18 +562,28 @@ public:
        << " dscp="   << unsigned(m_dscp);
   }
 
-  void     SetSrc (uint16_t v)  { m_src = v; }
-  uint16_t GetSrc () const      { return m_src; }
+  void SetSrc (CsrNodeId v)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (v),
+                     "CSR NWK source exceeds the legacy 24-bit field");
+    m_src = v;
+  }
+  CsrNodeId GetSrc () const { return m_src; }
 
-  void     SetDst (uint16_t v)  { m_dst = v; }
-  uint16_t GetDst () const      { return m_dst; }
+  void SetDst (CsrNodeId v)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (v),
+                     "CSR NWK destination exceeds the legacy 24-bit field");
+    m_dst = v;
+  }
+  CsrNodeId GetDst () const { return m_dst; }
 
   void     SetDscp (uint8_t v)  { m_dscp = v; }
   uint8_t  GetDscp () const     { return m_dscp; }
 
 private:
-  uint16_t m_src;
-  uint16_t m_dst;
+  CsrNodeId m_src;
+  CsrNodeId m_dst;
   uint8_t  m_dscp;
 };
 
@@ -588,30 +620,30 @@ public:
 
   uint32_t GetSerializedSize () const override
   {
-    // source(2) + destination(2) + destination type(1) + command(1)
-    // + value(4) + node count(1) + node IDs(2 each)
-    return 11 + 2 * static_cast<uint32_t> (m_nodes.size ());
+    // source(3) + destination(3) + destination type(1) + command(1)
+    // + value(4) + node count(1) + node IDs(3 each)
+    return 13 + 3 * static_cast<uint32_t> (m_nodes.size ());
   }
 
   void Serialize (Buffer::Iterator start) const override
   {
-    start.WriteHtonU16 (m_source);
-    start.WriteHtonU16 (m_destination);
+    CsrWriteNodeId (start, m_source);
+    CsrWriteNodeId (start, m_destination);
     start.WriteU8 (m_destinationType);
     start.WriteU8 (m_command);
     start.WriteHtonU32 (static_cast<uint32_t> (m_value));
     start.WriteU8 (static_cast<uint8_t> (m_nodes.size ()));
 
-    for (uint16_t node : m_nodes)
+    for (CsrNodeId node : m_nodes)
       {
-        start.WriteHtonU16 (node);
+        CsrWriteNodeId (start, node);
       }
   }
 
   uint32_t Deserialize (Buffer::Iterator start) override
   {
-    m_source = start.ReadNtohU16 ();
-    m_destination = start.ReadNtohU16 ();
+    m_source = CsrReadNodeId (start);
+    m_destination = CsrReadNodeId (start);
     m_destinationType = start.ReadU8 ();
     m_command = start.ReadU8 ();
     m_value = static_cast<int32_t> (start.ReadNtohU32 ());
@@ -621,14 +653,14 @@ public:
 
     for (uint8_t index = 0; index < nodeCount; ++index)
       {
-        uint16_t node = start.ReadNtohU16 ();
+        CsrNodeId node = CsrReadNodeId (start);
         if (m_nodes.size () < MAX_NODES)
           {
             m_nodes.push_back (node);
           }
       }
 
-    return 11 + 2 * static_cast<uint32_t> (nodeCount);
+    return 13 + 3 * static_cast<uint32_t> (nodeCount);
   }
 
   void Print (std::ostream &os) const override
@@ -641,14 +673,21 @@ public:
        << " nodes=" << m_nodes.size ();
   }
 
-  void SetSource (uint16_t source) { m_source = source; }
-  uint16_t GetSource () const { return m_source; }
-
-  void SetDestination (uint16_t destination)
+  void SetSource (CsrNodeId source)
   {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (source),
+                     "CSR SNMP source exceeds the legacy 24-bit field");
+    m_source = source;
+  }
+  CsrNodeId GetSource () const { return m_source; }
+
+  void SetDestination (CsrNodeId destination)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (destination),
+                     "CSR SNMP destination exceeds the legacy 24-bit field");
     m_destination = destination;
   }
-  uint16_t GetDestination () const { return m_destination; }
+  CsrNodeId GetDestination () const { return m_destination; }
 
   void SetDestinationType (CsrDestType type)
   {
@@ -671,21 +710,27 @@ public:
   void SetValue (int32_t value) { m_value = value; }
   int32_t GetValue () const { return m_value; }
 
-  void SetNodes (const std::vector<uint16_t> &nodes)
+  void SetNodes (const std::vector<CsrNodeId> &nodes)
   {
+    for (CsrNodeId node : nodes)
+      {
+        NS_ABORT_MSG_IF (
+          !CsrIsValidNodeId (node),
+          "CSR SNMP node identifier exceeds the legacy 24-bit field");
+      }
     m_nodes.assign (
       nodes.begin (),
       nodes.begin () + std::min<size_t> (nodes.size (), MAX_NODES));
   }
-  const std::vector<uint16_t>& GetNodes () const { return m_nodes; }
+  const std::vector<CsrNodeId>& GetNodes () const { return m_nodes; }
 
 private:
-  uint16_t m_source;
-  uint16_t m_destination;
+  CsrNodeId m_source;
+  CsrNodeId m_destination;
   uint8_t m_destinationType;
   uint8_t m_command;
   int32_t m_value;
-  std::vector<uint16_t> m_nodes;
+  std::vector<CsrNodeId> m_nodes;
 };
 
 NS_LOG_COMPONENT_DEFINE ("CsrDemo");

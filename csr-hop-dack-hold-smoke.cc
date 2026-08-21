@@ -11,11 +11,11 @@ using namespace ns3;
 namespace
 {
 
-constexpr uint16_t SOURCE_NODE = 1;
-constexpr uint16_t FIRST_NEIGHBOR = 2;
-constexpr uint16_t SECOND_NEIGHBOR = 3;
-constexpr uint16_t FIRST_NWK_DESTINATION = 10;
-constexpr uint16_t SECOND_NWK_DESTINATION = 11;
+constexpr CsrNodeId SOURCE_NODE = 1;
+constexpr CsrNodeId FIRST_NEIGHBOR = 2;
+constexpr CsrNodeId SECOND_NEIGHBOR = 3;
+constexpr CsrNodeId FIRST_NWK_DESTINATION = 10;
+constexpr CsrNodeId SECOND_NWK_DESTINATION = 11;
 
 uint32_t g_nsdpReleases = 0;
 uint32_t g_nwkWakeups = 0;
@@ -34,7 +34,7 @@ Require (bool condition, const char* message)
 }
 
 void
-ReleaseNsdp (uint16_t src, uint16_t dst)
+ReleaseNsdp (CsrNodeId src, CsrNodeId dst)
 {
   Require (src == SOURCE_NODE,
            "DACK released an NSDP flow with the wrong source");
@@ -66,13 +66,13 @@ WakeNwkQueue ()
 }
 
 void
-ReportLinkFailure (uint16_t)
+ReportLinkFailure (CsrNodeId)
 {
   g_linkFailures++;
 }
 
 Ptr<Packet>
-BuildDack (uint16_t neighbor)
+BuildDack (CsrNodeId neighbor)
 {
   CsrHeader header (neighbor,
                     SOURCE_NODE,
@@ -94,7 +94,7 @@ BuildDack (uint16_t neighbor)
 }
 
 void
-InjectDack (Ptr<CsrHopLayer> hop, uint16_t neighbor)
+InjectDack (Ptr<CsrHopLayer> hop, CsrNodeId neighbor)
 {
   hop->ReceiveFromMac (BuildDack (neighbor), 60.0, 40.0);
 }

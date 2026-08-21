@@ -51,7 +51,7 @@ ConfigureNoErrors (Ptr<CsrNetDevice> device)
 }
 
 Ptr<Packet>
-BuildNeighborObservation (uint16_t source,
+BuildNeighborObservation (CsrNodeId source,
                           double advertisedS0PowerDbm)
 {
   CsrHeader header (source, 1, 1, 5, false, false);

@@ -129,14 +129,15 @@ CheckByteLimit (Ptr<CsrNetDevice> sender)
 {
   Require (g_sequences.size () == 10,
            "byte-limit scenario did not deliver all DATA frames");
-  for (std::size_t i = 1; i < 8; ++i)
+  for (std::size_t i = 1; i < 7; ++i)
     {
       Require (g_receiveTimes[i] == g_receiveTimes[0],
                "8-kbps aggregate did not stop below 256 bytes");
     }
-  Require (g_receiveTimes[8] > g_receiveTimes[7],
-           "ninth 31-byte frame exceeded OPNET's strict byte limit");
-  Require (g_receiveTimes[9] == g_receiveTimes[8],
+  Require (g_receiveTimes[7] > g_receiveTimes[6],
+           "eighth 33-byte frame exceeded OPNET's strict byte limit");
+  Require (g_receiveTimes[8] == g_receiveTimes[7] &&
+             g_receiveTimes[9] == g_receiveTimes[7],
            "smaller tail frame bypassed the non-fitting queue head");
   Require (sender->GetMac ().GetTransmittedFrameCount () == 2,
            "byte-limit scenario did not use exactly two OTA transmissions");
@@ -163,8 +164,8 @@ RunByteLimitScenario ()
       sender->GetMac ().EnqueueTxFrame (
         BuildFrame (seq, false, 20), 2, 5, false);
     }
-  // This smaller frame would fit behind the first eight, but OPNET never
-  // scans past the ninth frame after that queue head fails the size test.
+  // This smaller frame would fit behind the first seven, but OPNET never
+  // scans past the eighth frame after that queue head fails the size test.
   sender->GetMac ().EnqueueTxFrame (
     BuildFrame (10, false), 2, 5, false);
 

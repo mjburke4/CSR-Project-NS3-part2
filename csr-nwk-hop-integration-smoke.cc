@@ -13,9 +13,9 @@ using namespace ns3;
 namespace
 {
 
-constexpr uint16_t SOURCE_NODE = 0;
-constexpr uint16_t RELAY_NODE = 1;
-constexpr uint16_t DESTINATION_NODE = 2;
+constexpr CsrNodeId SOURCE_NODE = 0;
+constexpr CsrNodeId RELAY_NODE = 1;
+constexpr CsrNodeId DESTINATION_NODE = 2;
 constexpr uint32_t BURST_SIZE = 4;
 
 std::vector<uint32_t> g_receivedSizes;
@@ -31,7 +31,7 @@ Require (bool condition, const char* message)
 }
 
 void
-ReceiveAtDestination (Ptr<Packet> payload, uint16_t source)
+ReceiveAtDestination (Ptr<Packet> payload, CsrNodeId source)
 {
   Require (source == SOURCE_NODE,
            "destination received a payload with the wrong NWK source");
@@ -42,7 +42,7 @@ void
 ConnectStack (Ptr<CsrNetDevice> device,
               Ptr<CsrHopLayer> hop,
               Ptr<CsrNetLayer> nwk,
-              uint16_t nodeId)
+              CsrNodeId nodeId)
 {
   hop->SetNodeId (nodeId);
   hop->SetMac (&device->GetMac ());

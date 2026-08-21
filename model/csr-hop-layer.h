@@ -33,7 +33,12 @@ public:
             this));
       }
   }
-  void SetNodeId (uint16_t id)    { m_nodeId = id; }
+  void SetNodeId (CsrNodeId id)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
+                     "CSR HOP node identifier exceeds 24 bits");
+    m_nodeId = id;
+  }
   void SetActiveNodesForPostTx (uint32_t n)
   {
     if (m_mac != nullptr)
@@ -51,39 +56,42 @@ public:
   }
 
   // Upper layer callback: payload + src
-  void SetRxFromHopCallback (Callback<void, Ptr<Packet>, uint16_t> cb)
+  void SetRxFromHopCallback (Callback<void, Ptr<Packet>, CsrNodeId> cb)
   {
     m_rxFromHopCb = cb;
   }
 
-  void SetRxHelloFromHopCallback (Callback<void, Ptr<Packet>, uint16_t, double, double> cb)
+  void SetRxHelloFromHopCallback (
+    Callback<void, Ptr<Packet>, CsrNodeId, double, double> cb)
   {
     m_rxHelloFromHopCb = cb;
   }
 
   void SetRxSnmpFromHopCallback (
-    Callback<void, Ptr<Packet>, uint16_t> cb)
+    Callback<void, Ptr<Packet>, CsrNodeId> cb)
   {
     m_rxSnmpFromHopCb = cb;
   }
 
   // After SetRxFromHopCallback
-  void SetNsdpDecrementCallback (Callback<void, uint16_t, uint16_t> cb)
+  void SetNsdpDecrementCallback (
+    Callback<void, CsrNodeId, CsrNodeId> cb)
   {
     m_nsdpDecrCb = cb;
   }
 
-  void SetShouldDackCallback (Callback<bool, uint16_t, uint16_t> cb)
+  void SetShouldDackCallback (
+    Callback<bool, CsrNodeId, CsrNodeId> cb)
   {
     m_shouldDackCb = cb;
   }
 
-  void SetRelayRouteAvailableCallback (Callback<bool, uint16_t> cb)
+  void SetRelayRouteAvailableCallback (Callback<bool, CsrNodeId> cb)
   {
     m_relayRouteAvailableCb = cb;
   }
 
-  void SetLinkFailureCallback (Callback<void, uint16_t> cb)
+  void SetLinkFailureCallback (Callback<void, CsrNodeId> cb)
   {
     m_linkFailureCb = cb;
   }
@@ -97,7 +105,7 @@ public:
 
   void SetNeighborCheckSuccessCallback (
     Callback<void,
-            uint16_t,
+            CsrNodeId,
             CsrNeighborCheckType,
             uint32_t> cb)
   {
@@ -105,11 +113,11 @@ public:
   }
 
   // App/NWK send
-  void SendData (uint16_t dst, uint8_t dscp,
+  void SendData (CsrNodeId dst, uint8_t dscp,
                  Ptr<Packet> payload, bool ack);
 
   // Legacy br_SNMP bypasses ACK/resend and DATA flow control.
-  void SendSnmp (uint16_t hopDestination, Ptr<Packet> payload);
+  void SendSnmp (CsrNodeId hopDestination, Ptr<Packet> payload);
 
   // Called by MAC when frame arrives off-air
   void ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb);
@@ -119,16 +127,16 @@ public:
   // instead of void SendHello();
   void SendHello (Ptr<Packet> helloPayload);
 
-  void SendNeighborCheck (uint16_t dst, Ptr<Packet> payload);
+  void SendNeighborCheck (CsrNodeId dst, Ptr<Packet> payload);
 
   void PrintNeighbors () const;
 
-  bool HasNeighbor (uint16_t neighbor) const
+  bool HasNeighbor (CsrNodeId neighbor) const
   {
     return m_neighbors.find (neighbor) != m_neighbors.end ();
   }
 
-  double GetNeighborLastHeardSeconds (uint16_t neighbor) const
+  double GetNeighborLastHeardSeconds (CsrNodeId neighbor) const
   {
     auto it = m_neighbors.find (neighbor);
     return it == m_neighbors.end ()
@@ -136,7 +144,7 @@ public:
       : it->second.lastHeardSec;
   }
 
-  double GetNeighborPathlossDb (uint16_t neighbor) const
+  double GetNeighborPathlossDb (CsrNodeId neighbor) const
   {
     auto it = m_neighbors.find (neighbor);
     return it == m_neighbors.end ()
@@ -144,7 +152,7 @@ public:
       : it->second.lastPathlossDb;
   }
 
-  double GetNeighborSnrDb (uint16_t neighbor) const
+  double GetNeighborSnrDb (CsrNodeId neighbor) const
   {
     auto it = m_neighbors.find (neighbor);
     return it == m_neighbors.end ()
@@ -152,28 +160,28 @@ public:
       : it->second.lastSnrDb;
   }
 
-  uint32_t GetNeighborLinkCost (uint16_t neighbor) const
+  uint32_t GetNeighborLinkCost (CsrNodeId neighbor) const
   {
     auto it = m_neighbors.find (neighbor);
     return it == m_neighbors.end () ? 0 : it->second.linkCost;
   }
 
-  void SetNeighborFailureCount (uint16_t neighbor, uint32_t failures)
+  void SetNeighborFailureCount (CsrNodeId neighbor, uint32_t failures)
   {
     m_neighbors[neighbor].numFailures = failures;
   }
 
   void SendRoutingControl (
-  uint16_t dst,
+  CsrNodeId dst,
   Ptr<Packet> payload);
 
   void SendRoutingControl (
-    const std::vector<uint16_t> &destinations,
+    const std::vector<CsrNodeId> &destinations,
     Ptr<Packet> payload);
 
   void SetRoutingControlSuccessCallback (
     Callback<void,
-            uint16_t,
+            CsrNodeId,
               uint32_t,
               CsrRoutingOperation,
               uint8_t,
@@ -185,7 +193,7 @@ public:
 
   void SetRoutingControlFailureCallback (
     Callback<void,
-            std::vector<uint16_t>,
+            std::vector<CsrNodeId>,
             uint32_t,
             CsrRoutingOperation,
             uint8_t,
@@ -211,7 +219,7 @@ private:
     uint32_t consecutiveCleanAcks {0};
   };
 
-  FlowCtrlEntry& GetFlowCtrlEntry (uint16_t dest)
+  FlowCtrlEntry& GetFlowCtrlEntry (CsrNodeId dest)
   {
     auto it = m_flowCtrlByDest.find (dest);
     if (it == m_flowCtrlByDest.end ())
@@ -241,7 +249,7 @@ public:
     return m_pendingDataCount;
   }
 
-  uint32_t GetOutstandingDataCount (uint16_t dest) const
+  uint32_t GetOutstandingDataCount (CsrNodeId dest) const
   {
     auto it = m_flowCtrlByDest.find (dest);
     return it == m_flowCtrlByDest.end () ? 0 : it->second.outstanding;
@@ -258,7 +266,7 @@ public:
   }
 
   void NotifyMacFrameSent (
-    uint16_t dest,
+    CsrNodeId dest,
     uint16_t seq,
     Time sentAt)
   {
@@ -311,7 +319,7 @@ public:
       HOP_PENDING_MAX_THRESHOLD;
   }
 
-  bool CanSendToHop (uint16_t dest)
+  bool CanSendToHop (CsrNodeId dest)
   {
     FlowCtrlEntry &e = GetFlowCtrlEntry (dest);
     
@@ -357,14 +365,14 @@ public:
 private:
   struct ResendTarget
   {
-    uint16_t dest {0};
+    CsrNodeId dest {0};
     uint16_t seq {0};
     bool acked {false};
   };
 
   struct ResendEntry
   {
-    uint16_t dest;
+    CsrNodeId dest;
     uint16_t seq;
     uint8_t dscp;
     Ptr<Packet> frame;
@@ -386,7 +394,7 @@ private:
   void CheckDack ();
 
   void EnqueueResend (
-    uint16_t dst,
+    CsrNodeId dst,
     uint16_t seq,
     Ptr<Packet> frame,
     bool flowControlTracked);
@@ -395,29 +403,30 @@ private:
     Ptr<Packet> frame,
     bool flowControlTracked);
   void CheckResend ();
-  ResendEntry* FindResendEntry (uint16_t dst, uint16_t seq);
-  bool CheckReceivedSeq (uint16_t src, uint16_t seq, bool dataTraffic);
-  void MarkDataDack (uint16_t src, uint16_t seq);
+  ResendEntry* FindResendEntry (CsrNodeId dst, uint16_t seq);
+  bool CheckReceivedSeq (CsrNodeId src, uint16_t seq, bool dataTraffic);
+  void MarkDataDack (CsrNodeId src, uint16_t seq);
   static int32_t SeqDiff (uint16_t seq1, uint16_t seq2);
 
-  Callback<void, uint16_t, uint16_t> m_nsdpDecrCb;
+  Callback<void, CsrNodeId, CsrNodeId> m_nsdpDecrCb;
 
-  Callback<void, Ptr<Packet>, uint16_t, double, double> m_rxHelloFromHopCb;
+  Callback<void, Ptr<Packet>, CsrNodeId, double, double>
+    m_rxHelloFromHopCb;
 
-  Callback<void, Ptr<Packet>, uint16_t> m_rxSnmpFromHopCb;
+  Callback<void, Ptr<Packet>, CsrNodeId> m_rxSnmpFromHopCb;
 
-  Callback<bool, uint16_t, uint16_t> m_shouldDackCb;
+  Callback<bool, CsrNodeId, CsrNodeId> m_shouldDackCb;
 
-  Callback<bool, uint16_t> m_relayRouteAvailableCb;
+  Callback<bool, CsrNodeId> m_relayRouteAvailableCb;
 
-  Callback<void, uint16_t> m_linkFailureCb;
+  Callback<void, CsrNodeId> m_linkFailureCb;
 
   Callback<void> m_nwkQueueWakeCb;
 
   //Callback<void, uint16_t> m_neighborCheckSuccessCb;
 
   Callback<void,
-         uint16_t,
+         CsrNodeId,
          CsrNeighborCheckType,
          uint32_t> m_neighborCheckSuccessCb;
 
@@ -449,8 +458,8 @@ private:
         return;
       }
 
-    uint16_t nwkSrc = nh.GetSrc ();
-    uint16_t nwkDst = nh.GetDst ();
+    CsrNodeId nwkSrc = nh.GetSrc ();
+    CsrNodeId nwkDst = nh.GetDst ();
     m_nsdpDecrCb (nwkSrc, nwkDst);
   }
 
@@ -472,13 +481,13 @@ private:
     uint32_t linkCost {0};
   };
 
-  std::map<uint16_t, NeighborInfo> m_neighbors;
+  std::map<CsrNodeId, NeighborInfo> m_neighbors;
 
-  LinkControlResult ComputeLinkControl (uint16_t dest);
+  LinkControlResult ComputeLinkControl (CsrNodeId dest);
   void ApplyLinkControl (CsrHeader &header,
-                         const std::vector<uint16_t> &destinations);
+                         const std::vector<CsrNodeId> &destinations);
 
-  void UpdateNeighborHeard (uint16_t src,
+  void UpdateNeighborHeard (CsrNodeId src,
                             double pathlossDb,
                             double snrDb,
                             double advertisedS0PowerDbm)
@@ -502,7 +511,7 @@ private:
   }
   struct DackEntry
   {
-    uint16_t dest;
+    CsrNodeId dest;
     uint16_t seq;
     Ptr<Packet> frame;   // original data frame
     Time expiry;
@@ -514,8 +523,8 @@ private:
 
 private:
   CsrMacCore*                                   m_mac;
-  uint16_t                                      m_nodeId;
-  Callback<void, Ptr<Packet>, uint16_t>         m_rxFromHopCb;
+  CsrNodeId                                      m_nodeId;
+  Callback<void, Ptr<Packet>, CsrNodeId>        m_rxFromHopCb;
 
   // HELLO broadcast config (OPNET-style)
   double   m_maxPower     { 30.0 };    // max TX power dBm
@@ -531,7 +540,7 @@ private:
   uint16_t m_activeNodes  { 0 };       // active node count
   CsrHopLayer* m_hop      { nullptr }; // self-reference for SendHelloBroadcast
 
-  std::map<uint16_t, uint16_t>                  m_lastSentSeqByDest;
+  std::map<CsrNodeId, uint16_t>                  m_lastSentSeqByDest;
   std::list<ResendEntry>                        m_resendQueue;
   uint64_t                                      m_resendQueueOverflowCount {0};
   Time                                          m_resendTime;
@@ -546,16 +555,16 @@ private:
   };
 
 
-  std::map<uint16_t, FlowCtrlEntry> m_flowCtrlByDest;
+  std::map<CsrNodeId, FlowCtrlEntry> m_flowCtrlByDest;
 
   // DATA ACK windows must not include reliable routing/control sequence
   // numbers.  The legacy model maintains independent receive state for these
   // paths, so keep duplicate suppression separate here as well.
-  std::map<uint16_t, RxSeqState>                m_rxDataStateBySrc;
-  std::map<uint16_t, RxSeqState>                m_rxControlStateBySrc;
+  std::map<CsrNodeId, RxSeqState>                m_rxDataStateBySrc;
+  std::map<CsrNodeId, RxSeqState>                m_rxControlStateBySrc;
 
   Callback<void,
-          uint16_t,
+          CsrNodeId,
           uint32_t,
           CsrRoutingOperation,
           uint8_t,
@@ -564,7 +573,7 @@ private:
     m_routingControlSuccessCb;
 
   Callback<void,
-        std::vector<uint16_t>,
+        std::vector<CsrNodeId>,
         uint32_t,
         CsrRoutingOperation,
         uint8_t,
@@ -575,7 +584,7 @@ private:
 };
 
 CsrHopLayer::LinkControlResult
-CsrHopLayer::ComputeLinkControl (uint16_t dest)
+CsrHopLayer::ComputeLinkControl (CsrNodeId dest)
 {
   LinkControlResult result;
 
@@ -698,7 +707,7 @@ CsrHopLayer::ComputeLinkControl (uint16_t dest)
 void
 CsrHopLayer::ApplyLinkControl (
   CsrHeader &header,
-  const std::vector<uint16_t> &destinations)
+  const std::vector<CsrNodeId> &destinations)
 {
   NS_ABORT_MSG_IF (destinations.empty (),
                    "link control requires at least one destination");
@@ -752,7 +761,7 @@ void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
 }
 
 void
-CsrHopLayer::SendSnmp (uint16_t hopDestination, Ptr<Packet> payload)
+CsrHopLayer::SendSnmp (CsrNodeId hopDestination, Ptr<Packet> payload)
 {
   NS_ASSERT (m_mac != nullptr);
 
@@ -817,7 +826,7 @@ CsrHopLayer::PrintNeighbors () const
   }
 
 void
-CsrHopLayer::SendData (uint16_t dst, uint8_t dscp,
+CsrHopLayer::SendData (CsrNodeId dst, uint8_t dscp,
                        Ptr<Packet> payload, bool ack)
 {
   NS_ASSERT (m_mac != nullptr);
@@ -872,7 +881,7 @@ CsrHopLayer::SendData (uint16_t dst, uint8_t dscp,
 }
 
 void
-CsrHopLayer::SendNeighborCheck (uint16_t dst, Ptr<Packet> payload)
+CsrHopLayer::SendNeighborCheck (CsrNodeId dst, Ptr<Packet> payload)
 {
   NS_ASSERT (m_mac != nullptr);
 
@@ -913,17 +922,17 @@ CsrHopLayer::SendNeighborCheck (uint16_t dst, Ptr<Packet> payload)
 
 void
 CsrHopLayer::SendRoutingControl (
-  uint16_t dst,
+  CsrNodeId dst,
   Ptr<Packet> payload)
 {
   SendRoutingControl (
-    std::vector<uint16_t> {dst},
+    std::vector<CsrNodeId> {dst},
     payload);
 }
 
 void
 CsrHopLayer::SendRoutingControl (
-  const std::vector<uint16_t> &destinations,
+  const std::vector<CsrNodeId> &destinations,
   Ptr<Packet> payload)
 {
   NS_ASSERT (m_mac != nullptr);
@@ -935,7 +944,7 @@ CsrHopLayer::SendRoutingControl (
   std::vector<CsrHeader::DestinationSequence> targets;
   targets.reserve (destinations.size ());
 
-  for (uint16_t destination : destinations)
+  for (CsrNodeId destination : destinations)
     {
       uint16_t &lastSeq =
         m_lastSentSeqByDest[destination];
@@ -948,7 +957,7 @@ CsrHopLayer::SendRoutingControl (
         sequence);
     }
 
-  uint16_t primaryDestination =
+  CsrNodeId primaryDestination =
     targets.front ().first;
   uint16_t primarySequence =
     targets.front ().second;
@@ -1286,8 +1295,8 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
                               Ptr<Packet> payload,
                               bool firstReception)
 {
-  uint16_t dst = hdr.GetDst ();
-  uint16_t src = hdr.GetSrc ();
+  CsrNodeId dst = hdr.GetDst ();
+  CsrNodeId src = hdr.GetSrc ();
   bool ackable = hdr.IsAckable ();
 
   if (dst != m_nodeId)
@@ -1369,7 +1378,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
 void
 CsrHopLayer::HandleAckWindow (const CsrHeader &hdr)
 {
-  uint16_t src = hdr.GetSrc ();
+  CsrNodeId src = hdr.GetSrc ();
   uint16_t baseSeq = hdr.GetSeq ();
 
   // DACK wins if a malformed or stale peer marks a sequence in both fields.
@@ -1411,7 +1420,7 @@ CsrHopLayer::HandleAckWindow (const CsrHeader &hdr)
 void
 CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
 {
-  uint16_t src = hdr.GetSrc ();
+  CsrNodeId src = hdr.GetSrc ();
   uint16_t seq = hdr.GetSeq ();
 
   ResendEntry *entry = FindResendEntry (src, seq);
@@ -1754,7 +1763,7 @@ CsrHopLayer::CheckDack ()
 void
 CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
 {
-  uint16_t src = hdr.GetSrc ();
+  CsrNodeId src = hdr.GetSrc ();
   uint16_t seq = hdr.GetSeq ();
 
   ResendEntry *entry = FindResendEntry (src, seq);
@@ -1843,7 +1852,7 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
 
 void
 CsrHopLayer::EnqueueResend (
-  uint16_t dst,
+  CsrNodeId dst,
   uint16_t seq,
   Ptr<Packet> frame,
   bool flowControlTracked)
@@ -2032,7 +2041,7 @@ CsrHopLayer::CheckResend ()
                       if (!m_routingControlFailureCb
                             .IsNull ())
                         {
-                          std::vector<uint16_t>
+                          std::vector<CsrNodeId>
                             failedDestinations;
                           failedDestinations.reserve (
                             e.targets.size ());
@@ -2142,7 +2151,7 @@ CsrHopLayer::CheckResend ()
 }
 
 CsrHopLayer::ResendEntry*
-CsrHopLayer::FindResendEntry (uint16_t dst, uint16_t seq)
+CsrHopLayer::FindResendEntry (CsrNodeId dst, uint16_t seq)
 {
   for (auto &e : m_resendQueue)
     {
@@ -2176,11 +2185,11 @@ CsrHopLayer::SeqDiff (uint16_t seq1, uint16_t seq2)
 }
 
 bool
-CsrHopLayer::CheckReceivedSeq (uint16_t src,
+CsrHopLayer::CheckReceivedSeq (CsrNodeId src,
                                uint16_t seq,
                                bool dataTraffic)
 {
-  std::map<uint16_t, RxSeqState> &states =
+  std::map<CsrNodeId, RxSeqState> &states =
     dataTraffic ? m_rxDataStateBySrc : m_rxControlStateBySrc;
 
   RxSeqState &state = states[src];
@@ -2240,7 +2249,7 @@ CsrHopLayer::CheckReceivedSeq (uint16_t src,
 }
 
 void
-CsrHopLayer::MarkDataDack (uint16_t src, uint16_t seq)
+CsrHopLayer::MarkDataDack (CsrNodeId src, uint16_t seq)
 {
   auto stateIt = m_rxDataStateBySrc.find (src);
   if (stateIt == m_rxDataStateBySrc.end () || stateIt->second.highest < 0)

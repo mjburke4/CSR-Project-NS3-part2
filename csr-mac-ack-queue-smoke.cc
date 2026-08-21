@@ -27,8 +27,8 @@ Require (bool condition, const char* message)
 }
 
 Ptr<Packet>
-BuildWindowAck (uint16_t src,
-                uint16_t dst,
+BuildWindowAck (CsrNodeId src,
+                CsrNodeId dst,
                 uint16_t baseSeq,
                 uint64_t ackBitmap,
                 uint64_t dackBitmap)
@@ -47,7 +47,7 @@ BuildWindowAck (uint16_t src,
 }
 
 Ptr<Packet>
-BuildExactAck (uint16_t src, uint16_t dst, uint16_t seq)
+BuildExactAck (CsrNodeId src, CsrNodeId dst, uint16_t seq)
 {
   CsrHeader header (src, dst, seq, 0, false, true);
   header.SetType (CSR_PKT_ACK);
@@ -60,7 +60,7 @@ BuildExactAck (uint16_t src, uint16_t dst, uint16_t seq)
 }
 
 Ptr<Packet>
-BuildData (uint16_t src, uint16_t dst, uint16_t seq)
+BuildData (CsrNodeId src, CsrNodeId dst, uint16_t seq)
 {
   CsrHeader header (src, dst, seq, 7, true, false);
   header.SetType (CSR_PKT_DATA);

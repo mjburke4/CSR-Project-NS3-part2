@@ -1,4 +1,5 @@
 #pragma once
+#include "csr-wire-format.h"
 #include "ns3/header.h"
 #include "ns3/buffer.h"
 #include <vector>
@@ -60,8 +61,8 @@ public:
   TypeId GetInstanceTypeId () const override;
 
   // Setters/Getters
-  void SetNodeId (uint16_t id);
-  uint16_t GetNodeId () const;
+  void SetNodeId (CsrNodeId id);
+  CsrNodeId GetNodeId () const;
 
   void SetHelloSeq (uint16_t s);
   uint16_t GetHelloSeq () const;
@@ -93,13 +94,13 @@ public:
   uint32_t Deserialize (Buffer::Iterator start) override;
   void Print (std::ostream &os) const override;
 
-  void SetNeighborCheckTarget (uint16_t target);
-  uint16_t GetNeighborCheckTarget () const;
+  void SetNeighborCheckTarget (CsrNodeId target);
+  CsrNodeId GetNeighborCheckTarget () const;
 
   void ClearChirpNeighbors ();
-  bool AddChirpNeighbor (uint16_t nodeId);
+  bool AddChirpNeighbor (CsrNodeId nodeId);
   uint8_t GetChirpNeighborCount () const;
-  uint16_t GetChirpNeighbor (uint8_t index) const;
+  CsrNodeId GetChirpNeighbor (uint8_t index) const;
 
   void SetNodeType (CsrNodeType type);
   CsrNodeType GetNodeType () const;
@@ -139,33 +140,33 @@ public:
 
   struct AdvertisedRoute
   {
-    uint16_t dst {0xFFFF};
+    CsrNodeId dst {CSR_BROADCAST_ID};
     uint8_t  hops {0};
     uint32_t cost {0};
     int16_t  pathlossDbX10 {0};
     uint8_t  capability {0};
 
-    std::vector<uint16_t> path;
+    std::vector<CsrNodeId> path;
   };
 
   void ClearAdvertisedRoutes ();
 
   bool AddAdvertisedRoute (
-    uint16_t dst,
+    CsrNodeId dst,
     uint8_t hops,
     uint32_t cost,
     int16_t pathlossDbX10,
     uint8_t capability,
-    const std::vector<uint16_t> &path = {});
+    const std::vector<CsrNodeId> &path = {});
 
   uint8_t GetAdvertisedRouteCount () const;
   AdvertisedRoute GetAdvertisedRoute (uint8_t index) const;
 
-  void SetRoutingTarget (uint16_t target);
-  uint16_t GetRoutingTarget () const;
+  void SetRoutingTarget (CsrNodeId target);
+  CsrNodeId GetRoutingTarget () const;
 
 private:
-  uint16_t m_nodeId {0};
+  CsrNodeId m_nodeId {0};
   uint16_t m_helloSeq {0};
   uint8_t  m_speedKey {0};
   int16_t  m_rxPowerDbmX10 {0};
@@ -178,7 +179,7 @@ private:
   std::vector<AdvertisedRoute> m_advertisedRoutes;
 
   static constexpr uint16_t MAX_CHIRP_NEIGHBORS = 255;
-  std::vector<uint16_t> m_chirpNeighbors;
+  std::vector<CsrNodeId> m_chirpNeighbors;
 
   uint8_t m_neighborCheckType {
   static_cast<uint8_t> (CsrNeighborCheckType::None)
@@ -190,7 +191,7 @@ private:
 
   uint32_t m_discoverySequence {0};
 
-  uint16_t m_neighborCheckTarget {0xFFFF};
+  CsrNodeId m_neighborCheckTarget {CSR_BROADCAST_ID};
 
   uint8_t m_nodeType {
   static_cast<uint8_t> (CsrNodeType::Ordinary)
@@ -200,7 +201,7 @@ private:
     static_cast<uint8_t> (CsrRoutingOperation::None)
   };
 
-  uint16_t m_routingTarget {0xFFFF};
+  CsrNodeId m_routingTarget {CSR_BROADCAST_ID};
 
   RoutingInfo m_routingInfo;
 };

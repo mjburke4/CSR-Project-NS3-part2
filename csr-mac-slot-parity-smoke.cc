@@ -25,7 +25,7 @@ Require (bool condition, const char* message)
 }
 
 void
-RecordTransmission (uint16_t destination,
+RecordTransmission (CsrNodeId destination,
                     uint16_t sequence,
                     Time sentTime)
 {

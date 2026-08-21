@@ -448,7 +448,7 @@ Simulator::Schedule (
       25,
       2,
       1,
-      std::vector<uint16_t> {
+      std::vector<CsrNodeId> {
         2, 96
       });
 
@@ -464,7 +464,7 @@ Simulator::Schedule (
       50,
       2,
       1,
-      std::vector<uint16_t>{2, 250});
+      std::vector<CsrNodeId>{2, 250});
 
     net1->DumpBestRoute (250);
 
@@ -480,7 +480,7 @@ Simulator::Schedule (
       50,
       0,
       1,
-      std::vector<uint16_t>{0, 250});
+      std::vector<CsrNodeId>{0, 250});
 
     net1->DumpBestRoute (250);
     // Valid route: node 2 reaches 95
@@ -495,7 +495,7 @@ Simulator::Schedule (
       20,
       3,
       1,
-      std::vector<uint16_t> {
+      std::vector<CsrNodeId> {
         3, 95
       });
 
@@ -512,7 +512,7 @@ Simulator::Schedule (
       25,
       3,
       1,
-      std::vector<uint16_t> {
+      std::vector<CsrNodeId> {
         3, 1, 96
       });
 
@@ -721,7 +721,7 @@ Simulator::Schedule (
         20,
         0,
         0,  // capability = ORDINARY
-        std::vector<uint16_t> {
+        std::vector<CsrNodeId> {
           0, 252
         });
 
@@ -775,7 +775,7 @@ Simulator::Schedule (
         20,
         0,
         1,  // capability = ROUTABLE
-        std::vector<uint16_t> {
+        std::vector<CsrNodeId> {
           0, 252
         });
 
@@ -806,7 +806,7 @@ Simulator::Schedule (
       100,
       2,
       2,
-      std::vector<uint16_t> {
+      std::vector<CsrNodeId> {
         2, 1, 0
       });
 
@@ -833,7 +833,7 @@ Simulator::Schedule (
       20,
       0,
       0,   // Ordinary / non-capable
-      std::vector<uint16_t> {
+      std::vector<CsrNodeId> {
         0, 3
       });
 
@@ -869,7 +869,7 @@ Simulator::Schedule (
         SetAutomaticRoutePropagationEnabled (
           false);
 
-      for (uint16_t destination = 200;
+      for (CsrNodeId destination = 200;
           destination < 212;
           ++destination)
         {
@@ -883,7 +883,7 @@ Simulator::Schedule (
             destination - 190,
             0,
             1,
-            std::vector<uint16_t> {
+            std::vector<CsrNodeId> {
               0,
               destination
             });

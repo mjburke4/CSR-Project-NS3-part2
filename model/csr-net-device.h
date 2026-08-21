@@ -7,9 +7,11 @@ class CsrNetDevice : public Object
 {
 public:
   CsrNetDevice () = default;
-  CsrNetDevice (uint16_t id)
+  CsrNetDevice (CsrNodeId id)
     : m_id (id)
   {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
+                     "CSR device node identifier exceeds 24 bits");
     m_mac.SetNodeId (id);
     m_mac.SetDevice (this);
     m_rng = CreateObject<UniformRandomVariable> ();
@@ -68,7 +70,7 @@ public:
 
   CsrPhyModel& GetPhy() { return m_phy; }
 
-  uint16_t GetId () const { return m_id; }
+  CsrNodeId GetId () const { return m_id; }
 
   void SetActiveNodesForPostTx (uint32_t n)
   {
@@ -95,7 +97,7 @@ public:
   }
 
   Time SendToPeer (Ptr<Packet> frame,
-                   uint16_t dest,
+                   CsrNodeId dest,
                    int rateKbps,
                    double txPowerDbm,
                    PreambleType preamble,
@@ -110,7 +112,7 @@ public:
                           bool ackable);
 
 private:
-  uint16_t                       m_id {0};
+  CsrNodeId                       m_id {0};
   CsrMacCore                     m_mac;
   std::vector< Ptr<CsrNetDevice> > m_peers;   // multiple peers on shared channel
   Ptr<UniformRandomVariable>     m_rng;
@@ -252,7 +254,7 @@ CsrMacCore::PrintNeighbors () const
   bool first = true;
   for (auto const& kv : m_lastHeardSec)
     {
-      uint16_t n = kv.first;
+      CsrNodeId n = kv.first;
       double age = now - kv.second;
 
       if (!first) std::cout << " | ";
@@ -302,13 +304,13 @@ CsrMacCore::SendHelloInternal (bool reschedule)
 }
 
 int
-CsrMacCore::SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const
+CsrMacCore::SelectRateByPerTarget (CsrNodeId destId, uint32_t nBits, double targetPer) const
 {
   static const std::vector<int> kRates = { 8, 16, 32, 64, 128 }; // keep consistent with your supported set
 
   // Access PHY through the owning device (now safe because this definition is after CsrNetDevice is complete)
   const CsrPhyModel& phy = m_dev->GetPhy ();
-  uint16_t txId = m_dev->GetId ();
+  CsrNodeId txId = m_dev->GetId ();
 
   double snrDb = phy.PredictSnrDb (txId, destId, phy.profile.txPowerDbm);
 
@@ -325,7 +327,7 @@ CsrMacCore::SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targe
 
 Time
 CsrNetDevice::SendToPeer (Ptr<Packet> frame,
-                          uint16_t dest,
+                          CsrNodeId dest,
                           int rateKbps,
                           double txPowerDbm,
                           PreambleType preamble,
@@ -417,7 +419,7 @@ std::cout << "[MAC " << m_id
   // Peek header once to know src/dst/seq
   CsrHeader hdrOnTx;
   frameCopies.front ()->PeekHeader (hdrOnTx);
-  uint16_t txId   = hdrOnTx.GetSrc ();
+  CsrNodeId txId   = hdrOnTx.GetSrc ();
   uint16_t seq    = hdrOnTx.GetSeq ();
 
   Simulator::Schedule (Seconds (propDelay + duration),
@@ -575,7 +577,7 @@ void
 CsrMacCore::EnqueueAckFrame (Ptr<Packet> frame,
                              const CsrHeader &header)
 {
-  uint16_t dest = header.GetDst ();
+  CsrNodeId dest = header.GetDst ();
   uint16_t seq = header.GetSeq ();
 
   if (header.HasAckWindow ())
@@ -653,7 +655,7 @@ CsrMacCore::EnqueueAckFrame (Ptr<Packet> frame,
 
 void
 CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
-                            uint16_t dest,
+                            CsrNodeId dest,
                             uint8_t dscp,
                             bool ackable)
 {
@@ -716,7 +718,7 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
 }
 
 uint32_t
-CsrMacCore::CancelAcknowledgedFrames (uint16_t neighbor,
+CsrMacCore::CancelAcknowledgedFrames (CsrNodeId neighbor,
                                       uint16_t baseSeq,
                                       uint64_t ackBitmap,
                                       uint64_t dackBitmap)
@@ -797,7 +799,7 @@ CsrMacCore::MaybeScheduleNextTx ()
   // OPNET prep_tx(): a newly active transmitter waits through the 300-ms
   // radio holdoff, then decrements its selected counter once per 13-ms slot.
   // Transmission occurs only after the counter moves from zero to -1.
-  uint16_t dest = !m_ackQueue.empty ()
+  CsrNodeId dest = !m_ackQueue.empty ()
     ? m_ackQueue.front ().dest
     : m_queue.front ().dest;
   int slot = PickTxSlot (dest);
@@ -836,7 +838,7 @@ CsrMacCore::FinishTx ()
 }
 
 int
-CsrMacCore::ChooseRateForDest (uint16_t dest)
+CsrMacCore::ChooseRateForDest (CsrNodeId dest)
 {
   auto it = m_neighbors.find (dest);
   double pl = 90.0;
@@ -853,7 +855,7 @@ CsrMacCore::ChooseRateForDest (uint16_t dest)
 }
 
 PreambleType
-CsrMacCore::ChoosePreambleForDest (uint16_t dest)
+CsrMacCore::ChoosePreambleForDest (CsrNodeId dest)
 {
   auto it = m_neighbors.find (dest);
 
@@ -884,7 +886,7 @@ CsrMacCore::ChoosePreambleForDest (uint16_t dest)
 
 int
 CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
-                                   uint16_t dest,
+                                   CsrNodeId dest,
                                    bool ackable) const
 {
   CsrHeader header;
@@ -911,7 +913,7 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
         }
 
       int selectedRate = 128;
-      for (uint16_t target : header.EnumerateDestinations ())
+      for (CsrNodeId target : header.EnumerateDestinations ())
         {
           selectedRate = std::min (
             selectedRate,
@@ -994,7 +996,7 @@ CsrMacCore::SelectAggregatePreamble (
       CsrHeader header;
       if (entry.frame != nullptr && entry.frame->PeekHeader (header))
         {
-          for (uint16_t destination : header.EnumerateDestinations ())
+          for (CsrNodeId destination : header.EnumerateDestinations ())
             {
               if (ChoosePreambleForDest (destination) == PREAMBLE_LONG)
                 {
@@ -1136,7 +1138,7 @@ CsrMacCore::DoTx ()
       return;
     }
 
-  uint16_t dest = selected.front ().dest;
+  CsrNodeId dest = selected.front ().dest;
 
   int powerSelectionRateKbps = selected.front ().rateKbps;
   double aggregateTxPowerDbm = selected.front ().txPowerDbm;

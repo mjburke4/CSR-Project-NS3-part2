@@ -12,10 +12,10 @@ using namespace ns3;
 namespace
 {
 
-constexpr uint16_t NWK_SOURCE = 0;
-constexpr uint16_t UPSTREAM_HOP = 1;
-constexpr uint16_t RELAY_NODE = 2;
-constexpr uint16_t NWK_DESTINATION = 3;
+constexpr CsrNodeId NWK_SOURCE = 0;
+constexpr CsrNodeId UPSTREAM_HOP = 1;
+constexpr CsrNodeId RELAY_NODE = 2;
+constexpr CsrNodeId NWK_DESTINATION = 3;
 constexpr uint16_t DATA_SEQUENCE = 41;
 
 void

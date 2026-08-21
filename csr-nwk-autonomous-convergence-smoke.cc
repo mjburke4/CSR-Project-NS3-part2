@@ -12,9 +12,9 @@ using namespace ns3;
 namespace
 {
 
-constexpr uint16_t SOURCE_NODE = 0;
-constexpr uint16_t RELAY_NODE = 1;
-constexpr uint16_t DESTINATION_NODE = 2;
+constexpr CsrNodeId SOURCE_NODE = 0;
+constexpr CsrNodeId RELAY_NODE = 1;
+constexpr CsrNodeId DESTINATION_NODE = 2;
 constexpr uint32_t PAYLOAD_SIZE = 192;
 
 bool g_forwardRouteAvailable = false;
@@ -35,7 +35,7 @@ void
 ConnectStack (Ptr<CsrNetDevice> device,
               Ptr<CsrHopLayer> hop,
               Ptr<CsrNetLayer> nwk,
-              uint16_t nodeId)
+              CsrNodeId nodeId)
 {
   hop->SetNodeId (nodeId);
   hop->SetMac (&device->GetMac ());
@@ -48,7 +48,7 @@ ConnectStack (Ptr<CsrNetDevice> device,
 }
 
 void
-ReceiveAtDestination (Ptr<Packet> payload, uint16_t source)
+ReceiveAtDestination (Ptr<Packet> payload, CsrNodeId source)
 {
   Require (source == SOURCE_NODE,
            "destination received DATA with the wrong NWK source");
@@ -59,7 +59,7 @@ ReceiveAtDestination (Ptr<Packet> payload, uint16_t source)
 
 void
 RequireSnapshotComplete (Ptr<CsrNetLayer> nwk,
-                         uint16_t neighbor,
+                         CsrNodeId neighbor,
                          const char* message)
 {
   uint8_t totalSections =
