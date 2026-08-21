@@ -80,6 +80,50 @@ CheckConvergence (Ptr<CsrNetLayer> sourceNwk,
   uint32_t cost = 0;
   CsrHelloHeader::RoutingInfo routingInfo;
 
+  // Only the gateway was started by the scenario.  These checks prove that
+  // the remaining local discoveries came from the legacy sequential SNMP
+  // START/DONE lifecycle rather than test-side phase scheduling.
+  Require (sourceNwk->GetDiscoveryStartCount () == 1,
+           "gateway did not perform exactly one startup discovery");
+  Require (relayNwk->GetDiscoveryStartCount () == 1,
+           "relay was not started exactly once by SNMP handoff");
+  Require (destinationNwk->GetDiscoveryStartCount () == 1,
+           "destination was not started exactly once by SNMP handoff");
+
+  Require (sourceNwk->GetDiscoveryBroadcastCount () == 3,
+           "gateway did not send the legacy three discovery broadcasts");
+  Require (relayNwk->GetDiscoveryBroadcastCount () == 3,
+           "relay did not send the legacy three discovery broadcasts");
+  Require (destinationNwk->GetDiscoveryBroadcastCount () == 3,
+           "destination did not send the legacy three discovery broadcasts");
+
+  Require (sourceNwk->GetSnmpStartSentCount () >= 1 &&
+             relayNwk->GetSnmpStartReceivedCount () >= 1,
+           "gateway-to-relay SNMP_START_DISCOVERY handoff failed");
+  Require (relayNwk->GetSnmpDoneSentCount () >= 1 &&
+             sourceNwk->GetSnmpDoneReceivedCount () >= 1,
+           "relay-to-gateway SNMP_DISCOVERY_DONE report failed");
+  Require (relayNwk->GetSnmpStartSentCount () >= 1 &&
+             destinationNwk->GetSnmpStartReceivedCount () >= 1,
+           "relay-to-destination SNMP_START_DISCOVERY handoff failed");
+  Require (destinationNwk->GetSnmpDoneSentCount () >= 1 &&
+             relayNwk->GetSnmpDoneReceivedCount () >= 1,
+           "destination-to-relay SNMP_DISCOVERY_DONE report failed");
+
+  // Relay DONE advertises node 2 to the gateway.  OPNET lets the gateway
+  // address a START to node 2 through node 1, but br_hop then drops that SNMP
+  // payload because its final destination is not the receiving hop.  Node 2
+  // must therefore have received only node 1's direct START.
+  Require (sourceNwk->GetSnmpStartSentCount () >= 2,
+           "gateway did not consume the node list in relay DONE");
+  Require (destinationNwk->GetSnmpStartReceivedCount () == 1,
+           "legacy one-hop SNMP was incorrectly relayed end-to-end");
+
+  Require (relayNwk->GetDiscoveryInitiatedBy () == SOURCE_NODE,
+           "relay did not retain the gateway as its discovery initiator");
+  Require (destinationNwk->GetDiscoveryInitiatedBy () == RELAY_NODE,
+           "destination did not retain the relay as its discovery initiator");
+
   g_forwardRouteAvailable =
     sourceNwk->GetSelectedRouteCost (DESTINATION_NODE, cost);
   Require (g_forwardRouteAvailable,
@@ -211,25 +255,24 @@ main ()
   nwk2->SetRxFromNetCallback (
     MakeCallback (&ReceiveAtDestination));
 
-  // No route is installed by the scenario.  Each local discovery is the
-  // equivalent of an OPNET SNMP_START_DISCOVERY command reaching that node.
-  nwk0->StartDiscovery (Seconds (0.0), Seconds (5.0));
-  nwk1->StartDiscovery (Seconds (0.0), Seconds (5.0));
-  nwk2->StartDiscovery (Seconds (0.0), Seconds (5.0));
+  // No route and no non-gateway discovery phase is installed by the scenario.
+  // OPNET starts the gateway after ten seconds; its discovery table and
+  // one-hop SNMP START/DONE messages must start the remaining nodes in order.
+  nwk0->ScheduleGatewayStartupDiscovery ();
 
-  Simulator::Schedule (Seconds (30.0),
+  Simulator::Schedule (Seconds (40.0),
                        &CheckConvergence,
                        nwk0,
                        nwk1,
                        nwk2);
 
-  Simulator::Stop (Seconds (50.0));
+  Simulator::Stop (Seconds (55.0));
   Simulator::Run ();
 
   CheckFinalState (nwk0, nwk1, hop0, hop1);
 
   Simulator::Destroy ();
-  std::cout << "PASS: autonomous ARL routing convergence test"
+  std::cout << "PASS: gateway-driven discovery/SNMP convergence test"
             << std::endl;
   return 0;
 }
