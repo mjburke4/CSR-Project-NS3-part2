@@ -2266,8 +2266,11 @@ private:
 
   bool m_routingSnapshotResponseEnabled {true};
 
+  // routesProcess() automatically sends each selected-route change to every
+  // active neighbor.  Tests may disable that behavior when isolating a single
+  // transaction, but the production default follows the ARL implementation.
   bool m_automaticRoutePropagationEnabled {
-    false
+    true
   };
 
   // Changed destinations waiting to be advertised,

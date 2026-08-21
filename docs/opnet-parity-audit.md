@@ -12,20 +12,20 @@ files with the ns-3 model.
 
 `br_nwk.pr.c` delegates core routing decisions to an external routing library
 through functions such as `routesCreate`, `routesRcvMsg`, `routesProcess`, and
-`routesValidRx`. The supplied archive now provides the declarations and data
-contracts in `csr_api_routes.h`, `csr_api_linkchar.h`, and the original
-`br_*.pk.m` packet-model definitions. It does not contain the implementation
-that defines the `routes*` functions. The visible NWK wrapper and packet
-contracts can therefore be matched more closely, but exact routing-algorithm
-parity still cannot be certified without that implementation or authoritative
-OPNET traces.
+`routesValidRx`. The later-supplied `routes(1).c` now provides the corresponding
+ARL implementation, including automatic changed-route fanout, routing requests,
+and full INFO/UPDATE/FLUSH snapshots. Together with `csr_api_routes.h`,
+`csr_api_linkchar.h`, and the original `br_*.pk.m` definitions, this supports a
+source-backed routing audit. Exact end-to-end certification still requires
+matching the remaining OPNET wrappers and comparing authoritative OPNET/ns-3
+traces.
 
 ## Current status
 
 | Area | Estimated parity | Evidence and remaining uncertainty |
 | --- | ---: | --- |
-| Visible NWK wrapper behavior | 88-93% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, discovery/control wrappers, and active-node accounting are covered. External routing-library semantics remain uncertain. |
-| Full NWK routing behavior | 70-80% | Substantial route discovery/update/failover behavior and the ARL API/packet contracts are covered, but the unavailable `routes*` implementation prevents exact comparison. |
+| Visible NWK wrapper behavior | 90-94% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, discovery/control wrappers, active-node accounting, and automatic changed-route propagation are covered. Exact gateway-driven SNMP discovery coordination remains. |
+| Full NWK routing behavior | 80-88% | ARL byte-stream exchange and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing, packet-model serialization, and untested edge cases rather than an unavailable routing implementation. |
 | HOP | 85-90% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, and OPNET DATA-versus-control timeout effects are covered. |
 | MAC transmit/control | 80-90% | Slot selection, holdoff, ACK priority, queue limits, concatenation, rate/power aggregation, preamble selection, and freshness are covered. |
 | Full MAC including receive contention | 55-65% | OPNET Idle/Search/Track receive state, acquisition, overlapping signals, capture/collision, and RX-induced slot freezing are not yet reproduced. |
@@ -33,9 +33,9 @@ OPNET traces.
 
 Overall estimates:
 
-- NWK/HOP/MAC protocol-control behavior excluding PHY: 78-86% complete.
+- NWK/HOP/MAC protocol-control behavior excluding PHY: 82-89% complete.
 - Whole in-scope radio behavior including PHY, excluding battery and BBN:
-  58-67%
+  60-69%
   complete.
 
 These ranges reflect confidence in observable behavior, not code-volume
@@ -51,6 +51,10 @@ completion.
 - OPNET ARL local-only link-cost calculation: RoutingInfo is retained as
   transaction data but does not create non-legacy bidirectional negotiation.
 - NWK/HOP admission, NSDP ACK/DACK selection, and global pending-DATA state.
+- Legacy ARL INFO/UPDATE/FLUSH byte streams, six-byte section prefixes,
+  out-of-order atomic reassembly, and independent reliable HOP sections.
+- Automatic ARL changed-route propagation and deterministic bidirectional
+  three-node convergence from empty route tables without static routes.
 - Relay custody, reverse routes, invalidation, alternate paths, and no-route
   ACK behavior.
 - 16-bit HOP sequences, cumulative ACK/DACK windows, duplicate suppression,
@@ -67,17 +71,18 @@ completion.
 
 ## Highest-priority remaining non-PHY work
 
-1. Validate autonomous multi-hop convergence from empty route tables. Current
-   deterministic integration coverage begins with installed routes.
-2. Audit ns-3 serialization against the newly supplied `br_*.pk.m` field
+1. Audit ns-3 serialization against the newly supplied `br_*.pk.m` field
    definitions, especially routing-operation widths, target/broadcast values,
    and aggregate nesting.
-3. Resolve remaining ARL routing wrappers: `KeyRequest`, exact SNMP discovery and
-   relay-holdoff signaling, discovery cooldown/restart timing, and address or
-   broadcast-width differences.
-4. Audit extra NWK queue wakeups against observable ARL wrapper behavior and
-   differential traces; the underlying `routes*` implementation is still
-   unavailable.
+2. Reproduce the exact gateway-driven SNMP discovery cascade, including the
+   three one-second discovery broadcasts, relay ordering/holdoff, completion
+   signaling, and cooldown/restart timing. The convergence test currently
+   starts discovery locally on every node, equivalent to each node receiving
+   `SNMP_START_DISCOVERY`.
+3. Resolve the remaining ARL wrappers, especially `KeyRequest`, relay-holdoff
+   signaling, and address or broadcast-width differences.
+4. Audit extra NWK queue wakeups and edge-case route transitions against
+   differential traces from identical OPNET/ns-3 topologies and seeds.
 
 ## Deferred MAC/PHY work
 
@@ -92,7 +97,7 @@ completion.
 
 ## Missing high-value scenarios
 
-1. Natural three- or four-node convergence with no static routes.
+1. Gateway-only startup that drives the complete SNMP discovery cascade.
 2. Duplicate DATA that re-ACKs without a second NWK enqueue or NSDP increment.
 3. Route loss and recovery while mixed-DSCP traffic is held in NWK.
 4. Sequence wraparound and cumulative windows older than 64 packets.
@@ -102,8 +107,9 @@ completion.
 
 ## Current regression baseline
 
-The complete ns-3 build, all 15 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision. The strict NWK smoke test now
-also covers asymmetric remote RoutingInfo during initial link calculation and
-failure-driven cost recomputation. Warnings are limited to the pre-existing
-unused callback/CSV helper warnings.
+The complete ns-3 build, all 17 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision. The autonomous convergence
+test covers a lossless 0-1-2 line with no static routes, complete ARL snapshot
+ACK/reassembly state, bidirectional two-hop learning, and exactly-once DATA
+delivery. Warnings are limited to the pre-existing unused callback/CSV helper
+warnings.
