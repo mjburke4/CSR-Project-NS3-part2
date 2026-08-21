@@ -25,7 +25,7 @@ namespace ns3 {
 class CsrArlRoutingMessage
 {
 public:
-  static constexpr uint32_t MAX_NODE_ID = 0x00ffffffu; ///< Largest wire node ID.
+  static constexpr CsrNodeId MAX_NODE_ID = CSR_NODE_ID_MAX; ///< Largest wire node ID.
   static constexpr std::size_t SECTION_PREFIX_SIZE = 6; ///< Prefix size in bytes.
 
   // Disassembly of the supplied 2013 routes.obj confirms that
@@ -50,11 +50,11 @@ public:
     CsrHelloHeader::RoutingInfo info; ///< INFO fields.
 
     // ARL places node identifiers on the wire as unsigned 24-bit values.
-    uint32_t nodeId {0}; ///< DELETE or UPDATE 24-bit node identifier.
+    CsrNodeId nodeId {0}; ///< DELETE or UPDATE 24-bit node identifier.
     uint8_t capability {0}; ///< UPDATE routing capability.
     uint16_t hopCount {0}; ///< UPDATE 16-bit hop count.
     uint32_t cost {0}; ///< UPDATE 32-bit route cost.
-    std::vector<uint32_t> path; ///< UPDATE 24-bit path identifiers.
+    std::vector<CsrNodeId> path; ///< UPDATE 24-bit path identifiers.
   };
 
   /** Builds one logical ARL record stream before sectioning it. */
@@ -81,7 +81,7 @@ public:
      * @param error Optional validation error text.
      * @return True when the record was appended.
      */
-    bool AddDelete (uint32_t nodeId,
+    bool AddDelete (CsrNodeId nodeId,
                     std::string *error = nullptr);
 
     /**
@@ -95,11 +95,11 @@ public:
      * @param error Optional validation error text.
      * @return True when the record was appended.
      */
-    bool AddUpdate (uint32_t nodeId,
+    bool AddUpdate (CsrNodeId nodeId,
                     uint8_t capability,
                     uint16_t hopCount,
                     uint32_t cost,
-                    const std::vector<uint32_t> &path,
+                    const std::vector<CsrNodeId> &path,
                     std::string *error = nullptr);
 
     /** @return The unsectioned logical record stream. */

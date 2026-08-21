@@ -27,7 +27,7 @@ Require (bool condition, const char* message)
 }
 
 void
-ReleaseNsdp (uint16_t src, uint16_t dst)
+ReleaseNsdp (CsrNodeId src, CsrNodeId dst)
 {
   Require (src == 1 && dst == 3,
            "final timeout released the wrong NSDP flow");
@@ -35,7 +35,7 @@ ReleaseNsdp (uint16_t src, uint16_t dst)
 }
 
 void
-ReportLinkFailure (uint16_t neighbor)
+ReportLinkFailure (CsrNodeId neighbor)
 {
   Require (neighbor == 2,
            "unexpected link-failure callback named the wrong neighbor");

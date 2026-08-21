@@ -13,9 +13,9 @@ using namespace ns3;
 namespace
 {
 
-constexpr uint16_t SOURCE_NODE = 1;
-constexpr uint16_t DESTINATION_NODE = 2;
-constexpr uint16_t ALTERNATE_NODE = 3;
+constexpr CsrNodeId SOURCE_NODE = 1;
+constexpr CsrNodeId DESTINATION_NODE = 2;
+constexpr CsrNodeId ALTERNATE_NODE = 3;
 
 std::vector<uint32_t> g_receivedSizes;
 
@@ -41,7 +41,7 @@ void
 ConnectStack (Ptr<CsrNetDevice> device,
               Ptr<CsrHopLayer> hop,
               Ptr<CsrNetLayer> nwk,
-              uint16_t nodeId)
+              CsrNodeId nodeId)
 {
   hop->SetNodeId (nodeId);
   hop->SetMac (&device->GetMac ());
@@ -53,7 +53,7 @@ ConnectStack (Ptr<CsrNetDevice> device,
 }
 
 void
-RecordPayload (Ptr<Packet> payload, uint16_t source)
+RecordPayload (Ptr<Packet> payload, CsrNodeId source)
 {
   Require (source == SOURCE_NODE,
            "strict NWK scenario received the wrong source");
@@ -80,7 +80,7 @@ CheckAfterTic (Ptr<CsrNetLayer> nwk,
 }
 
 Ptr<Packet>
-MakeHello (uint16_t nodeId, CsrNodeType nodeType)
+MakeHello (CsrNodeId nodeId, CsrNodeType nodeType)
 {
   CsrHelloHeader hello;
   hello.SetNodeId (nodeId);
@@ -97,7 +97,7 @@ MakeHello (uint16_t nodeId, CsrNodeType nodeType)
 }
 
 Ptr<Packet>
-MakeRoutingInfo (uint16_t nodeId)
+MakeRoutingInfo (CsrNodeId nodeId)
 {
   CsrHelloHeader info;
   info.SetNodeId (nodeId);

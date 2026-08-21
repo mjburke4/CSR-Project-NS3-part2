@@ -23,7 +23,7 @@ Require (bool condition, const char* message)
 }
 
 Ptr<Packet>
-BuildFrame (uint16_t destination,
+BuildFrame (CsrNodeId destination,
             uint16_t sequence,
             uint8_t dscp,
             bool ack = false)
@@ -91,16 +91,16 @@ void
 CheckDestinationEnumerator ()
 {
   CsrHeader scalar (1, 2, 10, 0, false, false);
-  std::vector<uint16_t> scalarDestinations =
+  std::vector<CsrNodeId> scalarDestinations =
     scalar.EnumerateDestinations ();
-  Require (scalarDestinations == std::vector<uint16_t> {2},
+  Require (scalarDestinations == std::vector<CsrNodeId> {2},
            "scalar header did not enumerate its destination");
 
   CsrHeader grouped (1, 2, 10, 0, false, false);
   grouped.SetDestinationSequences ({{2, 10}, {3, 20}});
-  std::vector<uint16_t> groupedDestinations =
+  std::vector<CsrNodeId> groupedDestinations =
     grouped.EnumerateDestinations ();
-  Require (groupedDestinations == std::vector<uint16_t> ({2, 3}),
+  Require (groupedDestinations == std::vector<CsrNodeId> ({2, 3}),
            "grouped header did not enumerate every destination in order");
 }
 

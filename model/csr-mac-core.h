@@ -16,9 +16,14 @@ class CsrMacCore
   static constexpr uint32_t MAX_ACK_RESEND = 4;
   static constexpr uint32_t MAX_CONCAT_SEGMENTS = 16;
 
-  void SetNodeId (uint16_t id)        { m_nodeId = id; }
+  void SetNodeId (CsrNodeId id)
+  {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
+                     "CSR MAC node identifier exceeds 24 bits");
+    m_nodeId = id;
+  }
   void SetDevice (CsrNetDevice *dev)  { m_dev = dev; }
-  int SelectRateByPerTarget (uint16_t destId, uint32_t nBits, double targetPer) const;
+  int SelectRateByPerTarget (CsrNodeId destId, uint32_t nBits, double targetPer) const;
   void PrintNeighbors () const;
 
   int GetLastTxRateKbps () const
@@ -150,7 +155,7 @@ class CsrMacCore
   }
 
   void SetTxSentCallback (
-    Callback<void, uint16_t, uint16_t, Time> cb)
+    Callback<void, CsrNodeId, uint16_t, Time> cb)
   {
     m_txSentCallback = cb;
   }
@@ -191,7 +196,7 @@ class CsrMacCore
     return m_shortPreambleTxCount;
   }
 
-  int32_t GetNeighborReservationCounter (uint16_t neighbor) const
+  int32_t GetNeighborReservationCounter (CsrNodeId neighbor) const
   {
     auto it = m_neighbors.find (neighbor);
     return (it == m_neighbors.end ()) ? -1 : it->second.rtCounter;
@@ -199,13 +204,13 @@ class CsrMacCore
 
   // Called by Hop layer to enqueue a full over-the-air frame
   void EnqueueTxFrame (Ptr<Packet> frame,
-                       uint16_t dest,
+                       CsrNodeId dest,
                        uint8_t dscp,
                        bool ackable);
 
   // Remove retransmissions that a cumulative HOP ACK/DACK has already
   // completed.  This mirrors the legacy br_Mac_Hop_Inst queue cleanup.
-  uint32_t CancelAcknowledgedFrames (uint16_t neighbor,
+  uint32_t CancelAcknowledgedFrames (CsrNodeId neighbor,
                                      uint16_t baseSeq,
                                      uint64_t ackBitmap,
                                      uint64_t dackBitmap);
@@ -219,7 +224,7 @@ class CsrMacCore
       }
   }
 
-  void NoteHeardFrom (uint16_t neighbor, double tRx)
+  void NoteHeardFrom (CsrNodeId neighbor, double tRx)
   {
     m_lastHeardSec[neighbor] = tRx;
     NeighborInfo &info = m_neighbors[neighbor];
@@ -227,14 +232,14 @@ class CsrMacCore
     // pathloss may be updated separately
   }
 
-  void SetNeighborPathloss (uint16_t neighbor, double pathlossDb)
+  void SetNeighborPathloss (CsrNodeId neighbor, double pathlossDb)
   {
     NeighborInfo &info = m_neighbors[neighbor];
     info.lastPathlossDb = pathlossDb;
     m_lastPathlossDb[neighbor] = pathlossDb;
   }
 
-  void NoteNeighborReservedSlot (uint16_t neighbor, int slot)
+  void NoteNeighborReservedSlot (CsrNodeId neighbor, int slot)
   {
     if (!m_slotTickEnabled)
       {
@@ -255,7 +260,7 @@ class CsrMacCore
               << std::endl;
   }
 
-  /*void NoteNeighborReservedSlot (uint16_t neighbor, int slot)
+  /*void NoteNeighborReservedSlot (CsrNodeId neighbor, int slot)
   {
     NeighborInfo &info = m_neighbors[neighbor];
     info.reserveSlot = slot;
@@ -300,7 +305,7 @@ class CsrMacCore
 
   // PrintNeighbors() moved after CsrNetDevice definition (see below)
 
-  uint16_t GetNodeId () const { return m_nodeId; }
+  CsrNodeId GetNodeId () const { return m_nodeId; }
 
 private:
   struct NeighborInfo
@@ -315,7 +320,7 @@ private:
   struct TxQueueEntry
   {
     Ptr<Packet> frame;
-    uint16_t    dest;
+    CsrNodeId    dest;
     uint8_t     dscp;
     bool        ackable;
   };
@@ -323,7 +328,7 @@ private:
   struct AckQueueEntry
   {
     Ptr<Packet> frame;
-    uint16_t    dest;
+    CsrNodeId    dest;
     uint16_t    seq;
     bool        hasWindow;
     uint32_t    txCount;
@@ -332,7 +337,7 @@ private:
   struct SelectedTxFrame
   {
     Ptr<Packet> frame;
-    uint16_t    dest;
+    CsrNodeId    dest;
     bool        ackable;
     bool        fromAckQueue;
     uint32_t    queueIndex;
@@ -359,7 +364,7 @@ private:
   void FinishTx ();
   void DoTx ();
   int SelectQueuedFrameRate (Ptr<Packet> frame,
-                             uint16_t dest,
+                             CsrNodeId dest,
                              bool ackable) const;
   double SelectQueuedFrameTxPower (Ptr<Packet> frame) const;
   uint32_t GetConcatByteLimit (int rateKbps) const;
@@ -371,17 +376,17 @@ private:
     const std::vector<SelectedTxFrame> &selected,
     bool concatenating);
 
-  int           ChooseRateForDest (uint16_t dest);
-  PreambleType  ChoosePreambleForDest (uint16_t dest);
+  int           ChooseRateForDest (CsrNodeId dest);
+  PreambleType  ChoosePreambleForDest (CsrNodeId dest);
 
 private:
-  uint16_t                            m_nodeId;
+  CsrNodeId                            m_nodeId;
   CsrNetDevice*                       m_dev;
   std::vector<TxQueueEntry>           m_queue;
   std::vector<AckQueueEntry>          m_ackQueue;
   EventId                             m_txEvent;
   Callback<void, Ptr<Packet>, double, double>  m_rxCallback;
-  Callback<void, uint16_t, uint16_t, Time>     m_txSentCallback;
+  Callback<void, CsrNodeId, uint16_t, Time>    m_txSentCallback;
   uint64_t                            m_transmittedFrameCount {0};
   uint64_t                            m_longPreambleTxCount {0};
   uint64_t                            m_shortPreambleTxCount {0};
@@ -390,16 +395,16 @@ private:
   double                              m_lastTxPowerDbm {0.0};
   int                                 m_scheduledTxSlot {-1};
   bool                                m_txInProgress {false};
-  std::map<uint16_t, NeighborInfo>    m_neighbors;
+  std::map<CsrNodeId, NeighborInfo>    m_neighbors;
   Time                                m_neighborTimeout { Seconds (6.0) };   // default: 3x hello interval (if hello=2s)
   EventId                             m_neighborAgingEvent;
-  std::map<uint16_t, double>          m_lastHeardSec;  // neighborId -> last heard time (seconds)
-  std::map<uint16_t, double>          m_lastPathlossDb; // neighborId -> last pathloss (optional)
+  std::map<CsrNodeId, double>          m_lastHeardSec;  // neighborId -> last heard time (seconds)
+  std::map<CsrNodeId, double>          m_lastPathlossDb; // neighborId -> last pathloss (optional)
   //void DiscoveryStart ();
   //void DiscoveryStop ();
   //void SendHelloInternal (bool reschedule);
 
-  /*int PickTxSlot (uint16_t dest)
+  /*int PickTxSlot (CsrNodeId dest)
   {
     const int SLOT_RANGE = 64;
     bool used[SLOT_RANGE];
@@ -470,7 +475,7 @@ private:
 };*/
 
   int
-  PickTxSlot (uint16_t dest)
+  PickTxSlot (CsrNodeId dest)
   {
     uint32_t activeForSlotting = GetReportedActiveNodesForSlotting ();
     int slotRange = GetOpnetSlotRange (activeForSlotting);
@@ -645,7 +650,7 @@ CsrMacCore::SlotTick ()
     {
       for (auto &kv : m_neighbors)
         {
-          uint16_t neighbor = kv.first;
+          CsrNodeId neighbor = kv.first;
           NeighborInfo &ni = kv.second;
 
           if (ni.rtCounter >= 0)

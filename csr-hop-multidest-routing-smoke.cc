@@ -15,13 +15,13 @@ namespace
 
 struct SuccessEvent
 {
-  uint16_t neighbor;
+  CsrNodeId neighbor;
   bool lastOfInfo;
 };
 
 struct FailureEvent
 {
-  std::vector<uint16_t> destinations;
+  std::vector<CsrNodeId> destinations;
   bool lastOfInfo;
 };
 
@@ -58,13 +58,13 @@ ResetObservations ()
 }
 
 void
-RecordLinkFailure (uint16_t)
+RecordLinkFailure (CsrNodeId)
 {
   g_linkFailures++;
 }
 
 void
-RecordRoutingFrame (uint16_t receiver,
+RecordRoutingFrame (CsrNodeId receiver,
                     Ptr<Packet> frame)
 {
   CsrHeader header;
@@ -123,7 +123,7 @@ RecordAutomaticAck (Ptr<Packet> frame, double, double)
 }
 
 void
-RecordSuccess (uint16_t neighbor,
+RecordSuccess (CsrNodeId neighbor,
                uint32_t routingSequence,
                CsrRoutingOperation operation,
                uint8_t section,
@@ -140,7 +140,7 @@ RecordSuccess (uint16_t neighbor,
 }
 
 void
-RecordFailure (std::vector<uint16_t> destinations,
+RecordFailure (std::vector<CsrNodeId> destinations,
                uint32_t routingSequence,
                CsrRoutingOperation operation,
                uint8_t section,
@@ -191,7 +191,7 @@ MakeNeighborCheckPayload ()
 
 void
 InjectExactAck (Ptr<CsrHopLayer> hop,
-                uint16_t source,
+                CsrNodeId source,
                 uint16_t sequence)
 {
   CsrHeader ackHeader (
@@ -287,7 +287,7 @@ TestPartialAndFinalAck ()
   InjectExactAck (hop, 2, 1);
 
   hop->SendRoutingControl (
-    std::vector<uint16_t> {2, 3},
+    std::vector<CsrNodeId> {2, 3},
     MakeRoutingPayload ());
 
   Simulator::Schedule (
@@ -377,7 +377,7 @@ CheckGroupFailure (Ptr<CsrHopLayer> hop)
   Require (g_failureEvents.size () == 1,
            "routing timeout did not produce exactly one group failure");
   Require (g_failureEvents[0].destinations ==
-             std::vector<uint16_t> ({2, 3}),
+             std::vector<CsrNodeId> ({2, 3}),
            "routing failure did not retain the original ordered target list");
   Require (g_failureEvents[0].lastOfInfo,
            "routing group failure did not set lastOfInfo");
@@ -415,7 +415,7 @@ TestGroupFailure ()
   ConfigureNoErrorLink (receiver3);
 
   hop->SendRoutingControl (
-    std::vector<uint16_t> {2, 3},
+    std::vector<CsrNodeId> {2, 3},
     MakeRoutingPayload ());
 
   Simulator::Schedule (

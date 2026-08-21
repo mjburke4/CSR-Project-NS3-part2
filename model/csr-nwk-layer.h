@@ -32,8 +32,10 @@ public:
     : m_nodeId (0)
   {}
 
-  void SetNodeId (uint16_t id)
+  void SetNodeId (CsrNodeId id)
   {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
+                     "CSR NWK node identifier exceeds 24 bits");
     m_nodeId = id;
   }
 
@@ -49,13 +51,13 @@ public:
   void SendDiscoveryChirp ();
 
   void SendNeighborCheck (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     CsrNeighborCheckType type = CsrNeighborCheckType::Message,
-    uint16_t target = CSR_BROADCAST_ID,
+    CsrNodeId target = CSR_BROADCAST_ID,
     uint32_t discoverySequence = 0);
 
   void StartReliableRoutingSnapshot (
-    uint16_t neighbor);
+    CsrNodeId neighbor);
 
   void
   RefreshRoutesAfterDiscovery ();
@@ -116,13 +118,13 @@ public:
         }));
   }
 
-  uint16_t GetDiscoveryInitiatedBy () const
+  CsrNodeId GetDiscoveryInitiatedBy () const
   {
     return m_discoveryInitiatedBy;
   }
 
   void ProcessHello (Ptr<Packet> helloPayload,
-                   uint16_t hopSrc,
+                   CsrNodeId hopSrc,
                    double pathlossDb,
                    double snrDb);
 
@@ -147,7 +149,7 @@ public:
     return static_cast<uint32_t> (m_nwkQueue.size ());
   }
 
-  uint32_t GetNsdpCount (uint16_t src, uint16_t dst) const
+  uint32_t GetNsdpCount (CsrNodeId src, CsrNodeId dst) const
   {
     auto it = m_nsdp.find (std::make_pair (src, dst));
     return it == m_nsdp.end () ? 0 : it->second.count;
@@ -160,7 +162,7 @@ public:
    * @param costOut Selected route cost when a route is available.
    * @return True when a selected route is available.
    */
-  bool GetSelectedRouteCost (uint16_t destination,
+  bool GetSelectedRouteCost (CsrNodeId destination,
                              uint32_t &costOut) const;
 
   /**
@@ -171,7 +173,7 @@ public:
    * @return True when the neighbor has valid routing information.
    */
   bool GetNeighborRoutingInfo (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     CsrHelloHeader::RoutingInfo &infoOut) const;
 
   /**
@@ -181,7 +183,7 @@ public:
    * @return Number of incomplete logical routing messages.
    */
   uint32_t GetPendingArlRoutingMessageCount (
-    uint16_t neighbor) const;
+    CsrNodeId neighbor) const;
 
   /**
    * Get the number of sections in the current outbound snapshot.
@@ -190,7 +192,7 @@ public:
    * @return Total section count, or zero when no state exists.
    */
   uint8_t GetOutboundRoutingSnapshotTotalSections (
-    uint16_t neighbor) const;
+    CsrNodeId neighbor) const;
 
   /**
    * Count independently acknowledged sections in an outbound snapshot.
@@ -199,7 +201,7 @@ public:
    * @return Number of acknowledged sections.
    */
   uint32_t GetOutboundRoutingSnapshotAckedSections (
-    uint16_t neighbor) const;
+    CsrNodeId neighbor) const;
 
   /**
    * Check whether an outbound snapshot is awaiting section acknowledgments.
@@ -208,17 +210,17 @@ public:
    * @return True while the snapshot is active.
    */
   bool IsOutboundRoutingSnapshotActive (
-    uint16_t neighbor) const;
+    CsrNodeId neighbor) const;
 
   void
-  SendNoPath (uint16_t neighbor, uint16_t unreachableDest)
+  SendNoPath (CsrNodeId neighbor, CsrNodeId unreachableDest)
   {
     SendNeighborCheck (neighbor,
                       CsrNeighborCheckType::NoPath,
                       unreachableDest);
   }
 
-  void NoteLinkFailure (uint16_t nextHop)
+  void NoteLinkFailure (CsrNodeId nextHop)
   {
     auto &ne = m_nwkNeighbors[nextHop];
 
@@ -241,7 +243,7 @@ public:
 
   void
   NoteNeighborCheckSuccess (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     CsrNeighborCheckType type,
     uint32_t discoverySequence)
   {
@@ -392,7 +394,7 @@ public:
 
   void
   RecomputeRoutesViaNextHop (
-    uint16_t nextHop);
+    CsrNodeId nextHop);
 
   void UpdateMacActiveNodes ()
   {
@@ -612,25 +614,25 @@ public:
   }
 
   // Net -> App callback: payload + network source node ID
-  void SetRxFromNetCallback (Callback<void, Ptr<Packet>, uint16_t> cb)
+  void SetRxFromNetCallback (Callback<void, Ptr<Packet>, CsrNodeId> cb)
   {
     m_rxFromNetCb = cb;
   }
 
-  bool HasRelayRoute (uint16_t nwkDst)
+  bool HasRelayRoute (CsrNodeId nwkDst)
   {
-    uint16_t nextHop;
+    CsrNodeId nextHop;
     return LookupNextHop (nwkDst, nextHop);
   }
 
-  bool ShouldDack (uint16_t src, uint16_t dst)
+  bool ShouldDack (CsrNodeId src, CsrNodeId dst)
   {
     NsdpEntry &e = GetNsdpEntry (src, dst);
     return e.count >= e.limit;
   }
 
   // Called by App to send a payload to some destination
-  void Send (uint16_t dst,
+  void Send (CsrNodeId dst,
              uint8_t dscp,
              Ptr<Packet> payload,
              bool ackRequested)
@@ -682,7 +684,7 @@ public:
     ScheduleCheckNwkQueue ();
   }
 
-  void DecrementNsdp (uint16_t src, uint16_t dst)
+  void DecrementNsdp (CsrNodeId src, CsrNodeId dst)
   {
     NsdpEntry &e =
       GetNsdpEntry (src, dst);
@@ -713,7 +715,7 @@ public:
   }
 
   // Called by Hop when a payload arrives from the MAC
-  void ReceiveFromHop (Ptr<Packet> packetFromHop, uint16_t hopSrc)
+  void ReceiveFromHop (Ptr<Packet> packetFromHop, CsrNodeId hopSrc)
   {
     // Peek network header to inspect nwkSrc/nwkDst/DSCP
     CsrNetHeader nh;
@@ -723,8 +725,8 @@ public:
         return;
       }
 
-    uint16_t nwkSrc = nh.GetSrc ();
-    uint16_t nwkDst = nh.GetDst ();
+    CsrNodeId nwkSrc = nh.GetSrc ();
+    CsrNodeId nwkDst = nh.GetDst ();
     uint8_t  dscp   = nh.GetDscp ();
     UpdateReverseRoute (nwkSrc, hopSrc);
 
@@ -785,17 +787,27 @@ public:
 
   bool
   AddOrUpdateRoute (
-    uint16_t nwkDst,
-    uint16_t nextHop,
+    CsrNodeId nwkDst,
+    CsrNodeId nextHop,
     bool immediate,
     uint8_t numHop,
     double pathlossDb,
 	    uint32_t linkCostToNextHop,
 	    uint32_t advertisedCost,
-	    uint16_t learnedFrom,
+	    CsrNodeId learnedFrom,
 	    uint8_t capability = 0,
-	    const std::vector<uint16_t> &path = {})
+	    const std::vector<CsrNodeId> &path = {})
   {
+    if (!CsrIsValidNodeId (nwkDst) ||
+        !CsrIsValidNodeId (nextHop) ||
+        !CsrIsValidNodeId (learnedFrom) ||
+        std::any_of (path.begin (), path.end (), [] (CsrNodeId nodeId) {
+          return !CsrIsValidNodeId (nodeId);
+        }))
+      {
+        return false;
+      }
+
     if (nwkDst == m_nodeId ||
         nwkDst == CSR_BROADCAST_ID)
       {
@@ -815,7 +827,7 @@ public:
         totalCost = 1;
       }
 
-    std::vector<uint16_t>
+    std::vector<CsrNodeId>
       normalizedPath = path;
 
     if (normalizedPath.empty ())
@@ -994,7 +1006,7 @@ public:
     return true;
   }
 
-  void AddStaticRoute (uint16_t nwkDst, uint16_t nextHop)
+  void AddStaticRoute (CsrNodeId nwkDst, CsrNodeId nextHop)
   {
     bool immediate = (nwkDst == nextHop);
     uint8_t hops = immediate ? 1 : 2;
@@ -1011,8 +1023,8 @@ public:
   }
 
   void
-  AddStaticRouteWithPathloss (uint16_t nwkDst,
-                              uint16_t nextHop,
+  AddStaticRouteWithPathloss (CsrNodeId nwkDst,
+                              CsrNodeId nextHop,
                               double pathlossDb,
                               bool immediate = true,
                               uint8_t capability = 0)
@@ -1061,7 +1073,7 @@ public:
 
   void
   SendRoutingRequest (
-    uint16_t neighbor)
+    CsrNodeId neighbor)
   {
     if (m_hop == nullptr)
       {
@@ -1121,8 +1133,8 @@ public:
 
   void
   SendReliableRoutingDelete (
-    uint16_t neighbor,
-    uint16_t destination)
+    CsrNodeId neighbor,
+    CsrNodeId destination)
   {
     if (m_hop == nullptr)
       {
@@ -1187,7 +1199,7 @@ public:
   }
 
   void DumpBestRoute (
-    uint16_t destination) const;
+    CsrNodeId destination) const;
 
   void
   SetAutomaticRoutePropagationEnabled (
@@ -1206,10 +1218,10 @@ private:
 
   struct RouteEntry
   {
-    uint16_t nwkDst {0};        // OPNET node_addr
+    CsrNodeId nwkDst {0};        // OPNET node_addr
     uint8_t  capability {0};    // OPNET capability
     bool     immediate {false}; // OPNET immediate neighbor flag
-    uint16_t nextHop {0};       // OPNET next_hop
+    CsrNodeId nextHop {0};       // OPNET next_hop
 
     double   pathlossDb {std::numeric_limits<double>::quiet_NaN ()};
     uint8_t  numHop {0};        // OPNET num_hop
@@ -1220,11 +1232,11 @@ private:
     bool     valid {true};
     uint32_t linkCostToNextHop {0};
     uint32_t advertisedCost {0};
-    uint16_t learnedFrom {
+    CsrNodeId learnedFrom {
       CSR_BROADCAST_ID
     }; // node that taught us this route
 
-    std::vector<uint16_t> path;
+    std::vector<CsrNodeId> path;
 
     // routes.c retains the originating routing-message sequence with every
     // neighbor route (including invalid DELETE/FLUSH tombstones).
@@ -1236,7 +1248,7 @@ private:
   {
     bool available {false};
 
-    uint16_t nextHop {
+    CsrNodeId nextHop {
       CSR_BROADCAST_ID
     };
 
@@ -1245,16 +1257,16 @@ private:
     bool immediate {false};
     uint8_t capability {0};
 
-    std::vector<uint16_t> path;
+    std::vector<CsrNodeId> path;
   };
 
   const RouteEntry*
   FindBestRoute (
-    uint16_t destination) const;
+    CsrNodeId destination) const;
 
   SelectedRouteState
   CaptureSelectedRouteState (
-    uint16_t destination) const;
+    CsrNodeId destination) const;
 
   static bool
   SameSelectedRouteState (
@@ -1263,7 +1275,7 @@ private:
 
   void
   MarkSelectedRouteChanged (
-    uint16_t destination,
+    CsrNodeId destination,
     const char *reason);
 
   void
@@ -1274,16 +1286,16 @@ private:
 
   struct ReverseRouteEntry
   {
-    uint16_t netSrc {CSR_BROADCAST_ID};
-    uint16_t reverseHop {CSR_BROADCAST_ID};
+    CsrNodeId netSrc {CSR_BROADCAST_ID};
+    CsrNodeId reverseHop {CSR_BROADCAST_ID};
     Time lastUpdated {Seconds (0.0)};
     bool valid {false};
   };
 
   struct NwkQueueEntry
   {
-    uint16_t   nwkSrc;
-    uint16_t   nwkDst;
+    CsrNodeId   nwkSrc;
+    CsrNodeId   nwkDst;
     uint8_t    dscp;
     bool       ack;
     Ptr<Packet> payload;
@@ -1298,7 +1310,7 @@ private:
       std::map<uint8_t, std::vector<uint8_t>> sectionBodies;
     };
 
-    uint16_t nodeId {0};
+    CsrNodeId nodeId {0};
     double lastHeardSec {-1.0};
     double lastPathlossDb {std::numeric_limits<double>::quiet_NaN ()};
     double lastSnrDb {std::numeric_limits<double>::quiet_NaN ()};
@@ -1336,7 +1348,7 @@ private:
 
     uint32_t routingSnapshotInfoSequence {0};
 
-    std::set<uint16_t>
+    std::set<CsrNodeId>
       routingSnapshotSeenDestinations;
 
     // Complete routing UPDATE sections are buffered here
@@ -1372,11 +1384,11 @@ private:
     uint32_t routingSequence);
 
   void SendRoutingRequestAttempt (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     bool retry);
 
   void RoutingRequestTimeout (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     uint32_t expectedSequence);
 
   // Legacy FLOW_CTRL_MAX_THRESHOLD. NSDP uses this only to choose
@@ -1386,16 +1398,16 @@ private:
   // NSDP: Network Source-Destination Pair entry
   struct NsdpEntry
   {
-    uint16_t src;
-    uint16_t dst;
+    CsrNodeId src;
+    CsrNodeId dst;
     uint32_t count;
     uint32_t limit;  // DACK threshold, retained in metrics output
   };
 
   // Keyed by (src,dst)
-  NsdpEntry& GetNsdpEntry (uint16_t src, uint16_t dst)
+  NsdpEntry& GetNsdpEntry (CsrNodeId src, CsrNodeId dst)
   {
-    std::pair<uint16_t,uint16_t> key (src, dst);
+    std::pair<CsrNodeId,CsrNodeId> key (src, dst);
     auto it = m_nsdp.find (key);
     if (it == m_nsdp.end ())
       {
@@ -1451,7 +1463,7 @@ private:
             break;
           }
 
-        uint16_t hopDest;
+        CsrNodeId hopDest;
         if (!LookupNextHop (it->nwkDst, hopDest))
           {
             std::cout << "[NWK " << m_nodeId
@@ -1483,8 +1495,8 @@ private:
 
   bool
   LookupNextHop (
-    uint16_t nwkDst,
-    uint16_t &nextHopOut)
+    CsrNodeId nwkDst,
+    CsrNodeId &nextHopOut)
   {
     const RouteEntry *best =
       FindBestRoute (
@@ -1518,7 +1530,7 @@ private:
         m_reverseRoutes.end () &&
         reverseIt->second.valid)
       {
-        uint16_t reverseHop =
+        CsrNodeId reverseHop =
           reverseIt->second.reverseHop;
 
         auto neighborIt =
@@ -1807,7 +1819,7 @@ public:
 
   void
   NoteRoutingControlSuccess (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     uint32_t routingSequence,
     CsrRoutingOperation operation,
     uint8_t routingSection,
@@ -1926,7 +1938,7 @@ public:
 
   void
   NoteRoutingControlFailure (
-    std::vector<uint16_t> neighbors,
+    std::vector<CsrNodeId> neighbors,
     uint32_t routingSequence,
     CsrRoutingOperation operation,
     uint8_t routingSection,
@@ -1995,7 +2007,7 @@ public:
 
   void
   SendReliableRoutingUpdate (
-    uint16_t neighbor)
+    CsrNodeId neighbor)
   {
     if (m_hop == nullptr)
       {
@@ -2064,32 +2076,32 @@ public:
 
   void
   ArmRoutingSnapshotWatchdog (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     const char *phase);
 
   void
   RoutingSnapshotWatchdogExpired (
-    uint16_t neighbor,
+    CsrNodeId neighbor,
     uint32_t expectedGeneration);
 
 private:
-  uint16_t                              m_nodeId;
+  CsrNodeId                              m_nodeId;
   Ptr<CsrHopLayer>                      m_hop;
-  Callback<void, Ptr<Packet>, uint16_t> m_rxFromNetCb;
+  Callback<void, Ptr<Packet>, CsrNodeId> m_rxFromNetCb;
 
   std::deque<NwkQueueEntry>             m_nwkQueue;
   EventId                               m_checkNwkQueueEvent;
   std::vector<RouteEntry>               m_routes;
-  std::map<uint16_t, ReverseRouteEntry> m_reverseRoutes;
-  std::map<uint16_t, NwkNeighborEntry>  m_nwkNeighbors;
-  std::map<std::pair<uint16_t,uint16_t>, NsdpEntry> m_nsdp;
-  std::set<uint16_t>
+  std::map<CsrNodeId, ReverseRouteEntry> m_reverseRoutes;
+  std::map<CsrNodeId, NwkNeighborEntry>  m_nwkNeighbors;
+  std::map<std::pair<CsrNodeId,CsrNodeId>, NsdpEntry> m_nsdp;
+  std::set<CsrNodeId>
     m_pendingSelectedRouteChanges;
 
   // Legacy routesFindBestRoute() prefers the
   // currently selected neighbor when cost and
   // hop count are exactly tied.
-  std::map<uint16_t, uint16_t>
+  std::map<CsrNodeId, CsrNodeId>
     m_selectedRoutePreferredNextHop;
 
   EventId m_selectedRouteChangeEvent;
@@ -2102,13 +2114,13 @@ private:
 
   struct DiscoveryEntry
   {
-    uint16_t nodeId {CSR_BROADCAST_ID};
+    CsrNodeId nodeId {CSR_BROADCAST_ID};
     bool discoveryNeeded {false};
   };
 
   std::vector<DiscoveryEntry> m_discoveryTable;
-  std::vector<uint16_t> m_discoveryCompletionRequesters;
-  uint16_t m_discoveryInitiatedBy {CSR_BROADCAST_ID};
+  std::vector<CsrNodeId> m_discoveryCompletionRequesters;
+  CsrNodeId m_discoveryInitiatedBy {CSR_BROADCAST_ID};
 
   EventId m_snmpReportEvent;
   Time m_snmpReportTimeout {Seconds (60.0)};
@@ -2150,20 +2162,20 @@ private:
 
   void ReceiveSnmpFromHop (
     Ptr<Packet> snmpPayload,
-    uint16_t hopSource);
+    CsrNodeId hopSource);
 
   bool SendSnmp (
-    uint16_t destination,
+    CsrNodeId destination,
     CsrSnmpCommand command,
     int32_t value,
-    const std::vector<uint16_t> &nodes = {});
+    const std::vector<CsrNodeId> &nodes = {});
 
   void CompleteDiscoveryLifecycle ();
   void CheckDiscoveryTable ();
   void SnmpReportTimeout ();
-  void EnsureDiscoveryEntry (uint16_t node, bool discoveryNeeded);
-  void MarkDiscoveryNotNeeded (uint16_t node);
-  std::vector<uint16_t> CollectKnownDiscoveryNodes () const;
+  void EnsureDiscoveryEntry (CsrNodeId node, bool discoveryNeeded);
+  void MarkDiscoveryNotNeeded (CsrNodeId node);
+  std::vector<CsrNodeId> CollectKnownDiscoveryNodes () const;
 
   void SendHelloBroadcast (
     CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover,
@@ -2172,17 +2184,17 @@ private:
     uint32_t discoverySequence = 0,
     uint32_t routingSequence = 0);
 
-  std::set<uint16_t>
+  std::set<CsrNodeId>
   ProcessRoutesPayload (
     const CsrHelloHeader &hh,
-    uint16_t helloSrc,
+    CsrNodeId helloSrc,
     double pathlossDb,
     double snrDb,
     uint32_t linkCost);
 
   void ProcessArlRouteMessage (const CsrHelloHeader &hh,
                               Ptr<Packet> routingPayload,
-                              uint16_t helloSrc,
+                              CsrNodeId helloSrc,
                               double pathlossDb,
                               double snrDb,
                               uint32_t linkCost);
@@ -2190,13 +2202,13 @@ private:
   void ProcessArlRoutingSection (
     const CsrHelloHeader &hh,
     Ptr<Packet> routingPayload,
-    uint16_t helloSrc,
+    CsrNodeId helloSrc,
     double pathlossDb,
     double snrDb,
     uint32_t linkCost);
 
   void ApplyCompleteArlRoutingMessage (
-    uint16_t helloSrc,
+    CsrNodeId helloSrc,
     uint32_t routingSequence,
     const std::vector<CsrArlRoutingMessage::Record> &records,
     double pathlossDb,
@@ -2204,25 +2216,26 @@ private:
     uint32_t linkCost);
 
   void ProcessDiscover (const CsrHelloHeader &hh,
-                        uint16_t helloSrc,
+                        CsrNodeId helloSrc,
                         double pathlossDb,
                         double snrDb,
                         uint32_t linkCost);
 
   void ProcessRoutingUpdate (const CsrHelloHeader &hh,
-                            uint16_t helloSrc,
+                            CsrNodeId helloSrc,
                             double pathlossDb,
                             double snrDb,
                             uint32_t linkCost);
 
   void ProcessNeighborCheck (const CsrHelloHeader &hh,
-                           uint16_t helloSrc,
+                           CsrNodeId helloSrc,
                            double pathlossDb,
                            double snrDb,
                            uint32_t linkCost);
 
-  void UpdateReverseRoute (uint16_t netSrc, uint16_t hopSrc);
-  bool RemoveReverseRouteFromReporter (uint16_t netSrc, uint16_t reporter);
+  void UpdateReverseRoute (CsrNodeId netSrc, CsrNodeId hopSrc);
+  bool RemoveReverseRouteFromReporter (CsrNodeId netSrc,
+                                       CsrNodeId reporter);
 
   const char* ArlRouteMsgTypeName (CsrArlRouteMsgType t) const;
 
@@ -2235,7 +2248,7 @@ private:
   void VerifyUnresponsiveDiscoveryNeighbors ();
 
   void CheckNeighborFreshness ();
-  void InvalidateRoutesViaNextHop (uint16_t nextHop, const char *reason);
+  void InvalidateRoutesViaNextHop (CsrNodeId nextHop, const char *reason);
   bool m_invalidateRoutesOnStaleNeighbor { false };
 
   EventId m_neighborFreshnessEvent;
@@ -2255,7 +2268,7 @@ private:
   // non-relaying node for UAV/mobile-leaf experiments.
   bool m_transitForwardingEnabled {true};
 
-  uint16_t m_gatewayNodeId {CSR_BROADCAST_ID};
+  CsrNodeId m_gatewayNodeId {CSR_BROADCAST_ID};
   EventId m_gatewayStartupDiscoveryEvent;
   Time m_gatewayStartupDiscoveryDuration {Seconds (30.0)};
 
@@ -2281,7 +2294,7 @@ private:
   }
 
   Ptr<Packet> BuildTargetedRoutingUpdatePayload (
-    uint16_t destination,
+    CsrNodeId destination,
     uint32_t routingSequence);
 
   Ptr<Packet> BuildRoutingUpdatePayload (
@@ -2297,7 +2310,7 @@ private:
   Ptr<Packet> BuildRoutingMarkerPayload (
     CsrRoutingOperation operation,
     uint32_t routingSequence,
-    uint16_t routingTarget =
+    CsrNodeId routingTarget =
       CSR_BROADCAST_ID);
 
   std::vector<Ptr<Packet>>
@@ -2327,7 +2340,7 @@ private:
     };
   };
 
-  std::map<uint16_t, OutboundRoutingSnapshot>
+  std::map<CsrNodeId, OutboundRoutingSnapshot>
     m_outboundRoutingSnapshots;
 
   uint32_t
@@ -2360,7 +2373,7 @@ private:
 
   // Changed destinations waiting to be advertised,
   // grouped by receiving neighbor.
-  std::map<uint16_t, std::set<uint16_t>>
+  std::map<CsrNodeId, std::set<CsrNodeId>>
     m_pendingAutomaticRouteChanges;
 
   EventId m_automaticRouteUpdateEvent;
@@ -2380,7 +2393,7 @@ private:
 // ------------------------------------------------------------
 
 static void
-AppRxFromNet (Ptr<Packet> payload, uint16_t src)
+AppRxFromNet (Ptr<Packet> payload, CsrNodeId src)
 {
     std::cout << "  [APP] Node received payload from " << src
               << " (size=" << payload->GetSize () << " B)"
@@ -2494,7 +2507,7 @@ CsrNetLayer::GatewayStartupDiscoveryFire ()
 
 void
 CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
-                            uint16_t hopSrc,
+                            CsrNodeId hopSrc,
                             double pathlossDb,
                             double snrDb)
 {
@@ -2508,7 +2521,7 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
       return;
     }
 
-  uint16_t src = hh.GetNodeId ();
+  CsrNodeId src = hh.GetNodeId ();
 
   if (src == m_nodeId)
     {
@@ -2677,7 +2690,7 @@ CsrNetLayer::ArlRouteMsgTypeName (CsrArlRouteMsgType t) const
 void
 CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
                                       Ptr<Packet> routingPayload,
-                                      uint16_t helloSrc,
+                                      CsrNodeId helloSrc,
                                       double pathlossDb,
                                       double snrDb,
                                       uint32_t linkCost)
@@ -2759,7 +2772,7 @@ void
 CsrNetLayer::ProcessArlRoutingSection (
   const CsrHelloHeader &hh,
   Ptr<Packet> routingPayload,
-  uint16_t helloSrc,
+  CsrNodeId helloSrc,
   double pathlossDb,
   double snrDb,
   uint32_t linkCost)
@@ -2927,7 +2940,7 @@ CsrNetLayer::ProcessArlRoutingSection (
 
 void
 CsrNetLayer::ApplyCompleteArlRoutingMessage (
-  uint16_t helloSrc,
+  CsrNodeId helloSrc,
   uint32_t routingSequence,
   const std::vector<CsrArlRoutingMessage::Record> &records,
   double pathlossDb,
@@ -3033,10 +3046,10 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
 
             bool pathSupported = true;
             bool containsLocalNode = false;
-            std::vector<uint16_t> advertisedPath;
+            std::vector<CsrNodeId> advertisedPath;
             advertisedPath.reserve (record.path.size ());
 
-            for (uint32_t pathNode : record.path)
+            for (CsrNodeId pathNode : record.path)
               {
                 if (pathNode >= CSR_BROADCAST_ID)
                   {
@@ -3044,7 +3057,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                     break;
                   }
 
-                uint16_t node = static_cast<uint16_t> (pathNode);
+                CsrNodeId node = pathNode;
                 advertisedPath.push_back (node);
                 if (node == m_nodeId)
                   {
@@ -3061,8 +3074,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                 break;
               }
 
-            uint16_t destination =
-              static_cast<uint16_t> (record.nodeId);
+            CsrNodeId destination = record.nodeId;
 
             RouteEntry *existingRoute = nullptr;
             for (auto &route : m_routes)
@@ -3125,7 +3137,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                 break;
               }
 
-            std::vector<uint16_t> candidatePath;
+            std::vector<CsrNodeId> candidatePath;
             candidatePath.reserve (advertisedPath.size () + 1);
             candidatePath.push_back (helloSrc);
             candidatePath.insert (
@@ -3176,8 +3188,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                 break;
               }
 
-            uint16_t destination =
-              static_cast<uint16_t> (record.nodeId);
+            CsrNodeId destination = record.nodeId;
             SelectedRouteState before =
               CaptureSelectedRouteState (destination);
             RouteEntry *matchingRoute = nullptr;
@@ -3236,7 +3247,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
         case CsrRoutingOperation::Flush:
           {
             sawFlush = true;
-            std::map<uint16_t, SelectedRouteState> beforeByDestination;
+            std::map<CsrNodeId, SelectedRouteState> beforeByDestination;
             uint32_t invalidated = 0;
 
             for (auto &route : m_routes)
@@ -3333,14 +3344,14 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
   ScheduleCheckNwkQueue ();
 }
 
-std::set<uint16_t>
+std::set<CsrNodeId>
 CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
-                                    uint16_t helloSrc,
+                                    CsrNodeId helloSrc,
                                     double pathlossDb,
                                     double snrDb,
                                     uint32_t linkCost)
 {
-    std::set<uint16_t>
+    std::set<CsrNodeId>
       acceptedDestinations;
 
     uint8_t advCount = hh.GetAdvertisedRouteCount ();
@@ -3375,7 +3386,7 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
 
         bool pathContainsLocalNode = false;
 
-        for (uint16_t pathNode :
+        for (CsrNodeId pathNode :
             ar.path)
           {
             if (pathNode == m_nodeId)
@@ -3407,12 +3418,12 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
         uint8_t totalHops = static_cast<uint8_t> (ar.hops + 1);
         uint32_t totalCost = linkCost + ar.cost;
 
-        std::vector<uint16_t> candidatePath;
+        std::vector<CsrNodeId> candidatePath;
 
         candidatePath.push_back (
           helloSrc);
 
-        for (uint16_t pathNode :
+        for (CsrNodeId pathNode :
             ar.path)
           {
             candidatePath.push_back (
@@ -3468,7 +3479,7 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
 void
 CsrNetLayer::ProcessRoutingUpdate (
   const CsrHelloHeader &hh,
-  uint16_t helloSrc,
+  CsrNodeId helloSrc,
   double pathlossDb,
   double snrDb,
   uint32_t linkCost)
@@ -3796,7 +3807,7 @@ CsrNetLayer::ProcessRoutingUpdate (
             // this single simulator event.
             // --------------------------------------------------
 
-            std::set<uint16_t>
+            std::set<CsrNodeId>
               acceptedDestinations;
 
             uint32_t bufferedRouteCount = 0;
@@ -3808,7 +3819,7 @@ CsrNetLayer::ProcessRoutingUpdate (
                   bufferedHeader
                     .GetAdvertisedRouteCount ();
 
-                std::set<uint16_t>
+                std::set<CsrNodeId>
                   sectionAccepted =
                     ProcessRoutesPayload (
                       bufferedHeader,
@@ -3861,7 +3872,7 @@ CsrNetLayer::ProcessRoutingUpdate (
         // Process it immediately.
         // --------------------------------------------------
 
-        std::set<uint16_t>
+        std::set<CsrNodeId>
           acceptedDestinations =
             ProcessRoutesPayload (
               hh,
@@ -3962,7 +3973,7 @@ CsrNetLayer::ProcessRoutingUpdate (
 
     case CsrRoutingOperation::Delete:
       {
-        uint16_t destination =
+        CsrNodeId destination =
           hh.GetRoutingTarget ();
 
         if (destination ==
@@ -4157,7 +4168,7 @@ CsrNetLayer::ProcessRoutingUpdate (
         // that FLUSH may invalidate. Multiple candidates may
         // exist for the same destination, so capture each
         // destination only once before modifying anything.
-        std::map<uint16_t, SelectedRouteState>
+        std::map<CsrNodeId, SelectedRouteState>
           selectedBeforeFlush;
 
         for (auto &route : m_routes)
@@ -4215,7 +4226,7 @@ CsrNetLayer::ProcessRoutingUpdate (
         for (const auto &entry :
             selectedBeforeFlush)
           {
-            uint16_t destination =
+            CsrNodeId destination =
               entry.first;
 
             const SelectedRouteState &before =
@@ -4337,7 +4348,7 @@ CsrNetLayer::ProcessRoutingUpdate (
 }
 
 void
-CsrNetLayer::UpdateReverseRoute (uint16_t netSrc, uint16_t hopSrc)
+CsrNetLayer::UpdateReverseRoute (CsrNodeId netSrc, CsrNodeId hopSrc)
 {
   if (netSrc == m_nodeId ||
       netSrc == CSR_BROADCAST_ID ||
@@ -4359,7 +4370,7 @@ CsrNetLayer::UpdateReverseRoute (uint16_t netSrc, uint16_t hopSrc)
 
   ReverseRouteEntry &rr = m_reverseRoutes[netSrc];
   bool wasValid = rr.valid;
-  uint16_t oldHop = rr.reverseHop;
+  CsrNodeId oldHop = rr.reverseHop;
 
   rr.netSrc = netSrc;
   rr.reverseHop = hopSrc;
@@ -4380,8 +4391,8 @@ CsrNetLayer::UpdateReverseRoute (uint16_t netSrc, uint16_t hopSrc)
 }
 
 bool
-CsrNetLayer::RemoveReverseRouteFromReporter (uint16_t netSrc,
-                                uint16_t reporter)
+CsrNetLayer::RemoveReverseRouteFromReporter (CsrNodeId netSrc,
+                                             CsrNodeId reporter)
 {
   auto it = m_reverseRoutes.find (netSrc);
 
@@ -4607,14 +4618,14 @@ CsrNetLayer::CheckNeighborFreshness ()
 
 void
 CsrNetLayer::InvalidateRoutesViaNextHop (
-  uint16_t nextHop,
+  CsrNodeId nextHop,
   const char *reason)
 {
   bool anyInvalidated = false;
 
   // Preserve the selected route for each affected
   // destination before invalidating candidates.
-  std::map<uint16_t, SelectedRouteState>
+  std::map<CsrNodeId, SelectedRouteState>
     selectedBefore;
 
   for (auto &route : m_routes)
@@ -4661,7 +4672,7 @@ CsrNetLayer::InvalidateRoutesViaNextHop (
   for (const auto &entry :
        selectedBefore)
     {
-      uint16_t destination =
+      CsrNodeId destination =
         entry.first;
 
       const SelectedRouteState
@@ -4690,7 +4701,7 @@ CsrNetLayer::InvalidateRoutesViaNextHop (
 
 void
 CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
-                              uint16_t helloSrc,
+                              CsrNodeId helloSrc,
                               double pathlossDb,
                               double snrDb,
                               uint32_t linkCost)
@@ -4872,7 +4883,7 @@ CsrNetLayer::SetDiscoveryResponseEnabled (bool enable)
 
 void
 CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
-                                   uint16_t helloSrc,
+                                   CsrNodeId helloSrc,
                                    double pathlossDb,
                                    double snrDb,
                                    uint32_t linkCost)
@@ -5007,7 +5018,7 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
 
     case CsrNeighborCheckType::NoPath:
       {
-        uint16_t unreachableDest = hh.GetNeighborCheckTarget ();
+        CsrNodeId unreachableDest = hh.GetNeighborCheckTarget ();
 
         std::cout << "[NWK " << m_nodeId
                   << "] NeighborCheck NoPath received from "
@@ -5222,7 +5233,7 @@ CsrNetLayer::VerifyUnresponsiveDiscoveryNeighbors ()
                     << std::endl;
         }
 
-      uint16_t neighborId = neighbor.nodeId;
+      CsrNodeId neighborId = neighbor.nodeId;
       Time thisDelay =
         verifyDelay * static_cast<int64_t> (verifyScheduledCount + 1);
 
@@ -5526,9 +5537,9 @@ CsrNetLayer::SendRoutingUpdateWithSequenceForTest (uint32_t sequence)
 
 void
 CsrNetLayer::SendNeighborCheck (
-  uint16_t neighbor,
+  CsrNodeId neighbor,
   CsrNeighborCheckType type,
-  uint16_t target,
+  CsrNodeId target,
   uint32_t discoverySequence)
 {
   if (m_hop == nullptr)
@@ -5584,7 +5595,7 @@ CsrNetLayer::SendNeighborCheck (
 
 void
 CsrNetLayer::EnsureDiscoveryEntry (
-  uint16_t node,
+  CsrNodeId node,
   bool discoveryNeeded)
 {
   if (node == m_nodeId || node == CSR_BROADCAST_ID)
@@ -5617,7 +5628,7 @@ CsrNetLayer::EnsureDiscoveryEntry (
 }
 
 void
-CsrNetLayer::MarkDiscoveryNotNeeded (uint16_t node)
+CsrNetLayer::MarkDiscoveryNotNeeded (CsrNodeId node)
 {
   auto existing = std::find_if (
     m_discoveryTable.begin (),
@@ -5635,18 +5646,18 @@ CsrNetLayer::MarkDiscoveryNotNeeded (uint16_t node)
   existing->discoveryNeeded = false;
 }
 
-std::vector<uint16_t>
+std::vector<CsrNodeId>
 CsrNetLayer::CollectKnownDiscoveryNodes () const
 {
-  std::vector<uint16_t> nodes;
-  std::set<uint16_t> seen;
+  std::vector<CsrNodeId> nodes;
+  std::set<CsrNodeId> seen;
 
   // routesListWalkNext() walks logical destinations, not every alternate
   // path.  Preserve the first-seen route-table order while suppressing
   // duplicate next-hop alternatives.
   for (const RouteEntry &route : m_routes)
     {
-      uint16_t destination = route.nwkDst;
+      CsrNodeId destination = route.nwkDst;
 
       if (destination == m_nodeId ||
           destination == CSR_BROADCAST_ID ||
@@ -5670,17 +5681,17 @@ CsrNetLayer::CollectKnownDiscoveryNodes () const
 
 bool
 CsrNetLayer::SendSnmp (
-  uint16_t destination,
+  CsrNodeId destination,
   CsrSnmpCommand command,
   int32_t value,
-  const std::vector<uint16_t> &nodes)
+  const std::vector<CsrNodeId> &nodes)
 {
   if (m_hop == nullptr)
     {
       return false;
     }
 
-  uint16_t hopDestination = destination;
+  CsrNodeId hopDestination = destination;
   if (destination != CSR_BROADCAST_ID)
     {
       // send_snmp_pk() uses lookup_route(), not the DATA forwarding policy.
@@ -5743,7 +5754,7 @@ CsrNetLayer::SendSnmp (
 void
 CsrNetLayer::ReceiveSnmpFromHop (
   Ptr<Packet> snmpPayload,
-  uint16_t hopSource)
+  CsrNodeId hopSource)
 {
   CsrSnmpHeader header;
   if (!snmpPayload->RemoveHeader (header))
@@ -5763,7 +5774,7 @@ CsrNetLayer::ReceiveSnmpFromHop (
       return;
     }
 
-  uint16_t source = header.GetSource ();
+  CsrNodeId source = header.GetSource ();
 
   if (header.GetCommand () == CSR_SNMP_START_DISCOVERY)
     {
@@ -5830,7 +5841,7 @@ CsrNetLayer::ReceiveSnmpFromHop (
                 << " advertisedNodes=" << header.GetNodes ().size ()
                 << std::endl;
 
-      for (uint16_t node : header.GetNodes ())
+      for (CsrNodeId node : header.GetNodes ())
         {
           EnsureDiscoveryEntry (node, true);
         }
@@ -5848,16 +5859,16 @@ CsrNetLayer::ReceiveSnmpFromHop (
 void
 CsrNetLayer::CompleteDiscoveryLifecycle ()
 {
-  std::vector<uint16_t> knownNodes = CollectKnownDiscoveryNodes ();
+  std::vector<CsrNodeId> knownNodes = CollectKnownDiscoveryNodes ();
 
-  for (uint16_t node : knownNodes)
+  for (CsrNodeId node : knownNodes)
     {
       EnsureDiscoveryEntry (node, true);
     }
 
-  std::vector<uint16_t> requesters = m_discoveryCompletionRequesters;
+  std::vector<CsrNodeId> requesters = m_discoveryCompletionRequesters;
 
-  for (uint16_t requester : requesters)
+  for (CsrNodeId requester : requesters)
     {
       SendSnmp (
         requester,
@@ -6170,7 +6181,7 @@ CsrNetLayer::BuildRoutingUpdatePayload (
 Ptr<Packet>
 CsrNetLayer::
 BuildTargetedRoutingUpdatePayload (
-  uint16_t destination,
+  CsrNodeId destination,
   uint32_t routingSequence)
 {
   const RouteEntry *route =
@@ -6344,7 +6355,7 @@ Ptr<Packet>
 CsrNetLayer::BuildRoutingMarkerPayload (
   CsrRoutingOperation operation,
   uint32_t routingSequence,
-  uint16_t routingTarget)
+  CsrNodeId routingTarget)
 {
   Ptr<Packet> packet =
     Create<Packet> ();
@@ -6546,10 +6557,10 @@ CsrNetLayer::BuildArlRoutingSnapshotPayloads (
           continue;
         }
 
-      std::vector<uint32_t> path;
+      std::vector<CsrNodeId> path;
       path.reserve (route.numHop);
 
-      for (uint16_t pathNode : route.path)
+      for (CsrNodeId pathNode : route.path)
         {
           if (path.size () >= route.numHop)
             {
@@ -6641,7 +6652,7 @@ CsrNetLayer::BuildArlRoutingSnapshotPayloads (
 
 void
 CsrNetLayer::StartReliableRoutingSnapshot (
-  uint16_t neighbor)
+  CsrNodeId neighbor)
 {
   if (m_hop == nullptr)
     {
@@ -6737,7 +6748,7 @@ CsrNetLayer::StartReliableRoutingSnapshot (
 void
 CsrNetLayer::
 ArmRoutingSnapshotWatchdog (
-  uint16_t neighbor,
+  CsrNodeId neighbor,
   const char *phase)
 {
   auto snapshotIt =
@@ -6796,7 +6807,7 @@ ArmRoutingSnapshotWatchdog (
 void
 CsrNetLayer::
 RoutingSnapshotWatchdogExpired (
-  uint16_t neighbor,
+  CsrNodeId neighbor,
   uint32_t expectedGeneration)
 {
   auto snapshotIt =
@@ -6864,7 +6875,7 @@ RoutingSnapshotWatchdogExpired (
 
 void
 CsrNetLayer::SendRoutingRequestAttempt (
-  uint16_t neighbor,
+  CsrNodeId neighbor,
   bool retry)
 {
   if (m_hop == nullptr)
@@ -6944,7 +6955,7 @@ CsrNetLayer::SendRoutingRequestAttempt (
 
 void
 CsrNetLayer::RoutingRequestTimeout (
-  uint16_t neighbor,
+  CsrNodeId neighbor,
   uint32_t expectedSequence)
 {
   auto neighborIt =
@@ -7041,13 +7052,13 @@ CsrNetLayer::RoutingRequestTimeout (
 
 const CsrNetLayer::RouteEntry*
 CsrNetLayer::FindBestRoute (
-  uint16_t destination) const
+  CsrNodeId destination) const
 {
   const RouteEntry *best = nullptr;
 
   bool preferredValid = false;
 
-  uint16_t preferredNextHop =
+  CsrNodeId preferredNextHop =
     CSR_BROADCAST_ID;
 
   auto preferredIt =
@@ -7127,7 +7138,7 @@ CsrNetLayer::FindBestRoute (
 
 CsrNetLayer::SelectedRouteState
 CsrNetLayer::CaptureSelectedRouteState (
-  uint16_t destination) const
+  CsrNodeId destination) const
 {
   SelectedRouteState state;
 
@@ -7174,7 +7185,7 @@ CsrNetLayer::SameSelectedRouteState (
 
 void
 CsrNetLayer::MarkSelectedRouteChanged (
-  uint16_t destination,
+  CsrNodeId destination,
   const char *reason)
   {
     const RouteEntry *selectedRoute =
@@ -7232,7 +7243,7 @@ void
 CsrNetLayer::
 ReportPendingSelectedRouteChanges ()
 {
-  std::set<uint16_t> destinations;
+  std::set<CsrNodeId> destinations;
 
   destinations.swap (
     m_pendingSelectedRouteChanges);
@@ -7243,7 +7254,7 @@ ReportPendingSelectedRouteChanges ()
             << destinations.size ()
             << std::endl;
 
-  for (uint16_t destination :
+  for (CsrNodeId destination :
        destinations)
     {
       DumpBestRoute (destination);
@@ -7277,7 +7288,7 @@ ReportPendingSelectedRouteChanges ()
           continue;
         }
 
-      std::set<uint16_t>
+      std::set<CsrNodeId>
         &pendingDestinations =
           m_pendingAutomaticRouteChanges[
             neighbor.nodeId];
@@ -7285,7 +7296,7 @@ ReportPendingSelectedRouteChanges ()
       bool wasEmpty =
         pendingDestinations.empty ();
 
-      for (uint16_t destination :
+      for (CsrNodeId destination :
           destinations)
         {
           bool inserted =
@@ -7347,7 +7358,7 @@ TrySendAutomaticRouteUpdates ()
   while (pendingIt !=
          m_pendingAutomaticRouteChanges.end ())
     {
-      uint16_t neighborId =
+      CsrNodeId neighborId =
         pendingIt->first;
 
       auto neighborIt =
@@ -7389,7 +7400,7 @@ TrySendAutomaticRouteUpdates ()
           continue;
         }
 
-      std::set<uint16_t>
+      std::set<CsrNodeId>
         &pendingDestinations =
           pendingIt->second;
 
@@ -7402,7 +7413,7 @@ TrySendAutomaticRouteUpdates ()
           continue;
         }
 
-      uint16_t destination =
+      CsrNodeId destination =
         *pendingDestinations.begin ();
 
       pendingDestinations.erase (
@@ -7524,7 +7535,7 @@ TrySendAutomaticRouteUpdates ()
 
 bool
 CsrNetLayer::GetSelectedRouteCost (
-  uint16_t destination,
+  CsrNodeId destination,
   uint32_t &costOut) const
 {
   const RouteEntry *best =
@@ -7541,7 +7552,7 @@ CsrNetLayer::GetSelectedRouteCost (
 
 bool
 CsrNetLayer::GetNeighborRoutingInfo (
-  uint16_t neighbor,
+  CsrNodeId neighbor,
   CsrHelloHeader::RoutingInfo &infoOut) const
 {
   auto it = m_nwkNeighbors.find (neighbor);
@@ -7566,7 +7577,7 @@ CsrNetLayer::GetNeighborRoutingInfo (
 
 uint32_t
 CsrNetLayer::GetPendingArlRoutingMessageCount (
-  uint16_t neighbor) const
+  CsrNodeId neighbor) const
 {
   auto it = m_nwkNeighbors.find (neighbor);
   return it == m_nwkNeighbors.end ()
@@ -7577,7 +7588,7 @@ CsrNetLayer::GetPendingArlRoutingMessageCount (
 
 uint8_t
 CsrNetLayer::GetOutboundRoutingSnapshotTotalSections (
-  uint16_t neighbor) const
+  CsrNodeId neighbor) const
 {
   auto it = m_outboundRoutingSnapshots.find (neighbor);
   return it == m_outboundRoutingSnapshots.end ()
@@ -7587,7 +7598,7 @@ CsrNetLayer::GetOutboundRoutingSnapshotTotalSections (
 
 uint32_t
 CsrNetLayer::GetOutboundRoutingSnapshotAckedSections (
-  uint16_t neighbor) const
+  CsrNodeId neighbor) const
 {
   auto it = m_outboundRoutingSnapshots.find (neighbor);
   return it == m_outboundRoutingSnapshots.end ()
@@ -7598,7 +7609,7 @@ CsrNetLayer::GetOutboundRoutingSnapshotAckedSections (
 
 bool
 CsrNetLayer::IsOutboundRoutingSnapshotActive (
-  uint16_t neighbor) const
+  CsrNodeId neighbor) const
 {
   auto it = m_outboundRoutingSnapshots.find (neighbor);
   return it != m_outboundRoutingSnapshots.end () &&
@@ -7607,7 +7618,7 @@ CsrNetLayer::IsOutboundRoutingSnapshotActive (
 
 void
 CsrNetLayer::DumpBestRoute (
-  uint16_t destination) const
+  CsrNodeId destination) const
 {
   uint32_t candidateCount = 0;
   uint32_t validCount = 0;
@@ -7665,7 +7676,7 @@ CsrNetLayer::DumpBestRoute (
 void
 CsrNetLayer::
 RecomputeRoutesViaNextHop (
-  uint16_t nextHop)
+  CsrNodeId nextHop)
 {
   auto neighborIt =
     m_nwkNeighbors.find (
@@ -7688,7 +7699,7 @@ RecomputeRoutesViaNextHop (
 
   // Capture the selected state before modifying
   // any candidate costs through this neighbor.
-  std::map<uint16_t, SelectedRouteState>
+  std::map<CsrNodeId, SelectedRouteState>
     selectedBefore;
 
   for (const auto &route :
@@ -7802,7 +7813,7 @@ RecomputeRoutesViaNextHop (
   for (const auto &entry :
        selectedBefore)
     {
-      uint16_t destination =
+      CsrNodeId destination =
         entry.first;
 
       const SelectedRouteState &before =
@@ -7844,7 +7855,7 @@ void
 CsrNetLayer::
 RefreshRoutesAfterDiscovery ()
 {
-  std::vector<uint16_t>
+  std::vector<CsrNodeId>
     activeNeighbors;
 
   for (const auto &entry :
@@ -7874,7 +7885,7 @@ RefreshRoutesAfterDiscovery ()
 
   // Legacy routesReroute() first recomputes
   // the cost to every active neighbor.
-  for (uint16_t neighborId :
+  for (CsrNodeId neighborId :
        activeNeighbors)
     {
       RecomputeRoutesViaNextHop (
@@ -7883,7 +7894,7 @@ RefreshRoutesAfterDiscovery ()
 
   // Legacy then marks every active neighbor
   // as needing a fresh routing request.
-  for (uint16_t neighborId :
+  for (CsrNodeId neighborId :
        activeNeighbors)
     {
       auto it =

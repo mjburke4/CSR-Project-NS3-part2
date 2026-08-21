@@ -13,7 +13,7 @@ using namespace ns3;
 namespace
 {
 
-std::vector<uint16_t> g_node2ObservedDestinations;
+std::vector<CsrNodeId> g_node2ObservedDestinations;
 uint32_t g_node3NwkDeliveries = 0;
 uint32_t g_node1MacDeliveries = 0;
 
@@ -28,8 +28,8 @@ Require (bool condition, const char* message)
 }
 
 Ptr<Packet>
-BuildDataFrame (uint16_t source,
-                uint16_t destination,
+BuildDataFrame (CsrNodeId source,
+                CsrNodeId destination,
                 uint16_t sequence,
                 bool ackable)
 {
@@ -58,7 +58,7 @@ RecordAtNode2Mac (Ptr<Packet> frame, double, double)
 }
 
 void
-RecordAtNode3Nwk (Ptr<Packet>, uint16_t)
+RecordAtNode3Nwk (Ptr<Packet>, CsrNodeId)
 {
   g_node3NwkDeliveries++;
 }
@@ -73,7 +73,7 @@ void
 CheckFirstOverhear (Ptr<CsrNetDevice> node3,
                     Ptr<CsrHopLayer> hop3)
 {
-  Require (g_node2ObservedDestinations == std::vector<uint16_t> {2},
+  Require (g_node2ObservedDestinations == std::vector<CsrNodeId> {2},
            "the intended receiver did not decode the first DATA frame");
   Require (g_node3NwkDeliveries == 0,
            "overheard DATA leaked through HOP into NWK");
@@ -167,7 +167,7 @@ main ()
   Simulator::Run ();
 
   Require (g_node2ObservedDestinations ==
-             std::vector<uint16_t> ({2, 3}),
+             std::vector<CsrNodeId> ({2, 3}),
            "node 2 did not overhear the later node-3 DATA frame");
   Require (g_node3NwkDeliveries == 1,
            "node 3 NWK delivery count changed after the addressed frame");

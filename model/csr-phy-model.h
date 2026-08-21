@@ -11,15 +11,17 @@ public:
   void SetPerModel (CsrPerModelFn fn) { perModel = std::move(fn); }
   void SetBerModel (CsrPerModelFn fn) { perModel = std::move(fn); }
 
-  void SetLinkDistanceMeters(uint16_t a, uint16_t b, double meters)
+  void SetLinkDistanceMeters(CsrNodeId a, CsrNodeId b, double meters)
   {
+    NS_ABORT_MSG_IF (!CsrIsValidNodeId (a) || !CsrIsValidNodeId (b),
+                     "CSR PHY endpoint exceeds 24 bits");
     m_linkDist[{a,b}] = meters;
     m_linkDist[{b,a}] = meters;
   }
 
   void SetDefaultDistanceMeters(double meters) { m_defaultDist = meters; }
 
-  double GetDistanceMeters (uint16_t txId, uint16_t rxId) const
+  double GetDistanceMeters (CsrNodeId txId, CsrNodeId rxId) const
   {
     auto it = m_linkDist.find({txId, rxId});
     if (it != m_linkDist.end())
@@ -27,7 +29,7 @@ public:
     return m_defaultDist * profile.distanceScale;
   }
 
-  double PredictSnrDb (uint16_t txId, uint16_t rxId, double txPowerDbm) const
+  double PredictSnrDb (CsrNodeId txId, CsrNodeId rxId, double txPowerDbm) const
   {
     double dist = GetDistanceMeters (txId, rxId);
     double plDb = ComputePathlossDb (dist);
@@ -79,8 +81,8 @@ public:
     return rxPowerDbm - profile.noiseFloorDbm;
   }
 
-  CsrRxDecision EvaluateRx (uint16_t txId,
-                            uint16_t rxId,
+  CsrRxDecision EvaluateRx (CsrNodeId txId,
+                            CsrNodeId rxId,
                             int rateKbps,
                             double txPowerDbm,
                             uint32_t packetBits,
@@ -106,7 +108,7 @@ public:
   }
 
 private:
-  std::map<std::pair<uint16_t,uint16_t>, double> m_linkDist;
+  std::map<std::pair<CsrNodeId,CsrNodeId>, double> m_linkDist;
   double m_defaultDist { 1.0 };
 };
 

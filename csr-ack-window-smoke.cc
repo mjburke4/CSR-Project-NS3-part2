@@ -43,7 +43,8 @@ main ()
   CsrHeader exact (1, 2, 9, 7, false, true);
   Ptr<Packet> exactPacket = Create<Packet> ();
   exactPacket->AddHeader (exact);
-  Require (exactPacket->GetSize () == 11, "exact ACK wire size changed");
+  Require (exactPacket->GetSize () == 13,
+           "exact ACK does not carry two 24-bit node identifiers");
 
   CsrHeader windowed (1, 2, 9, 7, false, true);
   windowed.SetHasAckWindow (true);
@@ -51,7 +52,8 @@ main ()
   windowed.SetDackBitmap (0x2ULL);
   Ptr<Packet> windowedPacket = Create<Packet> ();
   windowedPacket->AddHeader (windowed);
-  Require (windowedPacket->GetSize () == 27, "windowed ACK wire size is not 27");
+  Require (windowedPacket->GetSize () == 29,
+           "windowed ACK wire size is not 29");
 
   CsrHeader decoded;
   windowedPacket->RemoveHeader (decoded);

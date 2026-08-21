@@ -41,7 +41,7 @@ MakeRoutingInfo ()
 }
 
 Ptr<Packet>
-MakePlainHello (uint16_t source)
+MakePlainHello (CsrNodeId source)
 {
   CsrHelloHeader hello;
   hello.SetNodeId (source);
@@ -58,7 +58,7 @@ MakePlainHello (uint16_t source)
 }
 
 Ptr<Packet>
-MakeSectionEnvelope (uint16_t source,
+MakeSectionEnvelope (CsrNodeId source,
                      const std::vector<uint8_t> &sectionBytes)
 {
   CsrArlRoutingMessage::Section section;
@@ -178,7 +178,7 @@ RunCodecScenario ()
 
   // Use a value above 255 so a one-byte hop-count implementation cannot
   // accidentally satisfy the codec test.
-  std::vector<uint32_t> widePath (0x0102);
+  std::vector<CsrNodeId> widePath (0x0102);
   for (uint32_t index = 0; index < widePath.size (); ++index)
     {
       widePath[index] = index + 1;
@@ -253,9 +253,9 @@ RunCodecScenario ()
 void
 RunOutOfOrderAtomicReassemblyScenario ()
 {
-  constexpr uint16_t receiverId = 1;
-  constexpr uint16_t senderId = 2;
-  constexpr uint16_t oldDestination = 900;
+  constexpr CsrNodeId receiverId = 1;
+  constexpr CsrNodeId senderId = 2;
+  constexpr CsrNodeId oldDestination = 900;
 
   Ptr<CsrNetLayer> receiver = CreateObject<CsrNetLayer> ();
   receiver->SetNodeId (receiverId);
@@ -358,8 +358,8 @@ RunOutOfOrderAtomicReassemblyScenario ()
 void
 RunIndependentHopTransmissionScenario ()
 {
-  constexpr uint16_t sourceId = 1;
-  constexpr uint16_t neighborId = 2;
+  constexpr CsrNodeId sourceId = 1;
+  constexpr CsrNodeId neighborId = 2;
 
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceId);
   Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
@@ -380,7 +380,7 @@ RunIndependentHopTransmissionScenario ()
 
   for (uint16_t index = 0; index < 40; ++index)
     {
-      uint16_t destination = static_cast<uint16_t> (1000 + index);
+      CsrNodeId destination = 1000 + index;
       nwk->AddOrUpdateRoute (
         destination,
         neighborId,
