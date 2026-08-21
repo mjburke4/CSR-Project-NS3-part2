@@ -1874,9 +1874,11 @@ CsrHopLayer::CheckResend ()
                               << e.dest
                               << " seq=" << e.seq);
 
-          // Legacy HOP reports final transmission failure
-          // back to the routing layer with the original
-          // routing-message metadata.
+          // Legacy HOP reports a final failure to NWK only when the resend
+          // packet carries Packet_Tx_Info.  In this model that metadata is
+          // represented by a reliable ROUTING_CONTROL frame.  Ordinary DATA
+          // has no Packet_Tx_Info and therefore must not be converted into a
+          // routing-link failure merely because its resend limit expired.
           if (e.frame != nullptr)
             {
               Ptr<Packet> failedFrame =
@@ -1953,12 +1955,12 @@ CsrHopLayer::CheckResend ()
                 }
             }
 
-          // Everything already below here stays unchanged.
-
-         if (!m_linkFailureCb.IsNull ())
-            {
-              m_linkFailureCb (e.dest);
-            }
+          // Do not call the generic link-failure callback here.  OPNET sends
+          // routing completion through br_Sent_Info/routesHopSecSentPacket(),
+          // and the callback above is its equivalent.  Calling
+          // m_linkFailureCb(e.dest) as well incorrectly penalizes DATA loss
+          // and, for a grouped routing frame, can penalize the primary target
+          // even after that target already ACKed.
 
           // Inform Net layer that this flow lost a packet
           NotifyNsdpFromFrame (e.frame);

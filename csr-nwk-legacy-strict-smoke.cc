@@ -96,6 +96,38 @@ MakeHello (uint16_t nodeId, CsrNodeType nodeType)
   return packet;
 }
 
+Ptr<Packet>
+MakeRoutingInfo (uint16_t nodeId)
+{
+  CsrHelloHeader info;
+  info.SetNodeId (nodeId);
+  info.SetHelloSeq (2);
+  info.SetNodeType (CsrNodeType::Routable);
+  info.SetSpeedKey (8);
+  info.SetRxPowerDbmX10 (-1050);
+  info.SetActiveNodes (1);
+  info.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
+  info.SetRoutingSequence (1);
+  info.SetRoutingSection (0);
+  info.SetRoutingTotalSections (1);
+  info.SetRoutingOperation (CsrRoutingOperation::Info);
+
+  CsrHelloHeader::RoutingInfo limits;
+  limits.minSpeedKbps = 8;
+  limits.maxSpeedKbps = 8;
+  limits.minPowerDbmX10 = -200;
+  limits.maxPowerDbmX10 = -200;
+  limits.linkMarginDbX10 = 120;
+  limits.lowPowerDbmX10 = -200;
+  limits.tempLowCx10 = -450;
+  limits.tempHighCx10 = 600;
+  info.SetRoutingInfo (limits);
+
+  Ptr<Packet> packet = Create<Packet> ();
+  packet->AddHeader (info);
+  return packet;
+}
+
 void
 RunQueueOrderingAndTicScenario ()
 {
@@ -264,6 +296,78 @@ RunMonotonicActiveNodeScenario ()
   Simulator::Destroy ();
 }
 
+void
+RunLocalOnlyLinkCostScenario ()
+{
+  Ptr<CsrNetLayer> localOnly = CreateObject<CsrNetLayer> ();
+  Ptr<CsrNetLayer> withRemoteInfo = CreateObject<CsrNetLayer> ();
+
+  localOnly->SetNodeId (SOURCE_NODE);
+  withRemoteInfo->SetNodeId (SOURCE_NODE);
+
+  localOnly->ProcessHello (
+    MakeHello (DESTINATION_NODE, CsrNodeType::Routable),
+    DESTINATION_NODE,
+    70.0,
+    20.0);
+  withRemoteInfo->ProcessHello (
+    MakeHello (DESTINATION_NODE, CsrNodeType::Routable),
+    DESTINATION_NODE,
+    70.0,
+    20.0);
+
+  // OPNET stores the ARL INFO fields, but its
+  // linkCharSetRemoteParams() stub does nothing and linkCharGetCost()
+  // reports only localCost as valid. These deliberately restrictive remote
+  // limits therefore must not change the selected direct-route cost.
+  localOnly->ProcessHello (
+    MakeHello (DESTINATION_NODE, CsrNodeType::Routable),
+    DESTINATION_NODE,
+    70.0,
+    20.0);
+  withRemoteInfo->ProcessHello (
+    MakeRoutingInfo (DESTINATION_NODE),
+    DESTINATION_NODE,
+    70.0,
+    20.0);
+
+  localOnly->ProcessHello (
+    MakeHello (DESTINATION_NODE, CsrNodeType::Routable),
+    DESTINATION_NODE,
+    70.0,
+    20.0);
+  withRemoteInfo->ProcessHello (
+    MakeHello (DESTINATION_NODE, CsrNodeType::Routable),
+    DESTINATION_NODE,
+    70.0,
+    20.0);
+
+  uint32_t localCost = 0;
+  uint32_t remoteInfoCost = 0;
+  Require (localOnly->GetSelectedRouteCost (DESTINATION_NODE, localCost),
+           "local-only control node has no direct route");
+  Require (withRemoteInfo->GetSelectedRouteCost (DESTINATION_NODE,
+                                                  remoteInfoCost),
+           "remote-INFO node has no direct route");
+  Require (remoteInfoCost == localCost,
+           "remote RoutingInfo incorrectly changed OPNET local-only cost");
+
+  // routesReroute() asks linkCharGetCost() again after a failure. The remote
+  // INFO values must remain irrelevant on this recomputation path too.
+  localOnly->NoteLinkFailure (DESTINATION_NODE);
+  withRemoteInfo->NoteLinkFailure (DESTINATION_NODE);
+
+  Require (localOnly->GetSelectedRouteCost (DESTINATION_NODE, localCost),
+           "local-only route disappeared after link-cost recomputation");
+  Require (withRemoteInfo->GetSelectedRouteCost (DESTINATION_NODE,
+                                                  remoteInfoCost),
+           "remote-INFO route disappeared after link-cost recomputation");
+  Require (remoteInfoCost == localCost,
+           "remote RoutingInfo changed recomputed OPNET local-only cost");
+
+  Simulator::Destroy ();
+}
+
 } // namespace
 
 int
@@ -275,6 +379,7 @@ main ()
   RunNoRouteHoldScenario ();
   RunDirectCapabilityScenario ();
   RunMonotonicActiveNodeScenario ();
+  RunLocalOnlyLinkCostScenario ();
 
   std::cout << "PASS: strict OPNET NWK legacy behavior test"
             << std::endl;
