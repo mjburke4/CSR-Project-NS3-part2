@@ -1,5 +1,6 @@
 #pragma once
 #include "csr-common.h"
+#include "csr-arl-routing-message.h"
 #include "csr-hello-header.h"
 #include "csr-hop-layer.h"
 #include <cmath>
@@ -116,6 +117,53 @@ public:
    */
   bool GetSelectedRouteCost (uint16_t destination,
                              uint32_t &costOut) const;
+
+  /**
+   * Read the last complete legacy ARL INFO record from a neighbor.
+   *
+   * @param neighbor Neighbor node identifier.
+   * @param infoOut Decoded INFO fields when available.
+   * @return True when the neighbor has valid routing information.
+   */
+  bool GetNeighborRoutingInfo (
+    uint16_t neighbor,
+    CsrHelloHeader::RoutingInfo &infoOut) const;
+
+  /**
+   * Count incomplete ARL routing sequences buffered for a neighbor.
+   *
+   * @param neighbor Neighbor node identifier.
+   * @return Number of incomplete logical routing messages.
+   */
+  uint32_t GetPendingArlRoutingMessageCount (
+    uint16_t neighbor) const;
+
+  /**
+   * Get the number of sections in the current outbound snapshot.
+   *
+   * @param neighbor Neighbor node identifier.
+   * @return Total section count, or zero when no state exists.
+   */
+  uint8_t GetOutboundRoutingSnapshotTotalSections (
+    uint16_t neighbor) const;
+
+  /**
+   * Count independently acknowledged sections in an outbound snapshot.
+   *
+   * @param neighbor Neighbor node identifier.
+   * @return Number of acknowledged sections.
+   */
+  uint32_t GetOutboundRoutingSnapshotAckedSections (
+    uint16_t neighbor) const;
+
+  /**
+   * Check whether an outbound snapshot is awaiting section acknowledgments.
+   *
+   * @param neighbor Neighbor node identifier.
+   * @return True while the snapshot is active.
+   */
+  bool IsOutboundRoutingSnapshotActive (
+    uint16_t neighbor) const;
 
   void
   SendNoPath (uint16_t neighbor, uint16_t unreachableDest)
@@ -344,6 +392,7 @@ public:
 
         neighbor.stale = true;
         neighbor.wasActiveBeforeLastHello = false;
+        neighbor.arlRoutingReassemblies.clear ();
 
         // Legacy routesMakeNeighborInactive() increments failures,
         // capped below an effectively unreachable upper bound.
@@ -1126,6 +1175,11 @@ private:
     }; // node that taught us this route
 
     std::vector<uint16_t> path;
+
+    // routes.c retains the originating routing-message sequence with every
+    // neighbor route (including invalid DELETE/FLUSH tombstones).
+    bool routingSequenceValid {false};
+    uint32_t routingSequence {0};
   };
 
   struct SelectedRouteState
@@ -1187,6 +1241,13 @@ private:
 
   struct NwkNeighborEntry
   {
+    struct ArlRoutingReassembly
+    {
+      uint8_t totalSections {0};
+      Time firstReceived {Seconds (0.0)};
+      std::map<uint8_t, std::vector<uint8_t>> sectionBodies;
+    };
+
     uint16_t nodeId {0};
     double lastHeardSec {-1.0};
     double lastPathlossDb {std::numeric_limits<double>::quiet_NaN ()};
@@ -1234,6 +1295,11 @@ private:
     // message before modifying the live route table.
     std::vector<CsrHelloHeader>
       routingSnapshotBufferedUpdates;
+
+    // Legacy routesReceiveRouting() can hold several incomplete routing
+    // sequences from one neighbor and orders their sections independently.
+    std::map<uint32_t, ArlRoutingReassembly>
+      arlRoutingReassemblies;
 
     bool routingInfoValid {false};
     uint32_t routingInfoSequence {0};
@@ -1713,9 +1779,9 @@ public:
 	              << (lastOfInfo ? 1 : 0)
 	              << std::endl;
 
-    // One OPNET routing-control transaction may cover several neighbors.
-    // A partial destination ACK is progress, not permission to advance to the
-    // next UPDATE/FLUSH phase.
+    // A partial destination ACK is progress for this section's grouped HOP
+    // transaction.  Only lastOfInfo means every destination for the section
+    // has ACKed.
     if (!lastOfInfo)
       {
         return;
@@ -1734,143 +1800,42 @@ public:
     OutboundRoutingSnapshot &snapshot =
       snapshotIt->second;
 
-    if (!snapshot.active)
+    if (!snapshot.active ||
+        routingSequence != snapshot.routingSequence)
       {
         return;
       }
 
-    if (operation ==
-          CsrRoutingOperation::Info &&
-        routingSequence ==
-          snapshot.infoSequence)
+    if (routingTotalSections != snapshot.totalSections ||
+        routingSection >= snapshot.totalSections)
       {
-        snapshot.currentUpdateSection = 0;
-
-        Ptr<Packet> updatePayload =
-          BuildRoutingUpdatePayload (
-            snapshot.updateSequence,
-            snapshot.currentUpdateSection,
-            snapshot.totalUpdateSections);
-
         std::cout << "[NWK " << m_nodeId
-                  << "] RoutingSnapshot INFO ACKed;"
-                  << " sending UPDATE section="
-                  << unsigned (
-                      snapshot
-                        .currentUpdateSection)
+                  << "] Ignoring mismatched ARL section ACK"
+                  << " neighbor=" << neighbor
+                  << " section="
+                  << unsigned (routingSection)
                   << "/"
-                  << unsigned (
-                      snapshot
-                        .totalUpdateSections)
-                  << " neighbor=" << neighbor
-                  << " routingSequence="
-                  << snapshot.updateSequence
+                  << unsigned (routingTotalSections)
+                  << " expectedTotal="
+                  << unsigned (snapshot.totalSections)
                   << std::endl;
-
-        m_hop->SendRoutingControl (
-          neighbor,
-          updatePayload);
-
-        ArmRoutingSnapshotWatchdog (
-          neighbor,
-          "awaiting-update-section-ack");
-
         return;
       }
 
-    if (operation ==
-          CsrRoutingOperation::Update &&
-        routingSequence ==
-          snapshot.updateSequence)
-      {
-        if (routingSection !=
-            snapshot.currentUpdateSection)
-          {
-            std::cout << "[NWK " << m_nodeId
-                      << "] Ignoring unexpected snapshot"
-                      << " Update completion"
-                      << " neighbor=" << neighbor
-                      << " completedSection="
-                      << unsigned (routingSection)
-                      << " expectedSection="
-                      << unsigned (
-                          snapshot
-                            .currentUpdateSection)
-                      << std::endl;
+    snapshot.ackedSections.insert (routingSection);
 
-            return;
-          }
+    std::cout << "[NWK " << m_nodeId
+              << "] ARL RoutingSnapshot section ACKed"
+              << " neighbor=" << neighbor
+              << " routingSequence=" << routingSequence
+              << " section=" << unsigned (routingSection)
+              << "/" << unsigned (snapshot.totalSections)
+              << " ackedSections="
+              << snapshot.ackedSections.size ()
+              << std::endl;
 
-        uint8_t nextSection =
-          static_cast<uint8_t> (
-            routingSection + 1);
-
-        if (nextSection <
-            snapshot.totalUpdateSections)
-          {
-            snapshot.currentUpdateSection =
-              nextSection;
-
-            Ptr<Packet> nextPayload =
-              BuildRoutingUpdatePayload (
-                snapshot.updateSequence,
-                snapshot.currentUpdateSection,
-                snapshot.totalUpdateSections);
-
-            std::cout << "[NWK " << m_nodeId
-                      << "] RoutingSnapshot UPDATE ACKed;"
-                      << " sending next section="
-                      << unsigned (
-                          snapshot
-                            .currentUpdateSection)
-                      << "/"
-                      << unsigned (
-                          snapshot
-                            .totalUpdateSections)
-                      << " neighbor=" << neighbor
-                      << " routingSequence="
-                      << snapshot.updateSequence
-                      << std::endl;
-
-            m_hop->SendRoutingControl (
-              neighbor,
-              nextPayload);
-
-            ArmRoutingSnapshotWatchdog (
-                neighbor,
-                "awaiting-update-section-ack");
-
-            return;
-          }
-
-        Ptr<Packet> flushPayload =
-          BuildRoutingMarkerPayload (
-            CsrRoutingOperation::Flush,
-            snapshot.flushSequence);
-
-        std::cout << "[NWK " << m_nodeId
-                  << "] RoutingSnapshot final UPDATE ACKed;"
-                  << " sending FLUSH"
-                  << " neighbor=" << neighbor
-                  << " routingSequence="
-                  << snapshot.flushSequence
-                  << std::endl;
-
-        m_hop->SendRoutingControl (
-          neighbor,
-          flushPayload);
-
-        ArmRoutingSnapshotWatchdog (
-          neighbor,
-          "awaiting-flush-ack");
-
-        return;
-      }
-
-    if (operation ==
-          CsrRoutingOperation::Flush &&
-        routingSequence ==
-          snapshot.flushSequence)
+    if (snapshot.ackedSections.size () ==
+        snapshot.totalSections)
       {
         if (snapshot.watchdogEvent.IsPending ())
           {
@@ -1888,10 +1853,11 @@ public:
         snapshot.active = false;
 
         std::cout << "[NWK " << m_nodeId
-                  << "] Reliable RoutingSnapshot completed"
+                  << "] Reliable ARL RoutingSnapshot completed"
                   << " neighbor=" << neighbor
-                  << " finalSequence="
-                  << routingSequence
+                  << " routingSequence=" << routingSequence
+                  << " sections="
+                  << unsigned (snapshot.totalSections)
                   << std::endl;
 
         // Resume any automatic route propagation that
@@ -2126,10 +2092,27 @@ private:
     uint32_t linkCost);
 
   void ProcessArlRouteMessage (const CsrHelloHeader &hh,
+                              Ptr<Packet> routingPayload,
                               uint16_t helloSrc,
                               double pathlossDb,
                               double snrDb,
                               uint32_t linkCost);
+
+  void ProcessArlRoutingSection (
+    const CsrHelloHeader &hh,
+    Ptr<Packet> routingPayload,
+    uint16_t helloSrc,
+    double pathlossDb,
+    double snrDb,
+    uint32_t linkCost);
+
+  void ApplyCompleteArlRoutingMessage (
+    uint16_t helloSrc,
+    uint32_t routingSequence,
+    const std::vector<CsrArlRoutingMessage::Record> &records,
+    double pathlossDb,
+    double snrDb,
+    uint32_t linkCost);
 
   void ProcessDiscover (const CsrHelloHeader &hh,
                         uint16_t helloSrc,
@@ -2232,20 +2215,23 @@ private:
     uint16_t routingTarget =
       CSR_BROADCAST_ID);
 
+  std::vector<Ptr<Packet>>
+  BuildArlRoutingSnapshotPayloads (
+    uint32_t routingSequence);
+
+  Ptr<Packet> BuildArlRoutingSectionPayload (
+    const std::vector<uint8_t> &sectionBytes,
+    uint32_t routingSequence,
+    uint8_t routingSection,
+    uint8_t routingTotalSections);
+
   struct OutboundRoutingSnapshot
   {
     bool active {false};
 
-    uint32_t infoSequence {0};
-
-    // All Update sections share this sequence,
-    // matching the legacy routing message.
-    uint32_t updateSequence {0};
-
-    uint32_t flushSequence {0};
-
-    uint8_t totalUpdateSections {1};
-    uint8_t currentUpdateSection {0};
+    uint32_t routingSequence {0};
+    uint8_t totalSections {0};
+    std::set<uint8_t> ackedSections;
 
     EventId watchdogEvent;
 
@@ -2567,6 +2553,7 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
     // ------------------------------------------------------------
 
   ProcessArlRouteMessage (hh,
+                        helloPayload,
                         src,
                         pathlossDb,
                         snrDb,
@@ -2600,6 +2587,7 @@ CsrNetLayer::ArlRouteMsgTypeName (CsrArlRouteMsgType t) const
 
 void
 CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
+                                      Ptr<Packet> routingPayload,
                                       uint16_t helloSrc,
                                       double pathlossDb,
                                       double snrDb,
@@ -2620,7 +2608,30 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
         break;
 
       case CsrArlRouteMsgType::RoutingUpdate:
-        ProcessRoutingUpdate (hh, helloSrc, pathlossDb, snrDb, linkCost);
+        if (routingPayload != nullptr &&
+            routingPayload->GetSize () >=
+              CsrArlRoutingMessage::SECTION_PREFIX_SIZE)
+          {
+            ProcessArlRoutingSection (
+              hh,
+              routingPayload,
+              helloSrc,
+              pathlossDb,
+              snrDb,
+              linkCost);
+          }
+        else
+          {
+            // Retain the old CsrHelloHeader representation for focused
+            // compatibility scenarios and targeted route changes while full
+            // snapshots use the routes.c byte stream.
+            ProcessRoutingUpdate (
+              hh,
+              helloSrc,
+              pathlossDb,
+              snrDb,
+              linkCost);
+          }
         break;
 
       /*case CsrArlRouteMsgType::NeighborCheck:
@@ -2653,6 +2664,584 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
           }
         break;
       }
+}
+
+void
+CsrNetLayer::ProcessArlRoutingSection (
+  const CsrHelloHeader &hh,
+  Ptr<Packet> routingPayload,
+  uint16_t helloSrc,
+  double pathlossDb,
+  double snrDb,
+  uint32_t linkCost)
+{
+  std::vector<uint8_t> bytes (routingPayload->GetSize ());
+  routingPayload->CopyData (bytes.data (), bytes.size ());
+
+  CsrArlRoutingMessage::Section section;
+  std::string error;
+
+  if (!CsrArlRoutingMessage::DecodeSection (
+        bytes,
+        section,
+        &error))
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Rejecting malformed ARL routing section"
+                << " from=" << helloSrc
+                << " reason=" << error
+                << std::endl;
+      return;
+    }
+
+  // The CsrHelloHeader is an ns-3/HOP envelope.  The routes.c prefix remains
+  // authoritative, but disagreement means the frame was assembled wrongly.
+  if (hh.GetRoutingSequence () != section.sequence ||
+      hh.GetRoutingSection () != section.section ||
+      hh.GetRoutingTotalSections () != section.totalSections)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Rejecting ARL routing envelope/prefix mismatch"
+                << " from=" << helloSrc
+                << " prefixSequence=" << section.sequence
+                << " envelopeSequence=" << hh.GetRoutingSequence ()
+                << " prefixSection=" << unsigned (section.section)
+                << "/" << unsigned (section.totalSections)
+                << " envelopeSection="
+                << unsigned (hh.GetRoutingSection ())
+                << "/"
+                << unsigned (hh.GetRoutingTotalSections ())
+                << std::endl;
+      return;
+    }
+
+  auto neighborIt = m_nwkNeighbors.find (helloSrc);
+  if (neighborIt == m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &neighbor = neighborIt->second;
+  NwkNeighborEntry::ArlRoutingReassembly &message =
+    neighbor.arlRoutingReassemblies[section.sequence];
+
+  if (message.totalSections == 0)
+    {
+      message.totalSections = section.totalSections;
+      message.firstReceived = Simulator::Now ();
+    }
+  else if (message.totalSections != section.totalSections)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Rejecting ARL section with changed total"
+                << " from=" << helloSrc
+                << " routingSequence=" << section.sequence
+                << " expectedTotal="
+                << unsigned (message.totalSections)
+                << " receivedTotal="
+                << unsigned (section.totalSections)
+                << std::endl;
+      return;
+    }
+
+  auto existing = message.sectionBodies.find (section.section);
+  if (existing != message.sectionBodies.end ())
+    {
+      bool identical = existing->second == section.body;
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring "
+                << (identical ? "duplicate" : "conflicting")
+                << " ARL routing section"
+                << " from=" << helloSrc
+                << " routingSequence=" << section.sequence
+                << " section=" << unsigned (section.section)
+                << std::endl;
+      return;
+    }
+
+  message.sectionBodies.emplace (
+    section.section,
+    std::move (section.body));
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Buffered ARL routing section"
+            << " from=" << helloSrc
+            << " routingSequence=" << section.sequence
+            << " section=" << unsigned (section.section)
+            << "/" << unsigned (section.totalSections)
+            << " buffered=" << message.sectionBodies.size ()
+            << std::endl;
+
+  if (message.sectionBodies.size () !=
+      message.totalSections)
+    {
+      return;
+    }
+
+  std::vector<uint8_t> recordStream;
+  for (uint32_t index = 0;
+       index < message.totalSections;
+       ++index)
+    {
+      auto bodyIt = message.sectionBodies.find (
+        static_cast<uint8_t> (index));
+
+      if (bodyIt == message.sectionBodies.end ())
+        {
+          return;
+        }
+
+      recordStream.insert (
+        recordStream.end (),
+        bodyIt->second.begin (),
+        bodyIt->second.end ());
+    }
+
+  std::vector<CsrArlRoutingMessage::Record> records;
+  if (!CsrArlRoutingMessage::ParseRecordStream (
+        recordStream,
+        records,
+        &error))
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Rejecting complete malformed ARL routing message"
+                << " from=" << helloSrc
+                << " routingSequence=" << section.sequence
+                << " reason=" << error
+                << std::endl;
+      neighbor.arlRoutingReassemblies.erase (
+        section.sequence);
+      return;
+    }
+
+  // Remove the reassembly state before applying records.  No route or INFO
+  // state was touched while any section was missing.
+  neighbor.arlRoutingReassemblies.erase (section.sequence);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Reassembled complete ARL routing message"
+            << " from=" << helloSrc
+            << " routingSequence=" << section.sequence
+            << " sections=" << unsigned (section.totalSections)
+            << " recordBytes=" << recordStream.size ()
+            << " records=" << records.size ()
+            << std::endl;
+
+  ApplyCompleteArlRoutingMessage (
+    helloSrc,
+    section.sequence,
+    records,
+    pathlossDb,
+    snrDb,
+    linkCost);
+}
+
+void
+CsrNetLayer::ApplyCompleteArlRoutingMessage (
+  uint16_t helloSrc,
+  uint32_t routingSequence,
+  const std::vector<CsrArlRoutingMessage::Record> &records,
+  double pathlossDb,
+  double snrDb,
+  uint32_t linkCost)
+{
+  (void) snrDb;
+
+  auto neighborIt = m_nwkNeighbors.find (helloSrc);
+  if (neighborIt == m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &neighbor = neighborIt->second;
+  bool sawFlush = false;
+
+  auto isIncomingNewer = [routingSequence] (
+    bool currentValid,
+    uint32_t currentSequence) {
+      return !currentValid ||
+        CompareRoutingSequence (
+          currentSequence,
+          routingSequence) < 0;
+    };
+
+  for (const auto &record : records)
+    {
+      switch (record.operation)
+        {
+        case CsrRoutingOperation::Request:
+          std::cout << "[NWK " << m_nodeId
+                    << "] Applying ARL REQUEST"
+                    << " from=" << helloSrc
+                    << " routingSequence=" << routingSequence
+                    << std::endl;
+
+          if (m_routingSnapshotResponseEnabled)
+            {
+              Simulator::Schedule (
+                MilliSeconds (20),
+                &CsrNetLayer::StartReliableRoutingSnapshot,
+                this,
+                helloSrc);
+            }
+          break;
+
+        case CsrRoutingOperation::Info:
+          if (isIncomingNewer (
+                neighbor.routingInfoValid,
+                neighbor.routingInfoSequence))
+            {
+              neighbor.routingInfoValid = true;
+              neighbor.routingInfoSequence = routingSequence;
+              neighbor.remoteMinSpeedKbps =
+                record.info.minSpeedKbps;
+              neighbor.remoteMaxSpeedKbps =
+                record.info.maxSpeedKbps;
+              neighbor.remoteMinPowerDbmX10 =
+                record.info.minPowerDbmX10;
+              neighbor.remoteMaxPowerDbmX10 =
+                record.info.maxPowerDbmX10;
+              neighbor.remoteLinkMarginDbX10 =
+                record.info.linkMarginDbX10;
+              neighbor.remoteLowPowerDbmX10 =
+                record.info.lowPowerDbmX10;
+              neighbor.remoteTempLowCx10 =
+                record.info.tempLowCx10;
+              neighbor.remoteTempHighCx10 =
+                record.info.tempHighCx10;
+
+              std::cout << "[NWK " << m_nodeId
+                        << "] Applied ARL INFO"
+                        << " from=" << helloSrc
+                        << " routingSequence=" << routingSequence
+                        << std::endl;
+            }
+          break;
+
+        case CsrRoutingOperation::Update:
+          {
+            if (record.nodeId >= CSR_BROADCAST_ID ||
+                record.nodeId == m_nodeId ||
+                record.nodeId == helloSrc)
+              {
+                std::cout << "[NWK " << m_nodeId
+                          << "] Ignoring unsupported ARL UPDATE node"
+                          << " node24=" << record.nodeId
+                          << " from=" << helloSrc
+                          << std::endl;
+                break;
+              }
+
+            if (record.hopCount >= CSR_MAX_ROUTE_PATH_HOPS)
+              {
+                std::cout << "[NWK " << m_nodeId
+                          << "] Ignoring ARL UPDATE beyond model path limit"
+                          << " dst=" << record.nodeId
+                          << " hopCount=" << record.hopCount
+                          << std::endl;
+                break;
+              }
+
+            bool pathSupported = true;
+            bool containsLocalNode = false;
+            std::vector<uint16_t> advertisedPath;
+            advertisedPath.reserve (record.path.size ());
+
+            for (uint32_t pathNode : record.path)
+              {
+                if (pathNode >= CSR_BROADCAST_ID)
+                  {
+                    pathSupported = false;
+                    break;
+                  }
+
+                uint16_t node = static_cast<uint16_t> (pathNode);
+                advertisedPath.push_back (node);
+                if (node == m_nodeId)
+                  {
+                    containsLocalNode = true;
+                  }
+              }
+
+            if (!pathSupported)
+              {
+                std::cout << "[NWK " << m_nodeId
+                          << "] Ignoring ARL UPDATE with unsupported 24-bit path"
+                          << " dst=" << record.nodeId
+                          << std::endl;
+                break;
+              }
+
+            uint16_t destination =
+              static_cast<uint16_t> (record.nodeId);
+
+            RouteEntry *existingRoute = nullptr;
+            for (auto &route : m_routes)
+              {
+                if (!route.immediate &&
+                    route.nwkDst == destination &&
+                    route.learnedFrom == helloSrc)
+                  {
+                    existingRoute = &route;
+                    break;
+                  }
+              }
+
+            if (existingRoute != nullptr &&
+                !isIncomingNewer (
+                  existingRoute->routingSequenceValid,
+                  existingRoute->routingSequence))
+              {
+                break;
+              }
+
+            if (containsLocalNode)
+              {
+                SelectedRouteState before =
+                  CaptureSelectedRouteState (destination);
+
+                if (existingRoute == nullptr)
+                  {
+                    RouteEntry tombstone;
+                    tombstone.nwkDst = destination;
+                    tombstone.nextHop = helloSrc;
+                    tombstone.learnedFrom = helloSrc;
+                    tombstone.capability = record.capability;
+                    tombstone.numHop = static_cast<uint8_t> (
+                      record.hopCount + 1);
+                    tombstone.advertisedCost = record.cost;
+                    tombstone.path = advertisedPath;
+                    tombstone.lastUpdated = Simulator::Now ();
+                    tombstone.valid = false;
+                    tombstone.routingSequenceValid = true;
+                    tombstone.routingSequence = routingSequence;
+                    m_routes.push_back (std::move (tombstone));
+                  }
+                else
+                  {
+                    existingRoute->valid = false;
+                    existingRoute->lastUpdated = Simulator::Now ();
+                    existingRoute->routingSequenceValid = true;
+                    existingRoute->routingSequence = routingSequence;
+                  }
+
+                SelectedRouteState after =
+                  CaptureSelectedRouteState (destination);
+                if (!SameSelectedRouteState (before, after))
+                  {
+                    MarkSelectedRouteChanged (
+                      destination,
+                      "ARL looped UPDATE");
+                  }
+                break;
+              }
+
+            std::vector<uint16_t> candidatePath;
+            candidatePath.reserve (advertisedPath.size () + 1);
+            candidatePath.push_back (helloSrc);
+            candidatePath.insert (
+              candidatePath.end (),
+              advertisedPath.begin (),
+              advertisedPath.end ());
+
+            AddOrUpdateRoute (
+              destination,
+              helloSrc,
+              false,
+              static_cast<uint8_t> (record.hopCount + 1),
+              pathlossDb,
+              linkCost,
+              record.cost,
+              helloSrc,
+              record.capability,
+              candidatePath);
+
+            for (auto &route : m_routes)
+              {
+                if (!route.immediate &&
+                    route.nwkDst == destination &&
+                    route.learnedFrom == helloSrc)
+                  {
+                    route.routingSequenceValid = true;
+                    route.routingSequence = routingSequence;
+                    break;
+                  }
+              }
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Applied ARL UPDATE"
+                      << " from=" << helloSrc
+                      << " dst=" << destination
+                      << " advertisedHops=" << record.hopCount
+                      << " advertisedCost=" << record.cost
+                      << " routingSequence=" << routingSequence
+                      << std::endl;
+            break;
+          }
+
+        case CsrRoutingOperation::Delete:
+          {
+            if (record.nodeId >= CSR_BROADCAST_ID ||
+                record.nodeId == m_nodeId)
+              {
+                break;
+              }
+
+            uint16_t destination =
+              static_cast<uint16_t> (record.nodeId);
+            SelectedRouteState before =
+              CaptureSelectedRouteState (destination);
+            RouteEntry *matchingRoute = nullptr;
+
+            for (auto &route : m_routes)
+              {
+                if (!route.immediate &&
+                    route.nwkDst == destination &&
+                    route.learnedFrom == helloSrc)
+                  {
+                    matchingRoute = &route;
+                    break;
+                  }
+              }
+
+            if (matchingRoute == nullptr)
+              {
+                RouteEntry tombstone;
+                tombstone.nwkDst = destination;
+                tombstone.nextHop = helloSrc;
+                tombstone.learnedFrom = helloSrc;
+                tombstone.lastUpdated = Simulator::Now ();
+                tombstone.valid = false;
+                tombstone.routingSequenceValid = true;
+                tombstone.routingSequence = routingSequence;
+                m_routes.push_back (std::move (tombstone));
+              }
+            else if (isIncomingNewer (
+                       matchingRoute->routingSequenceValid,
+                       matchingRoute->routingSequence))
+              {
+                matchingRoute->valid = false;
+                matchingRoute->lastUpdated = Simulator::Now ();
+                matchingRoute->routingSequenceValid = true;
+                matchingRoute->routingSequence = routingSequence;
+              }
+
+            SelectedRouteState after =
+              CaptureSelectedRouteState (destination);
+            if (!SameSelectedRouteState (before, after))
+              {
+                MarkSelectedRouteChanged (
+                  destination,
+                  "ARL DELETE");
+              }
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Applied ARL DELETE"
+                      << " from=" << helloSrc
+                      << " dst=" << destination
+                      << " routingSequence=" << routingSequence
+                      << std::endl;
+            break;
+          }
+
+        case CsrRoutingOperation::Flush:
+          {
+            sawFlush = true;
+            std::map<uint16_t, SelectedRouteState> beforeByDestination;
+            uint32_t invalidated = 0;
+
+            for (auto &route : m_routes)
+              {
+                if (route.immediate ||
+                    route.learnedFrom != helloSrc ||
+                    !isIncomingNewer (
+                      route.routingSequenceValid,
+                      route.routingSequence))
+                  {
+                    continue;
+                  }
+
+                if (beforeByDestination.find (route.nwkDst) ==
+                    beforeByDestination.end ())
+                  {
+                    beforeByDestination.emplace (
+                      route.nwkDst,
+                      CaptureSelectedRouteState (route.nwkDst));
+                  }
+
+                if (route.valid)
+                  {
+                    invalidated++;
+                  }
+                route.valid = false;
+                route.lastUpdated = Simulator::Now ();
+                route.routingSequenceValid = true;
+                route.routingSequence = routingSequence;
+              }
+
+            if (isIncomingNewer (
+                  neighbor.routingInfoValid,
+                  neighbor.routingInfoSequence))
+              {
+                neighbor.routingInfoValid = false;
+                neighbor.routingInfoSequence = routingSequence;
+              }
+
+            for (const auto &entry : beforeByDestination)
+              {
+                SelectedRouteState after =
+                  CaptureSelectedRouteState (entry.first);
+                if (!SameSelectedRouteState (entry.second, after))
+                  {
+                    MarkSelectedRouteChanged (
+                      entry.first,
+                      "ARL FLUSH");
+                  }
+              }
+
+            std::cout << "[NWK " << m_nodeId
+                      << "] Applied ARL FLUSH"
+                      << " from=" << helloSrc
+                      << " routingSequence=" << routingSequence
+                      << " routesInvalidated=" << invalidated
+                      << std::endl;
+            break;
+          }
+
+        case CsrRoutingOperation::None:
+        default:
+          break;
+        }
+    }
+
+  if (!neighbor.routingSequenceValid ||
+      CompareRoutingSequence (
+        neighbor.routingSequence,
+        routingSequence) < 0)
+    {
+      neighbor.routingSequenceValid = true;
+      neighbor.routingSequence = routingSequence;
+    }
+
+  if (sawFlush)
+    {
+      neighbor.routingSnapshotActive = false;
+      neighbor.routingSnapshotBufferedUpdates.clear ();
+      neighbor.routingSnapshotSeenDestinations.clear ();
+
+      if (neighbor.routingRequestPending)
+        {
+          if (neighbor.routingRequestTimeoutEvent.IsPending ())
+            {
+              Simulator::Cancel (
+                neighbor.routingRequestTimeoutEvent);
+            }
+          neighbor.routingRequestPending = false;
+          neighbor.routingRequestRetryCount = 0;
+        }
+    }
+
+  ScheduleCheckNwkQueue ();
 }
 
 std::set<uint16_t>
@@ -3815,6 +4404,8 @@ CsrNetLayer::CheckNeighborFreshness ()
             .routingSnapshotBufferedUpdates
             .clear ();
 
+          ne.arlRoutingReassemblies.clear ();
+
           // Discard any partially received multi-section Update.
           ne.routingUpdateSectionStateValid = false;
           ne.routingUpdateSectionSequence = 0;
@@ -4890,8 +5481,6 @@ CsrNetLayer::DiscoveryCooldownOver ()
 bool
 CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
 {
-  static constexpr uint8_t MAX_ADVERTISED_HOPS = 8;
-
   if (m_nodeType == CsrNodeType::Ordinary)
     {
       return false;
@@ -4922,11 +5511,6 @@ CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
     }
 
   if (re.numHop == 0)
-    {
-      return false;
-    }
-
-  if (re.numHop >= MAX_ADVERTISED_HOPS)
     {
       return false;
     }
@@ -5421,6 +6005,185 @@ CsrNetLayer::BuildRoutingMarkerPayload (
   return packet;
 }
 
+Ptr<Packet>
+CsrNetLayer::BuildArlRoutingSectionPayload (
+  const std::vector<uint8_t> &sectionBytes,
+  uint32_t routingSequence,
+  uint8_t routingSection,
+  uint8_t routingTotalSections)
+{
+  Ptr<Packet> packet = sectionBytes.empty ()
+    ? Create<Packet> ()
+    : Create<Packet> (sectionBytes.data (), sectionBytes.size ());
+
+  CsrHelloHeader hh;
+  hh.SetNodeId (m_nodeId);
+  hh.SetHelloSeq (++m_routingControlHeaderSeq);
+  hh.SetNodeType (m_nodeType);
+  hh.SetSpeedKey (m_minSpeedKey);
+
+  double s0PowerDbm =
+    m_rxS0BaseLevelDbm + m_linkMarginDb;
+
+  hh.SetRxPowerDbmX10 (
+    static_cast<int16_t> (
+      std::round (s0PowerDbm * 10.0)));
+  hh.SetActiveNodes (
+    static_cast<uint8_t> (GetActiveNodeCount ()));
+  hh.SetArlRouteMsgType (
+    CsrArlRouteMsgType::RoutingUpdate);
+  hh.SetNeighborCheckType (CsrNeighborCheckType::None);
+  hh.SetDiscoverType (CsrDiscoverType::None);
+  hh.SetDiscoverySequence (0);
+
+  // These envelope fields are redundant with the six-byte routes.c prefix.
+  // HOP uses them only to report per-section reliable completion to NWK.
+  hh.SetRoutingSequence (routingSequence);
+  hh.SetRoutingSection (routingSection);
+  hh.SetRoutingTotalSections (routingTotalSections);
+  hh.SetRoutingOperation (CsrRoutingOperation::Update);
+  hh.ClearChirpNeighbors ();
+  hh.ClearAdvertisedRoutes ();
+
+  packet->AddHeader (hh);
+  return packet;
+}
+
+std::vector<Ptr<Packet>>
+CsrNetLayer::BuildArlRoutingSnapshotPayloads (
+  uint32_t routingSequence)
+{
+  CsrArlRoutingMessage::Builder builder;
+  CsrHelloHeader::RoutingInfo info;
+
+  info.minSpeedKbps =
+    static_cast<uint16_t> (
+      std::clamp (m_minCfgSpeedKbps, 0, 65535));
+  info.maxSpeedKbps =
+    static_cast<uint16_t> (
+      std::clamp (m_maxCfgSpeedKbps, 0, 65535));
+  info.minPowerDbmX10 =
+    static_cast<int16_t> (
+      std::round (m_minTxPowerDbm * 10.0));
+  info.maxPowerDbmX10 =
+    static_cast<int16_t> (
+      std::round (m_maxTxPowerDbm * 10.0));
+  info.linkMarginDbX10 =
+    static_cast<int16_t> (
+      std::round (m_linkMarginDb * 10.0));
+  info.lowPowerDbmX10 =
+    static_cast<int16_t> (
+      std::round (m_txAmpBreakpointDbm * 10.0));
+  info.tempLowCx10 = m_tempLowCx10;
+  info.tempHighCx10 = m_tempHighCx10;
+
+  // routesProcess() constructs one INFO + UPDATE* + FLUSH record stream.
+  builder.AddInfo (info);
+
+  uint32_t advertisedRoutes = 0;
+
+  for (const auto &route : m_routes)
+    {
+      const RouteEntry *best = FindBestRoute (route.nwkDst);
+
+      if (best != &route || !ShouldAdvertiseRoute (route))
+        {
+          continue;
+        }
+
+      std::vector<uint32_t> path;
+      path.reserve (route.numHop);
+
+      for (uint16_t pathNode : route.path)
+        {
+          if (path.size () >= route.numHop)
+            {
+              break;
+            }
+          path.push_back (pathNode);
+        }
+
+      if (path.empty () && route.numHop > 0)
+        {
+          path.push_back (route.nextHop);
+        }
+
+      // Old static/test route entries may not carry the full path list.  ARL
+      // always emits exactly numHops 24-bit identifiers, ending at the
+      // advertised destination.
+      while (path.size () < route.numHop)
+        {
+          path.push_back (route.nwkDst);
+        }
+
+      std::string error;
+      if (!builder.AddUpdate (
+            route.nwkDst,
+            route.capability,
+            route.numHop,
+            route.cost,
+            path,
+            &error))
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Skipping ARL snapshot route"
+                    << " dst=" << route.nwkDst
+                    << " reason=" << error
+                    << std::endl;
+          continue;
+        }
+
+      advertisedRoutes++;
+    }
+
+  builder.AddFlush ();
+
+  std::vector<std::vector<uint8_t>> sectionBytes;
+  std::string error;
+
+  if (!builder.BuildSections (
+        routingSequence,
+        sectionBytes,
+        &error))
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Failed to build ARL routing snapshot"
+                << " routingSequence=" << routingSequence
+                << " reason=" << error
+                << std::endl;
+      return {};
+    }
+
+  std::vector<Ptr<Packet>> payloads;
+  payloads.reserve (sectionBytes.size ());
+
+  for (uint32_t index = 0;
+       index < sectionBytes.size ();
+       ++index)
+    {
+      payloads.push_back (
+        BuildArlRoutingSectionPayload (
+          sectionBytes[index],
+          routingSequence,
+          static_cast<uint8_t> (index),
+          static_cast<uint8_t> (sectionBytes.size ())));
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Built ARL routing byte stream"
+            << " routingSequence=" << routingSequence
+            << " records=" << (advertisedRoutes + 2)
+            << " advertisedRoutes=" << advertisedRoutes
+            << " recordBytes="
+            << builder.GetRecordStream ().size ()
+            << " sections=" << payloads.size ()
+            << " maxSectionBytes="
+            << CsrArlRoutingMessage::MAX_SECTION_SIZE
+            << std::endl;
+
+  return payloads;
+}
+
 void
 CsrNetLayer::StartReliableRoutingSnapshot (
   uint16_t neighbor)
@@ -5465,65 +6228,55 @@ CsrNetLayer::StartReliableRoutingSnapshot (
       return;
     }
 
-  snapshot.active = true;
-
-  static constexpr uint32_t
-  ROUTES_PER_SECTION = 8;
-
-  uint32_t advertisedRouteCount =
-    CountAdvertisableSelectedRoutes ();
-
-  uint32_t calculatedSections =
-    std::max<uint32_t> (
-      1,
-      (advertisedRouteCount +
-        ROUTES_PER_SECTION - 1) /
-        ROUTES_PER_SECTION);
-
-  snapshot.totalUpdateSections =
-    static_cast<uint8_t> (
-      std::min<uint32_t> (
-        255,
-        calculatedSections));
-
-  snapshot.currentUpdateSection = 0;
-
   uint32_t snapshotSequence =
     NextRoutingSequence ();
 
-  snapshot.infoSequence =
-    snapshotSequence;
+  std::vector<Ptr<Packet>> payloads =
+    BuildArlRoutingSnapshotPayloads (
+      snapshotSequence);
 
-  snapshot.updateSequence =
-    snapshotSequence;
+  if (payloads.empty ())
+    {
+      return;
+    }
 
-  snapshot.flushSequence =
-    snapshotSequence;
+  snapshot.active = true;
+  snapshot.routingSequence = snapshotSequence;
+  snapshot.totalSections =
+    static_cast<uint8_t> (payloads.size ());
+  snapshot.ackedSections.clear ();
 
   std::cout << "[NWK " << m_nodeId
-            << "] Starting reliable RoutingSnapshot"
+            << "] Starting reliable ARL RoutingSnapshot"
             << " neighbor=" << neighbor
-            << " infoSequence="
-            << snapshot.infoSequence
-            << " updateSequence="
-            << snapshot.updateSequence
-            << " flushSequence="
-            << snapshot.flushSequence
-            << " advertisedRoutes="
-            << advertisedRouteCount
-            << " updateSections="
-            << unsigned (
-                snapshot.totalUpdateSections)
+            << " routingSequence="
+            << snapshot.routingSequence
+            << " sections="
+            << unsigned (snapshot.totalSections)
             << std::endl;
 
-  Ptr<Packet> infoPayload =
-    BuildRoutingMarkerPayload (
-      CsrRoutingOperation::Info,
-      snapshot.infoSequence);
+  // All sections are independent HOP reliable transactions.  routes.c
+  // queues every section immediately; it never waits for an INFO or prior
+  // UPDATE ACK before releasing the next section.
+  for (uint32_t section = 0;
+       section < payloads.size ();
+       ++section)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Sending ARL RoutingSnapshot section="
+                << section << "/" << payloads.size ()
+                << " neighbor=" << neighbor
+                << " routingSequence=" << snapshotSequence
+                << std::endl;
 
-  m_hop->SendRoutingControl (
+      m_hop->SendRoutingControl (
+        neighbor,
+        payloads[section]);
+    }
+
+  ArmRoutingSnapshotWatchdog (
     neighbor,
-    infoPayload);
+    "awaiting-independent-section-acks");
 }
 
 void
@@ -5625,22 +6378,16 @@ RoutingSnapshotWatchdogExpired (
     }
 
   std::cout << "[NWK " << m_nodeId
-            << "] RoutingSnapshot watchdog expired"
+            << "] ARL RoutingSnapshot watchdog expired"
             << " neighbor=" << neighbor
             << " phase="
             << snapshot.watchdogPhase
-            << " infoSequence="
-            << snapshot.infoSequence
-            << " updateSequence="
-            << snapshot.updateSequence
-            << " section="
-            << unsigned (
-                snapshot.currentUpdateSection)
+            << " routingSequence="
+            << snapshot.routingSequence
+            << " ackedSections="
+            << snapshot.ackedSections.size ()
             << "/"
-            << unsigned (
-                snapshot.totalUpdateSections)
-            << " flushSequence="
-            << snapshot.flushSequence
+            << unsigned (snapshot.totalSections)
             << std::endl;
 
   snapshot.active = false;
@@ -6335,6 +7082,72 @@ CsrNetLayer::GetSelectedRouteCost (
 
   costOut = best->cost;
   return true;
+}
+
+bool
+CsrNetLayer::GetNeighborRoutingInfo (
+  uint16_t neighbor,
+  CsrHelloHeader::RoutingInfo &infoOut) const
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+
+  if (it == m_nwkNeighbors.end () ||
+      !it->second.routingInfoValid)
+    {
+      return false;
+    }
+
+  const NwkNeighborEntry &entry = it->second;
+  infoOut.minSpeedKbps = entry.remoteMinSpeedKbps;
+  infoOut.maxSpeedKbps = entry.remoteMaxSpeedKbps;
+  infoOut.minPowerDbmX10 = entry.remoteMinPowerDbmX10;
+  infoOut.maxPowerDbmX10 = entry.remoteMaxPowerDbmX10;
+  infoOut.linkMarginDbX10 = entry.remoteLinkMarginDbX10;
+  infoOut.lowPowerDbmX10 = entry.remoteLowPowerDbmX10;
+  infoOut.tempLowCx10 = entry.remoteTempLowCx10;
+  infoOut.tempHighCx10 = entry.remoteTempHighCx10;
+  return true;
+}
+
+uint32_t
+CsrNetLayer::GetPendingArlRoutingMessageCount (
+  uint16_t neighbor) const
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  return it == m_nwkNeighbors.end ()
+    ? 0
+    : static_cast<uint32_t> (
+        it->second.arlRoutingReassemblies.size ());
+}
+
+uint8_t
+CsrNetLayer::GetOutboundRoutingSnapshotTotalSections (
+  uint16_t neighbor) const
+{
+  auto it = m_outboundRoutingSnapshots.find (neighbor);
+  return it == m_outboundRoutingSnapshots.end ()
+    ? 0
+    : it->second.totalSections;
+}
+
+uint32_t
+CsrNetLayer::GetOutboundRoutingSnapshotAckedSections (
+  uint16_t neighbor) const
+{
+  auto it = m_outboundRoutingSnapshots.find (neighbor);
+  return it == m_outboundRoutingSnapshots.end ()
+    ? 0
+    : static_cast<uint32_t> (
+        it->second.ackedSections.size ());
+}
+
+bool
+CsrNetLayer::IsOutboundRoutingSnapshotActive (
+  uint16_t neighbor) const
+{
+  auto it = m_outboundRoutingSnapshots.find (neighbor);
+  return it != m_outboundRoutingSnapshots.end () &&
+         it->second.active;
 }
 
 void
