@@ -107,10 +107,14 @@ ARL routing byte-stream and reassembly parity test:
 3. Run: ./ns3 run csr-nwk-arl-routing-stream-smoke
 4. Expected: PASS: ARL routing byte-stream parity test
 
-Autonomous ARL routing convergence test:
+Gateway-driven discovery/SNMP convergence test:
 1. Copy csr-nwk-autonomous-convergence-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-nwk-autonomous-convergence-smoke
 3. Run: ./ns3 run csr-nwk-autonomous-convergence-smoke
-4. Expected: PASS: autonomous ARL routing convergence test
+4. Expected: PASS: gateway-driven discovery/SNMP convergence test
+
+This scenario starts only the Gateway at the legacy 10-second offset. It
+checks the three-broadcast local-discovery cadence, ordered one-hop SNMP
+START/DONE handoffs, autonomous ARL convergence, and two-hop DATA delivery.
 
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.

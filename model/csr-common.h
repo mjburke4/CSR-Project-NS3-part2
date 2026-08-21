@@ -11,6 +11,7 @@
 #include <vector>
 #include <utility>
 #include <functional>
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 
@@ -53,7 +54,8 @@ enum CsrPktType : uint8_t
   CSR_PKT_HELLO           = 3,
   CSR_PKT_DISCOVER        = 4,
   CSR_PKT_NEIGHBOR_CHECK  = 5,
-  CSR_PKT_ROUTING_CONTROL = 6
+  CSR_PKT_ROUTING_CONTROL = 6,
+  CSR_PKT_SNMP            = 7
 };
 
 enum CsrDestType : uint8_t
@@ -61,6 +63,12 @@ enum CsrDestType : uint8_t
   CSR_DEST_UNICAST   = 0,
   CSR_DEST_BROADCAST = 1,
   CSR_DEST_MULTICAST = 2
+};
+
+enum CsrSnmpCommand : uint8_t
+{
+  CSR_SNMP_START_DISCOVERY = 1,
+  CSR_SNMP_DISCOVERY_DONE  = 2
 };
 
 // ------------------------------------------------------------
@@ -545,6 +553,139 @@ private:
   uint16_t m_src;
   uint16_t m_dst;
   uint8_t  m_dscp;
+};
+
+// ------------------------------------------------------------
+// CsrSnmpHeader: legacy NWK discovery-coordination message
+// ------------------------------------------------------------
+
+class CsrSnmpHeader : public Header
+{
+public:
+  static constexpr uint8_t MAX_NODES = 10;
+
+  CsrSnmpHeader ()
+    : m_source (0),
+      m_destination (0),
+      m_destinationType (CSR_DEST_UNICAST),
+      m_command (CSR_SNMP_START_DISCOVERY),
+      m_value (0)
+  {}
+
+  static TypeId GetTypeId (void)
+  {
+    static TypeId tid = TypeId ("ns3::CsrSnmpHeader")
+      .SetParent<Header> ()
+      .SetGroupName ("Csr")
+      .AddConstructor<CsrSnmpHeader> ();
+    return tid;
+  }
+
+  TypeId GetInstanceTypeId () const override
+  {
+    return GetTypeId ();
+  }
+
+  uint32_t GetSerializedSize () const override
+  {
+    // source(2) + destination(2) + destination type(1) + command(1)
+    // + value(4) + node count(1) + node IDs(2 each)
+    return 11 + 2 * static_cast<uint32_t> (m_nodes.size ());
+  }
+
+  void Serialize (Buffer::Iterator start) const override
+  {
+    start.WriteHtonU16 (m_source);
+    start.WriteHtonU16 (m_destination);
+    start.WriteU8 (m_destinationType);
+    start.WriteU8 (m_command);
+    start.WriteHtonU32 (static_cast<uint32_t> (m_value));
+    start.WriteU8 (static_cast<uint8_t> (m_nodes.size ()));
+
+    for (uint16_t node : m_nodes)
+      {
+        start.WriteHtonU16 (node);
+      }
+  }
+
+  uint32_t Deserialize (Buffer::Iterator start) override
+  {
+    m_source = start.ReadNtohU16 ();
+    m_destination = start.ReadNtohU16 ();
+    m_destinationType = start.ReadU8 ();
+    m_command = start.ReadU8 ();
+    m_value = static_cast<int32_t> (start.ReadNtohU32 ());
+
+    uint8_t nodeCount = start.ReadU8 ();
+    m_nodes.clear ();
+
+    for (uint8_t index = 0; index < nodeCount; ++index)
+      {
+        uint16_t node = start.ReadNtohU16 ();
+        if (m_nodes.size () < MAX_NODES)
+          {
+            m_nodes.push_back (node);
+          }
+      }
+
+    return 11 + 2 * static_cast<uint32_t> (nodeCount);
+  }
+
+  void Print (std::ostream &os) const override
+  {
+    os << "snmpSrc=" << m_source
+       << " snmpDst=" << m_destination
+       << " destType=" << unsigned (m_destinationType)
+       << " command=" << unsigned (m_command)
+       << " value=" << m_value
+       << " nodes=" << m_nodes.size ();
+  }
+
+  void SetSource (uint16_t source) { m_source = source; }
+  uint16_t GetSource () const { return m_source; }
+
+  void SetDestination (uint16_t destination)
+  {
+    m_destination = destination;
+  }
+  uint16_t GetDestination () const { return m_destination; }
+
+  void SetDestinationType (CsrDestType type)
+  {
+    m_destinationType = static_cast<uint8_t> (type);
+  }
+  CsrDestType GetDestinationType () const
+  {
+    return static_cast<CsrDestType> (m_destinationType);
+  }
+
+  void SetCommand (CsrSnmpCommand command)
+  {
+    m_command = static_cast<uint8_t> (command);
+  }
+  CsrSnmpCommand GetCommand () const
+  {
+    return static_cast<CsrSnmpCommand> (m_command);
+  }
+
+  void SetValue (int32_t value) { m_value = value; }
+  int32_t GetValue () const { return m_value; }
+
+  void SetNodes (const std::vector<uint16_t> &nodes)
+  {
+    m_nodes.assign (
+      nodes.begin (),
+      nodes.begin () + std::min<size_t> (nodes.size (), MAX_NODES));
+  }
+  const std::vector<uint16_t>& GetNodes () const { return m_nodes; }
+
+private:
+  uint16_t m_source;
+  uint16_t m_destination;
+  uint8_t m_destinationType;
+  uint8_t m_command;
+  int32_t m_value;
+  std::vector<uint16_t> m_nodes;
 };
 
 NS_LOG_COMPONENT_DEFINE ("CsrDemo");

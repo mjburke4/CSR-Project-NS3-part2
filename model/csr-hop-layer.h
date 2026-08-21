@@ -61,6 +61,12 @@ public:
     m_rxHelloFromHopCb = cb;
   }
 
+  void SetRxSnmpFromHopCallback (
+    Callback<void, Ptr<Packet>, uint16_t> cb)
+  {
+    m_rxSnmpFromHopCb = cb;
+  }
+
   // After SetRxFromHopCallback
   void SetNsdpDecrementCallback (Callback<void, uint16_t, uint16_t> cb)
   {
@@ -101,6 +107,9 @@ public:
   // App/NWK send
   void SendData (uint16_t dst, uint8_t dscp,
                  Ptr<Packet> payload, bool ack);
+
+  // Legacy br_SNMP bypasses ACK/resend and DATA flow control.
+  void SendSnmp (uint16_t hopDestination, Ptr<Packet> payload);
 
   // Called by MAC when frame arrives off-air
   void ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb);
@@ -394,6 +403,8 @@ private:
   Callback<void, uint16_t, uint16_t> m_nsdpDecrCb;
 
   Callback<void, Ptr<Packet>, uint16_t, double, double> m_rxHelloFromHopCb;
+
+  Callback<void, Ptr<Packet>, uint16_t> m_rxSnmpFromHopCb;
 
   Callback<bool, uint16_t, uint16_t> m_shouldDackCb;
 
@@ -740,6 +751,43 @@ void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
   m_mac->EnqueueTxFrame (helloPayload, CSR_BROADCAST_ID, 7, false);
 }
 
+void
+CsrHopLayer::SendSnmp (uint16_t hopDestination, Ptr<Packet> payload)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  // OPNET wraps br_SNMP in a non-ACKable br_Hop packet without allocating a
+  // reliable-HOP sequence number.  It also uses the configured minimum rate
+  // and maximum power instead of running adaptive link control.
+  CsrHeader header;
+  header.SetSrc (m_nodeId);
+  header.SetDst (hopDestination);
+  header.SetSeq (0);
+  header.SetDscp (0);
+  header.SetAckable (false);
+  header.SetType (CSR_PKT_SNMP);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetLinkControl (
+    static_cast<uint8_t> (m_minSpeed),
+    m_maxPower,
+    m_rxS0Base + m_linkMargin);
+
+  Ptr<Packet> frame = payload->Copy ();
+  frame->AddHeader (header);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX legacy SNMP"
+            << " hopDestination=" << hopDestination
+            << " ackable=0 dscp=0"
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (
+    frame,
+    hopDestination,
+    0,
+    false);
+}
+
 /*void
 CsrHopLayer::PrintNeighbors () const
 {
@@ -958,6 +1006,57 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
     }
 
   frame->RemoveHeader (hdr);
+
+  // br_hop forwards br_SNMP before update_neighbor().  Preserve that unusual
+  // path: even an addressed SNMP packet does not refresh the HOP neighbor
+  // table, and an overheard one is discarded without any link side effects.
+  if (hdr.GetType () == CSR_PKT_SNMP)
+    {
+      if (hdr.GetDst () != m_nodeId)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Overheard legacy SNMP from " << hdr.GetSrc ()
+                    << " for hop " << hdr.GetDst ()
+                    << " ignored without neighbor update"
+                    << std::endl;
+          return;
+        }
+
+      CsrSnmpHeader snmp;
+      if (!frame->PeekHeader (snmp))
+        {
+          NS_LOG_ERROR ("CsrHopLayer::ReceiveFromMac(): missing CsrSnmpHeader");
+          return;
+        }
+
+      bool forThisNode =
+        snmp.GetDestinationType () == CSR_DEST_BROADCAST ||
+        (snmp.GetDestinationType () == CSR_DEST_UNICAST &&
+         (snmp.GetDestination () == m_nodeId ||
+          snmp.GetDestination () == CSR_BROADCAST_ID));
+
+      if (forThisNode && !m_rxSnmpFromHopCb.IsNull ())
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] RX legacy SNMP from " << snmp.GetSource ()
+                    << " command="
+                    << unsigned (static_cast<uint8_t> (snmp.GetCommand ()))
+                    << std::endl;
+          m_rxSnmpFromHopCb (frame, hdr.GetSrc ());
+        }
+      else
+        {
+          // This intentionally does not relay a control message whose final
+          // destination lies beyond this hop.  That is the legacy behavior.
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop legacy SNMP finalDestination="
+                    << snmp.GetDestination ()
+                    << " after one-hop delivery"
+                    << std::endl;
+        }
+
+      return;
+    }
 
   // OPNET update_neighbor() runs for every packet successfully decoded by
   // MAC, before HOP checks whether the packet is addressed to this node.

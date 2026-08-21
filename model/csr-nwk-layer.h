@@ -12,11 +12,10 @@ class CsrNetLayer : public Object
 {
 public:
 
-  enum class DiscoveryState { IDLE, SCHEDULED, ACTIVE, COOLDOWN };
+  enum class DiscoveryState { IDLE, SCHEDULED, ACTIVE };
 
   DiscoveryState m_discState { DiscoveryState::IDLE };
-  EventId m_discoveryStartEvent, m_discoveryStopEvent, m_discoveryCooldownEvent;
-  Time m_discoveryCooldown { Seconds(5) }; // tune later
+  EventId m_discoveryStartEvent, m_discoveryStopEvent;
   EventId m_discoveryHelloEvent;
   Time m_discoveryHelloInterval { Seconds (1.0) };
   uint32_t m_routingSequence {0};
@@ -75,6 +74,52 @@ public:
               << std::endl;
   }
   bool IsDiscoveryActive () const { return m_discoveryActive; }
+
+  uint32_t GetDiscoveryStartCount () const
+  {
+    return m_discoveryStartCount;
+  }
+
+  uint32_t GetDiscoveryBroadcastCount () const
+  {
+    return m_discoveryBroadcastCount;
+  }
+
+  uint32_t GetSnmpStartSentCount () const
+  {
+    return m_snmpStartSentCount;
+  }
+
+  uint32_t GetSnmpStartReceivedCount () const
+  {
+    return m_snmpStartReceivedCount;
+  }
+
+  uint32_t GetSnmpDoneSentCount () const
+  {
+    return m_snmpDoneSentCount;
+  }
+
+  uint32_t GetSnmpDoneReceivedCount () const
+  {
+    return m_snmpDoneReceivedCount;
+  }
+
+  uint32_t GetPendingDiscoveryCount () const
+  {
+    return static_cast<uint32_t> (
+      std::count_if (
+        m_discoveryTable.begin (),
+        m_discoveryTable.end (),
+        [] (const DiscoveryEntry &entry) {
+          return entry.discoveryNeeded;
+        }));
+  }
+
+  uint16_t GetDiscoveryInitiatedBy () const
+  {
+    return m_discoveryInitiatedBy;
+  }
 
   void ProcessHello (Ptr<Packet> helloPayload,
                    uint16_t hopSrc,
@@ -523,6 +568,11 @@ public:
         // HELLO/control discovery path: OPNET proc_hello() equivalent
         m_hop->SetRxHelloFromHopCallback (
           MakeCallback (&CsrNetLayer::ProcessHello, this));
+
+        // Legacy discovery orchestration uses a separate, non-reliable SNMP
+        // payload path that does not update HOP neighbor state.
+        m_hop->SetRxSnmpFromHopCallback (
+          MakeCallback (&CsrNetLayer::ReceiveSnmpFromHop, this));
 
         // HOP ACK/DACK/resend completion releases NWK NSDP flow count
         m_hop->SetNsdpDecrementCallback (
@@ -2050,6 +2100,29 @@ private:
 
   bool    m_discoveryActive { false };
 
+  struct DiscoveryEntry
+  {
+    uint16_t nodeId {CSR_BROADCAST_ID};
+    bool discoveryNeeded {false};
+  };
+
+  std::vector<DiscoveryEntry> m_discoveryTable;
+  std::vector<uint16_t> m_discoveryCompletionRequesters;
+  uint16_t m_discoveryInitiatedBy {CSR_BROADCAST_ID};
+
+  EventId m_snmpReportEvent;
+  Time m_snmpReportTimeout {Seconds (60.0)};
+
+  uint8_t m_discoveryBroadcastsRemaining {0};
+  bool m_repeatDiscoveryHello {true};
+
+  uint32_t m_discoveryStartCount {0};
+  uint32_t m_discoveryBroadcastCount {0};
+  uint32_t m_snmpStartSentCount {0};
+  uint32_t m_snmpStartReceivedCount {0};
+  uint32_t m_snmpDoneSentCount {0};
+  uint32_t m_snmpDoneReceivedCount {0};
+
   bool m_discoveryResponseEnabled {true};
 
   uint32_t GetNeighborCount () const;
@@ -2074,7 +2147,23 @@ private:
 
   void DiscoveryStart ();
   void DiscoveryStop ();
-  void DiscoveryCooldownOver ();
+
+  void ReceiveSnmpFromHop (
+    Ptr<Packet> snmpPayload,
+    uint16_t hopSource);
+
+  bool SendSnmp (
+    uint16_t destination,
+    CsrSnmpCommand command,
+    int32_t value,
+    const std::vector<uint16_t> &nodes = {});
+
+  void CompleteDiscoveryLifecycle ();
+  void CheckDiscoveryTable ();
+  void SnmpReportTimeout ();
+  void EnsureDiscoveryEntry (uint16_t node, bool discoveryNeeded);
+  void MarkDiscoveryNotNeeded (uint16_t node);
+  std::vector<uint16_t> CollectKnownDiscoveryNodes () const;
 
   void SendHelloBroadcast (
     CsrArlRouteMsgType type = CsrArlRouteMsgType::Discover,
@@ -2144,10 +2233,6 @@ private:
   void ScheduleDiscoveryHello ();
   void DiscoveryHelloTick ();
   void VerifyUnresponsiveDiscoveryNeighbors ();
-  // Experimental NS-3 robustness mode.
-  // Legacy bare OPNET start_discovery() sends one HELLO.
-  // Do not enable for strict OPNET parity tests unless modeling routing-module-driven repeats.
-  bool m_repeatDiscoveryHello { false }; // false = legacy OPNET-style one-shot discovery HELLO
 
   void CheckNeighborFreshness ();
   void InvalidateRoutesViaNextHop (uint16_t nextHop, const char *reason);
@@ -2307,8 +2392,7 @@ CsrNetLayer::StartDiscovery (Time startDelay, Time duration)
 {
     // If already in discovery lifecycle, do not restart or cancel existing events.
     if (m_discState == DiscoveryState::SCHEDULED ||
-        m_discState == DiscoveryState::ACTIVE ||
-        m_discState == DiscoveryState::COOLDOWN)
+        m_discState == DiscoveryState::ACTIVE)
       {
         return;
       }
@@ -2400,6 +2484,8 @@ CsrNetLayer::GatewayStartupDiscoveryFire ()
             << m_gatewayStartupDiscoveryDuration.GetSeconds ()
             << "s"
             << std::endl;
+
+  m_discoveryInitiatedBy = m_nodeId;
 
   StartDiscovery (
     Seconds (0.0),
@@ -5023,6 +5109,13 @@ CsrNetLayer::DiscoveryStart ()
 {
   m_discState = DiscoveryState::ACTIVE;
   m_discoveryActive = true;
+  m_discoveryStartCount++;
+
+  // routesDiscoveryInitLocalTC() uses repeatCount=3.  The existing boolean
+  // remains as a test/demo escape hatch: false requests one broadcast, while
+  // the production default reproduces all three legacy broadcasts.
+  m_discoveryBroadcastsRemaining =
+    m_repeatDiscoveryHello ? 3 : 1;
 
   ++m_discoverySequence;
 
@@ -5050,21 +5143,36 @@ CsrNetLayer::DiscoveryStart ()
     CsrDiscoverType::Broadcast,
     m_discoverySequence);
 
-  if (m_repeatDiscoveryHello)
-    {
-      ScheduleDiscoveryHello ();
-    }
+  m_discoveryBroadcastCount++;
+  m_discoveryBroadcastsRemaining--;
+
+  // The legacy broadcaster runs once more after the third packet.  That
+  // fourth timer invocation changes DiscoveryActive to DiscoveryInActive and
+  // calls sensorAppEndedDiscovery().
+  ScheduleDiscoveryHello ();
 }
 
 void
 CsrNetLayer::DiscoveryStop ()
 {
+  if (m_discState != DiscoveryState::ACTIVE)
+    {
+      return;
+    }
+
   if (m_discoveryHelloEvent.IsPending ())
     {
       Simulator::Cancel (m_discoveryHelloEvent);
     }
 
-  m_discState = DiscoveryState::COOLDOWN;
+  if (m_discoveryStopEvent.IsPending ())
+    {
+      Simulator::Cancel (m_discoveryStopEvent);
+    }
+
+  // OPNET has no post-discovery cooldown.  The node is available for a new
+  // SNMP_START_DISCOVERY immediately after sensorAppEndedDiscovery().
+  m_discState = DiscoveryState::IDLE;
   m_discoveryActive = false;
 
   std::cout << "[NWK " << m_nodeId
@@ -5074,17 +5182,14 @@ CsrNetLayer::DiscoveryStop ()
 
   VerifyUnresponsiveDiscoveryNeighbors ();
 
-  Simulator::Schedule (
-    m_discoveryCooldown,
-    &CsrNetLayer::DiscoveryCooldownOver,
-    this);
-
   TryDrainQueueAfterDiscovery ();
 
   // Legacy discovery completion calls routesReroute():
   // recompute active-neighbor costs and request fresh
   // route state from every active neighbor.
   RefreshRoutesAfterDiscovery ();
+
+  CompleteDiscoveryLifecycle ();
 }
 
 void
@@ -5182,6 +5287,12 @@ CsrNetLayer::DiscoveryHelloTick ()
       return;
     }
 
+  if (m_discoveryBroadcastsRemaining == 0)
+    {
+      DiscoveryStop ();
+      return;
+    }
+
   std::cout << "[NWK " << m_nodeId
             << "] Discovery Broadcast repeat sequence="
             << m_discoverySequence
@@ -5192,6 +5303,9 @@ CsrNetLayer::DiscoveryHelloTick ()
     CsrNeighborCheckType::None,
     CsrDiscoverType::Broadcast,
     m_discoverySequence);
+
+  m_discoveryBroadcastCount++;
+  m_discoveryBroadcastsRemaining--;
 
   ScheduleDiscoveryHello ();
 }
@@ -5469,16 +5583,354 @@ CsrNetLayer::SendNeighborCheck (
 }
 
 void
-CsrNetLayer::DiscoveryCooldownOver ()
+CsrNetLayer::EnsureDiscoveryEntry (
+  uint16_t node,
+  bool discoveryNeeded)
 {
-    // OPNET-equivalent: discovery is fully complete and can be triggered again
-  m_discState = DiscoveryState::IDLE;
+  if (node == m_nodeId || node == CSR_BROADCAST_ID)
+    {
+      return;
+    }
 
-    // Clear legacy flag if you still have it
-  m_discoveryActive = false;
+  auto existing = std::find_if (
+    m_discoveryTable.begin (),
+    m_discoveryTable.end (),
+    [node] (const DiscoveryEntry &entry) {
+      return entry.nodeId == node;
+    });
 
-    // Optional but safe: try to forward anything that may now succeed
-   CheckNwkQueue ();
+  // clear_discovery() and SNMP_DISCOVERY_DONE only insert missing entries;
+  // they never turn a previously completed entry back on.
+  if (existing != m_discoveryTable.end ())
+    {
+      return;
+    }
+
+  m_discoveryTable.push_back ({node, discoveryNeeded});
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Discovery table append"
+            << " node=" << node
+            << " needed=" << (discoveryNeeded ? 1 : 0)
+            << " position=" << (m_discoveryTable.size () - 1)
+            << std::endl;
+}
+
+void
+CsrNetLayer::MarkDiscoveryNotNeeded (uint16_t node)
+{
+  auto existing = std::find_if (
+    m_discoveryTable.begin (),
+    m_discoveryTable.end (),
+    [node] (const DiscoveryEntry &entry) {
+      return entry.nodeId == node;
+    });
+
+  if (existing == m_discoveryTable.end ())
+    {
+      EnsureDiscoveryEntry (node, false);
+      return;
+    }
+
+  existing->discoveryNeeded = false;
+}
+
+std::vector<uint16_t>
+CsrNetLayer::CollectKnownDiscoveryNodes () const
+{
+  std::vector<uint16_t> nodes;
+  std::set<uint16_t> seen;
+
+  // routesListWalkNext() walks logical destinations, not every alternate
+  // path.  Preserve the first-seen route-table order while suppressing
+  // duplicate next-hop alternatives.
+  for (const RouteEntry &route : m_routes)
+    {
+      uint16_t destination = route.nwkDst;
+
+      if (destination == m_nodeId ||
+          destination == CSR_BROADCAST_ID ||
+          seen.find (destination) != seen.end () ||
+          FindBestRoute (destination) == nullptr)
+        {
+          continue;
+        }
+
+      seen.insert (destination);
+      nodes.push_back (destination);
+
+      if (nodes.size () == CsrSnmpHeader::MAX_NODES)
+        {
+          break;
+        }
+    }
+
+  return nodes;
+}
+
+bool
+CsrNetLayer::SendSnmp (
+  uint16_t destination,
+  CsrSnmpCommand command,
+  int32_t value,
+  const std::vector<uint16_t> &nodes)
+{
+  if (m_hop == nullptr)
+    {
+      return false;
+    }
+
+  uint16_t hopDestination = destination;
+  if (destination != CSR_BROADCAST_ID)
+    {
+      // send_snmp_pk() uses lookup_route(), not the DATA forwarding policy.
+      // Consequently a direct Ordinary/non-capable node is still a valid
+      // discovery target even though it cannot be used as a transit route.
+      const RouteEntry *route = FindBestRoute (destination);
+
+      if (route == nullptr)
+        {
+          // The packet is destroyed immediately.  It is neither queued nor
+          // allowed to trigger an implicit discovery.
+          std::cout << "[NWK " << m_nodeId
+                    << "] Drop legacy SNMP: no route"
+                    << " destination=" << destination
+                    << " command="
+                    << unsigned (static_cast<uint8_t> (command))
+                    << std::endl;
+          return false;
+        }
+
+      hopDestination = route->nextHop;
+    }
+
+  CsrSnmpHeader header;
+  header.SetSource (m_nodeId);
+  header.SetDestination (destination);
+  header.SetDestinationType (
+    destination == CSR_BROADCAST_ID
+      ? CSR_DEST_BROADCAST
+      : CSR_DEST_UNICAST);
+  header.SetCommand (command);
+  header.SetValue (value);
+  header.SetNodes (nodes);
+
+  Ptr<Packet> payload = Create<Packet> ();
+  payload->AddHeader (header);
+
+  if (command == CSR_SNMP_START_DISCOVERY)
+    {
+      m_snmpStartSentCount++;
+    }
+  else if (command == CSR_SNMP_DISCOVERY_DONE)
+    {
+      m_snmpDoneSentCount++;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] TX legacy SNMP"
+            << " command="
+            << unsigned (static_cast<uint8_t> (command))
+            << " finalDestination=" << destination
+            << " hopDestination=" << hopDestination
+            << " nodes=" << header.GetNodes ().size ()
+            << std::endl;
+
+  m_hop->SendSnmp (hopDestination, payload);
+  return true;
+}
+
+void
+CsrNetLayer::ReceiveSnmpFromHop (
+  Ptr<Packet> snmpPayload,
+  uint16_t hopSource)
+{
+  CsrSnmpHeader header;
+  if (!snmpPayload->RemoveHeader (header))
+    {
+      NS_LOG_ERROR ("CsrNetLayer::ReceiveSnmpFromHop(): missing CsrSnmpHeader");
+      return;
+    }
+
+  bool forThisNode =
+    header.GetDestinationType () == CSR_DEST_BROADCAST ||
+    (header.GetDestinationType () == CSR_DEST_UNICAST &&
+     (header.GetDestination () == m_nodeId ||
+      header.GetDestination () == CSR_BROADCAST_ID));
+
+  if (!forThisNode)
+    {
+      return;
+    }
+
+  uint16_t source = header.GetSource ();
+
+  if (header.GetCommand () == CSR_SNMP_START_DISCOVERY)
+    {
+      m_snmpStartReceivedCount++;
+
+      if (std::find (
+            m_discoveryCompletionRequesters.begin (),
+            m_discoveryCompletionRequesters.end (),
+            source) == m_discoveryCompletionRequesters.end ())
+        {
+          if (m_discoveryCompletionRequesters.size () <
+              CsrSnmpHeader::MAX_NODES)
+            {
+              m_discoveryCompletionRequesters.push_back (source);
+            }
+          else
+            {
+              std::cout << "[NWK " << m_nodeId
+                        << "] Legacy discovery completion requester list full"
+                        << " source=" << source
+                        << std::endl;
+            }
+        }
+
+      std::cout << "[NWK " << m_nodeId
+                << "] RX SNMP_START_DISCOVERY"
+                << " source=" << source
+                << " hopSource=" << hopSource
+                << " delay=" << header.GetValue ()
+                << " state=" << static_cast<unsigned> (m_discState)
+                << std::endl;
+
+      if (m_discState == DiscoveryState::IDLE)
+        {
+          m_discoveryInitiatedBy = source;
+          MarkDiscoveryNotNeeded (source);
+
+          int32_t delaySeconds = std::max<int32_t> (0, header.GetValue ());
+          StartDiscovery (
+            Seconds (static_cast<double> (delaySeconds)),
+            Seconds (30.0));
+        }
+      else
+        {
+          // The requester remains in the DCM list and receives DONE when the
+          // discovery already in progress completes.
+          std::cout << "[NWK " << m_nodeId
+                    << "] Ignore duplicate SNMP discovery start while active"
+                    << " requesterRetained=1"
+                    << std::endl;
+        }
+
+      return;
+    }
+
+  if (header.GetCommand () == CSR_SNMP_DISCOVERY_DONE)
+    {
+      m_snmpDoneReceivedCount++;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] RX SNMP_DISCOVERY_DONE"
+                << " source=" << source
+                << " hopSource=" << hopSource
+                << " advertisedNodes=" << header.GetNodes ().size ()
+                << std::endl;
+
+      for (uint16_t node : header.GetNodes ())
+        {
+          EnsureDiscoveryEntry (node, true);
+        }
+
+      CheckDiscoveryTable ();
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Ignore unsupported legacy SNMP command="
+            << unsigned (static_cast<uint8_t> (header.GetCommand ()))
+            << std::endl;
+}
+
+void
+CsrNetLayer::CompleteDiscoveryLifecycle ()
+{
+  std::vector<uint16_t> knownNodes = CollectKnownDiscoveryNodes ();
+
+  for (uint16_t node : knownNodes)
+    {
+      EnsureDiscoveryEntry (node, true);
+    }
+
+  std::vector<uint16_t> requesters = m_discoveryCompletionRequesters;
+
+  for (uint16_t requester : requesters)
+    {
+      SendSnmp (
+        requester,
+        CSR_SNMP_DISCOVERY_DONE,
+        0,
+        knownNodes);
+    }
+
+  m_discoveryCompletionRequesters.clear ();
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Legacy discovery lifecycle complete"
+            << " initiator=" << m_discoveryInitiatedBy
+            << " knownNodes=" << knownNodes.size ()
+            << " completionReports=" << requesters.size ()
+            << std::endl;
+
+  CheckDiscoveryTable ();
+}
+
+void
+CsrNetLayer::CheckDiscoveryTable ()
+{
+  if (m_nodeType != CsrNodeType::Gateway &&
+      m_nodeType != CsrNodeType::Routable)
+    {
+      return;
+    }
+
+  if (m_snmpReportEvent.IsPending ())
+    {
+      Simulator::Cancel (m_snmpReportEvent);
+    }
+
+  for (DiscoveryEntry &entry : m_discoveryTable)
+    {
+      if (!entry.discoveryNeeded)
+        {
+          continue;
+        }
+
+      // check_discovery() marks the first tail-ordered entry complete before
+      // attempting transmission.  A missing route is therefore not retried.
+      entry.discoveryNeeded = false;
+
+      SendSnmp (
+        entry.nodeId,
+        CSR_SNMP_START_DISCOVERY,
+        0);
+
+      m_snmpReportEvent = Simulator::Schedule (
+        m_snmpReportTimeout,
+        &CsrNetLayer::SnmpReportTimeout,
+        this);
+
+      std::cout << "[NWK " << m_nodeId
+                << "] SNMP discovery handoff"
+                << " target=" << entry.nodeId
+                << " watchdog="
+                << m_snmpReportTimeout.GetSeconds ()
+                << "s"
+                << std::endl;
+      break;
+    }
+}
+
+void
+CsrNetLayer::SnmpReportTimeout ()
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] SNMP discovery report watchdog expired"
+            << std::endl;
+  CheckDiscoveryTable ();
 }
 
 bool
