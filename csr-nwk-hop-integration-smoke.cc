@@ -47,6 +47,8 @@ ConnectStack (Ptr<CsrNetDevice> device,
   hop->SetNodeId (nodeId);
   hop->SetMac (&device->GetMac ());
   nwk->SetNodeId (nodeId);
+  // This regression isolates NWK/HOP custody with pre-installed routes.
+  nwk->SetArlNeighborAdmissionEnabled (false);
   nwk->SetHop (hop);
 
   device->GetMac ().SetRxCallback (

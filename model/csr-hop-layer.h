@@ -1,6 +1,7 @@
 #pragma once
 #include "csr-common.h"
 #include "csr-hello-header.h"
+#include "csr-hop-security.h"
 #include <algorithm>
 
 class CsrHopLayer : public Object
@@ -38,6 +39,7 @@ public:
     NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
                      "CSR HOP node identifier exceeds 24 bits");
     m_nodeId = id;
+    m_hopSecurity.SetNodeId (id);
   }
   void SetActiveNodesForPostTx (uint32_t n)
   {
@@ -112,6 +114,39 @@ public:
     m_neighborCheckSuccessCb = cb;
   }
 
+  void SetNeighborCheckFailureCallback (
+    Callback<void,
+            CsrNodeId,
+            CsrNeighborCheckType,
+            uint32_t> cb)
+  {
+    m_neighborCheckFailureCb = cb;
+  }
+
+  void SetKeyRequestReceivedCallback (
+    Callback<void, CsrNodeId> cb)
+  {
+    m_keyRequestReceivedCb = cb;
+  }
+
+  void SetKeyUpdateReceivedCallback (
+    Callback<void, CsrNodeId> cb)
+  {
+    m_keyUpdateReceivedCb = cb;
+  }
+
+  void SetKeyUpdateCompletionCallback (
+    Callback<void, CsrNodeId, bool> cb)
+  {
+    m_keyUpdateCompletionCb = cb;
+  }
+
+  void SetSecurityCountChangeCallback (
+    Callback<void, CsrNodeId> cb)
+  {
+    m_securityCountChangeCb = cb;
+  }
+
   // App/NWK send
   void SendData (CsrNodeId dst, uint8_t dscp,
                  Ptr<Packet> payload, bool ack);
@@ -128,6 +163,46 @@ public:
   void SendHello (Ptr<Packet> helloPayload);
 
   void SendNeighborCheck (CsrNodeId dst, Ptr<Packet> payload);
+
+  /** Send the legacy non-ACKed Pairwise32 KeyRequest. */
+  void SendKeyRequest (CsrNodeId dst);
+
+  /**
+   * Start one reliable KeyUpdate transaction.
+   *
+   * @return False when an update to the same neighbor is already active.
+   */
+  bool SendKeyUpdate (CsrNodeId dst);
+
+  bool HasGroupKeySentTo (CsrNodeId neighbor) const
+  {
+    return m_hopSecurity.HasGroupKeySentTo (neighbor);
+  }
+
+  bool HasGroupKeyReceivedFrom (CsrNodeId neighbor) const
+  {
+    return m_hopSecurity.HasGroupKeyReceivedFrom (neighbor);
+  }
+
+  bool IsKeyUpdateSendActive (CsrNodeId neighbor) const
+  {
+    return m_hopSecurity.IsKeyUpdateSendActive (neighbor);
+  }
+
+  bool GetGroupKeySentWhen (CsrNodeId neighbor, Time &when) const
+  {
+    return m_hopSecurity.GetGroupKeySentWhen (neighbor, when);
+  }
+
+  void SetOwnSecurityCount (uint16_t securityCount)
+  {
+    m_hopSecurity.SetOwnSecurityCount (securityCount);
+  }
+
+  uint16_t GetOwnSecurityCount () const
+  {
+    return m_hopSecurity.GetOwnSecurityCount ();
+  }
 
   void PrintNeighbors () const;
 
@@ -387,6 +462,8 @@ private:
   };
 
   void HandleDataFrame (const CsrHeader &hdr, Ptr<Packet> payload, bool firstReception);
+  void SendControlAck (const CsrHeader &received, const char *label);
+  void DiscardOutstandingKeyUpdate (CsrNodeId neighbor);
   void HandleAckFrame  (const CsrHeader &hdr);
   void HandleAckWindow (const CsrHeader &hdr);
 
@@ -429,6 +506,16 @@ private:
          CsrNodeId,
          CsrNeighborCheckType,
          uint32_t> m_neighborCheckSuccessCb;
+
+  Callback<void,
+         CsrNodeId,
+         CsrNeighborCheckType,
+         uint32_t> m_neighborCheckFailureCb;
+
+  Callback<void, CsrNodeId> m_keyRequestReceivedCb;
+  Callback<void, CsrNodeId> m_keyUpdateReceivedCb;
+  Callback<void, CsrNodeId, bool> m_keyUpdateCompletionCb;
+  Callback<void, CsrNodeId> m_securityCountChangeCb;
 
   void NotifyNsdpFromFrame (Ptr<Packet> frame)
   {
@@ -482,6 +569,8 @@ private:
   };
 
   std::map<CsrNodeId, NeighborInfo> m_neighbors;
+
+  CsrHopSecurityState m_hopSecurity;
 
   LinkControlResult ComputeLinkControl (CsrNodeId dest);
   void ApplyLinkControl (CsrHeader &header,
@@ -753,6 +842,8 @@ void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
   h.SetAckable (false);
   h.SetType (CSR_PKT_HELLO);
   h.SetDestType (CSR_DEST_BROADCAST);
+  h.SetSecurityCount (
+    m_hopSecurity.GetOwnSecurityCount ());
   ApplyLinkControl (h, {CSR_BROADCAST_ID});
 
   helloPayload->AddHeader (h);
@@ -921,6 +1012,108 @@ CsrHopLayer::SendNeighborCheck (CsrNodeId dst, Ptr<Packet> payload)
 }
 
 void
+CsrHopLayer::SendKeyRequest (CsrNodeId dst)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  uint16_t &lastSeq = m_lastSentSeqByDest[dst];
+  uint16_t sequence = static_cast<uint16_t> ((lastSeq + 1) & 0xffff);
+  lastSeq = sequence;
+
+  CsrKeyRequestHeader securityHeader =
+    m_hopSecurity.BuildKeyRequest (dst);
+
+  CsrHeader hopHeader (m_nodeId,
+                       dst,
+                       sequence,
+                       7,
+                       false,
+                       false);
+  hopHeader.SetType (CSR_PKT_KEY_REQUEST);
+  hopHeader.SetDestType (CSR_DEST_UNICAST);
+  hopHeader.SetSecurityCount (
+    m_hopSecurity.GetOwnSecurityCount ());
+  ApplyLinkControl (hopHeader, {dst});
+
+  Ptr<Packet> frame = Create<Packet> ();
+  frame->AddHeader (securityHeader);
+  frame->AddHeader (hopHeader);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX non-ACKed KeyRequest"
+            << " neighbor=" << dst
+            << " hopSeq=" << sequence
+            << " keyId=" << securityHeader.GetKeyId ()
+            << " keySeq=" << securityHeader.GetSequence ()
+            << " securityCount="
+            << m_hopSecurity.GetOwnSecurityCount ()
+            << std::endl;
+
+  // packetTypes.h specifies NoResend/NoAck for ARLPktTypeKeyRequest.
+  // Its immediateTag is the destination node, so only the newest unsent
+  // request for this neighbor may remain in MAC.
+  m_mac->CancelQueuedFramesByType (dst, CSR_PKT_KEY_REQUEST);
+  m_mac->EnqueueTxFrame (frame, dst, 7, false);
+}
+
+bool
+CsrHopLayer::SendKeyUpdate (CsrNodeId dst)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  if (m_hopSecurity.IsKeyUpdateSendActive (dst))
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] KeyUpdate already active"
+                << " neighbor=" << dst
+                << std::endl;
+      return false;
+    }
+
+  uint16_t &lastSeq = m_lastSentSeqByDest[dst];
+  uint16_t sequence = static_cast<uint16_t> ((lastSeq + 1) & 0xffff);
+  lastSeq = sequence;
+
+  CsrKeyUpdateHeader securityHeader =
+    m_hopSecurity.BuildKeyUpdate (dst);
+
+  CsrHeader hopHeader (m_nodeId,
+                       dst,
+                       sequence,
+                       7,
+                       true,
+                       false);
+  hopHeader.SetType (CSR_PKT_KEY_UPDATE);
+  hopHeader.SetDestType (CSR_DEST_UNICAST);
+  hopHeader.SetSecurityCount (
+    m_hopSecurity.GetOwnSecurityCount ());
+  ApplyLinkControl (hopHeader, {dst});
+
+  Ptr<Packet> frame = Create<Packet> ();
+  frame->AddHeader (securityHeader);
+  frame->AddHeader (hopHeader);
+
+  EnqueueResend (dst,
+                 sequence,
+                 frame->Copy (),
+                 false);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX reliable KeyUpdate"
+            << " neighbor=" << dst
+            << " hopSeq=" << sequence
+            << " keyId=" << securityHeader.GetKeyId ()
+            << " keySeq=" << securityHeader.GetSequence ()
+            << " groupKeyId=" << securityHeader.GetGroupKeyId ()
+            << " securityBytes="
+            << securityHeader.GetSerializedSize ()
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (frame, dst, 7, true);
+  return true;
+}
+
+void
 CsrHopLayer::SendRoutingControl (
   CsrNodeId dst,
   Ptr<Packet> payload)
@@ -1002,6 +1195,69 @@ CsrHopLayer::SendRoutingControl (
     primaryDestination,
     7,
     true);
+}
+
+void
+CsrHopLayer::SendControlAck (
+  const CsrHeader &received,
+  const char *label)
+{
+  CsrHeader ackHeader (m_nodeId,
+                       received.GetSrc (),
+                       received.GetSeq (),
+                       7,
+                       false,
+                       true);
+  ackHeader.SetType (CSR_PKT_ACK);
+  ackHeader.SetDestType (CSR_DEST_UNICAST);
+  ApplyLinkControl (ackHeader, {received.GetSrc ()});
+
+  Ptr<Packet> ack = Create<Packet> ();
+  ack->AddHeader (ackHeader);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] ACK " << label
+            << " to " << received.GetSrc ()
+            << " seq=" << received.GetSeq ()
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (ack,
+                         received.GetSrc (),
+                         7,
+                         false);
+}
+
+void
+CsrHopLayer::DiscardOutstandingKeyUpdate (CsrNodeId neighbor)
+{
+  for (auto it = m_resendQueue.begin (); it != m_resendQueue.end (); )
+    {
+      CsrHeader header;
+      bool isKeyUpdate =
+        it->dest == neighbor &&
+        it->frame != nullptr &&
+        it->frame->PeekHeader (header) &&
+        header.GetType () == CSR_PKT_KEY_UPDATE;
+
+      if (!isKeyUpdate)
+        {
+          ++it;
+          continue;
+        }
+
+      // A remote restart/security-count change invalidates the pairwise
+      // derivation used for this old transaction.  It must not later mark the
+      // replacement relationship complete if a delayed ACK arrives.
+      m_mac->CancelAcknowledgedFrames (neighbor, it->seq, 1, 0);
+
+      std::cout << "[HOP " << m_nodeId
+                << "] Discard obsolete KeyUpdate after security-count change"
+                << " neighbor=" << neighbor
+                << " seq=" << it->seq
+                << std::endl;
+
+      it = m_resendQueue.erase (it);
+    }
 }
 
 void
@@ -1153,6 +1409,145 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
             hdr.GetSrc (), hdr.GetSeq (), 1, 0);
           HandleAckFrame (hdr);
         }
+      return;
+    }
+
+  if (hdr.GetType () == CSR_PKT_KEY_REQUEST)
+    {
+      if (!hdr.HasSecurityCount () ||
+          frame->GetSize () < CsrKeyRequestHeader::SERIALIZED_SIZE)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop malformed KeyRequest from "
+                    << hdr.GetSrc ()
+                    << std::endl;
+          return;
+        }
+
+      CsrKeyRequestHeader securityHeader;
+      frame->RemoveHeader (securityHeader);
+
+      CsrHopSecurityReceiveStatus status =
+        m_hopSecurity.ReceiveKeyRequest (
+          hdr.GetSrc (),
+          hdr.GetSecurityCount (),
+          securityHeader);
+
+      if (status == CsrHopSecurityReceiveStatus::DuplicateOrStale)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop duplicate/stale KeyRequest"
+                    << " from=" << hdr.GetSrc ()
+                    << " keyId=" << securityHeader.GetKeyId ()
+                    << " keySeq=" << securityHeader.GetSequence ()
+                    << std::endl;
+          return;
+        }
+
+      std::cout << "[HOP " << m_nodeId
+                << "] RX hop-security-foundation KeyRequest"
+                << " from=" << hdr.GetSrc ()
+                << " keyId=" << securityHeader.GetKeyId ()
+                << " keySeq=" << securityHeader.GetSequence ()
+                << " securityCount=" << hdr.GetSecurityCount ()
+                << std::endl;
+
+      if (status ==
+          CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged)
+        {
+          DiscardOutstandingKeyUpdate (hdr.GetSrc ());
+
+          if (!m_securityCountChangeCb.IsNull ())
+            {
+              m_securityCountChangeCb (hdr.GetSrc ());
+            }
+        }
+
+      if (!m_keyRequestReceivedCb.IsNull ())
+        {
+          m_keyRequestReceivedCb (hdr.GetSrc ());
+        }
+
+      // KeyRequest is explicitly NoAck/NoResend in packetTypes.h.
+      return;
+    }
+
+  if (hdr.GetType () == CSR_PKT_KEY_UPDATE)
+    {
+      if (!hdr.HasSecurityCount () ||
+          frame->GetSize () < CsrKeyUpdateHeader::SERIALIZED_SIZE)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop malformed KeyUpdate from "
+                    << hdr.GetSrc ()
+                    << std::endl;
+          return;
+        }
+
+      CsrKeyUpdateHeader securityHeader;
+      frame->RemoveHeader (securityHeader);
+
+      bool firstReception =
+        CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq (), false);
+
+      if (!firstReception)
+        {
+          // The original ACK may have been lost.  Do not re-run key state,
+          // but repeat the exact ACK as legacy HOP does for reliable traffic.
+          if (hdr.IsAckable ())
+            {
+              SendControlAck (hdr, "duplicate KeyUpdate");
+            }
+          return;
+        }
+
+      CsrHopSecurityReceiveStatus status =
+        m_hopSecurity.ReceiveKeyUpdate (
+          hdr.GetSrc (),
+          hdr.GetSecurityCount (),
+          securityHeader);
+
+      if (status == CsrHopSecurityReceiveStatus::DuplicateOrStale)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop replayed KeyUpdate"
+                    << " from=" << hdr.GetSrc ()
+                    << " keyId=" << securityHeader.GetKeyId ()
+                    << " keySeq=" << securityHeader.GetSequence ()
+                    << std::endl;
+          return;
+        }
+
+      std::cout << "[HOP " << m_nodeId
+                << "] RX hop-security-foundation KeyUpdate"
+                << " from=" << hdr.GetSrc ()
+                << " keyId=" << securityHeader.GetKeyId ()
+                << " keySeq=" << securityHeader.GetSequence ()
+                << " groupKeyId=" << securityHeader.GetGroupKeyId ()
+                << " securityCount=" << hdr.GetSecurityCount ()
+                << std::endl;
+
+      if (hdr.IsAckable ())
+        {
+          SendControlAck (hdr, "KeyUpdate");
+        }
+
+      if (status ==
+          CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged)
+        {
+          DiscardOutstandingKeyUpdate (hdr.GetSrc ());
+
+          if (!m_securityCountChangeCb.IsNull ())
+            {
+              m_securityCountChangeCb (hdr.GetSrc ());
+            }
+        }
+
+      if (!m_keyUpdateReceivedCb.IsNull ())
+        {
+          m_keyUpdateReceivedCb (hdr.GetSrc ());
+        }
+
       return;
     }
 
@@ -1460,6 +1855,7 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
 
   bool neighborCheckCompleted = false;
   bool routingControlCompleted = false;
+  bool keyUpdateCompleted = false;
   uint32_t completedRoutingSequence = 0;
 
   CsrRoutingOperation completedRoutingOperation =
@@ -1537,6 +1933,10 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
                                   completedRoutingOperation))
                             << std::endl;
                 }
+            }
+          else if (originalHdr.GetType () == CSR_PKT_KEY_UPDATE)
+            {
+              keyUpdateCompleted = true;
             }
         }
     }
@@ -1627,6 +2027,24 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
             src,
             completedType,
             completedDiscoverySequence);
+        }
+    }
+
+  if (keyUpdateCompleted && allTargetsAcked)
+    {
+      m_hopSecurity.MarkKeyUpdateAcked (
+        src,
+        Simulator::Now ());
+
+      std::cout << "[HOP " << m_nodeId
+                << "] Reliable KeyUpdate completed"
+                << " neighbor=" << src
+                << " seq=" << seq
+                << std::endl;
+
+      if (!m_keyUpdateCompletionCb.IsNull ())
+        {
+          m_keyUpdateCompletionCb (src, true);
         }
     }
 
@@ -1984,9 +2402,10 @@ CsrHopLayer::CheckResend ()
 
           // Legacy HOP reports a final failure to NWK only when the resend
           // packet carries Packet_Tx_Info.  In this model that metadata is
-          // represented by a reliable ROUTING_CONTROL frame.  Ordinary DATA
-          // has no Packet_Tx_Info and therefore must not be converted into a
-          // routing-link failure merely because its resend limit expired.
+          // represented by reliable KeyUpdate, NeighborCheck, and
+          // ROUTING_CONTROL frames.  Ordinary DATA has no Packet_Tx_Info and
+          // therefore must not be converted into a routing-link failure
+          // merely because its resend limit expired.
           if (e.frame != nullptr)
             {
               Ptr<Packet> failedFrame =
@@ -1994,70 +2413,84 @@ CsrHopLayer::CheckResend ()
 
               CsrHeader failedHopHeader;
 
-              if (failedFrame->RemoveHeader (
-                    failedHopHeader) &&
-                  failedHopHeader.GetType () ==
-                    CSR_PKT_ROUTING_CONTROL)
+              if (failedFrame->RemoveHeader (failedHopHeader))
                 {
-                  CsrHelloHeader controlHeader;
-
-                  if (failedFrame->RemoveHeader (
-                        controlHeader))
+                  if (failedHopHeader.GetType () == CSR_PKT_KEY_UPDATE)
                     {
-                      uint32_t routingSequence =
-                        controlHeader
-                          .GetRoutingSequence ();
-
-                      CsrRoutingOperation operation =
-                        controlHeader
-                          .GetRoutingOperation ();
-
-                      uint8_t routingSection =
-                        controlHeader
-                          .GetRoutingSection ();
-
-                      uint8_t routingTotalSections =
-                        controlHeader
-                          .GetRoutingTotalSections ();
-
                       std::cout << "[HOP " << m_nodeId
-                                << "] Reliable RoutingControl FAILED"
-                                << " neighbor="
-                                << e.dest
-                                << " routingSequence="
-                                << routingSequence
-                                << " operation="
-                                << unsigned (
-                                    static_cast<uint8_t> (
-                                      operation))
-                                << " section="
-                                << unsigned (
-                                    routingSection)
-                                << "/"
-                                << unsigned (
-                                    routingTotalSections)
+                                << "] Reliable KeyUpdate FAILED"
+                                << " neighbor=" << e.dest
                                 << std::endl;
 
-                      if (!m_routingControlFailureCb
-                            .IsNull ())
-                        {
-                          std::vector<CsrNodeId>
-                            failedDestinations;
-                          failedDestinations.reserve (
-                            e.targets.size ());
-                          for (const auto &target : e.targets)
-                            {
-                              failedDestinations.push_back (
-                                target.dest);
-                            }
+                      m_hopSecurity.MarkKeyUpdateFailed (e.dest);
 
-                          m_routingControlFailureCb (
-                            failedDestinations,
-                            routingSequence,
-                            operation,
-                            routingSection,
-                            routingTotalSections,
-                            true);
+                      if (!m_keyUpdateCompletionCb.IsNull ())
+                        {
+                          m_keyUpdateCompletionCb (e.dest, false);
+                        }
+                    }
+                  else if (failedHopHeader.GetType () ==
+                           CSR_PKT_NEIGHBOR_CHECK)
+                    {
+                      CsrHelloHeader controlHeader;
+
+                      if (failedFrame->RemoveHeader (controlHeader) &&
+                          !m_neighborCheckFailureCb.IsNull ())
+                        {
+                          m_neighborCheckFailureCb (
+                            e.dest,
+                            controlHeader.GetNeighborCheckType (),
+                            controlHeader.GetDiscoverySequence ());
+                        }
+                    }
+                  else if (failedHopHeader.GetType () ==
+                           CSR_PKT_ROUTING_CONTROL)
+                    {
+                      CsrHelloHeader controlHeader;
+
+                      if (failedFrame->RemoveHeader (controlHeader))
+                        {
+                          uint32_t routingSequence =
+                            controlHeader.GetRoutingSequence ();
+
+                          CsrRoutingOperation operation =
+                            controlHeader.GetRoutingOperation ();
+
+                          uint8_t routingSection =
+                            controlHeader.GetRoutingSection ();
+
+                          uint8_t routingTotalSections =
+                            controlHeader.GetRoutingTotalSections ();
+
+                          std::cout << "[HOP " << m_nodeId
+                                    << "] Reliable RoutingControl FAILED"
+                                    << " neighbor=" << e.dest
+                                    << " routingSequence=" << routingSequence
+                                    << " operation="
+                                    << unsigned (static_cast<uint8_t> (operation))
+                                    << " section="
+                                    << unsigned (routingSection)
+                                    << "/"
+                                    << unsigned (routingTotalSections)
+                                    << std::endl;
+
+                          if (!m_routingControlFailureCb.IsNull ())
+                            {
+                              std::vector<CsrNodeId> failedDestinations;
+                              failedDestinations.reserve (e.targets.size ());
+                              for (const auto &target : e.targets)
+                                {
+                                  failedDestinations.push_back (target.dest);
+                                }
+
+                              m_routingControlFailureCb (
+                                failedDestinations,
+                                routingSequence,
+                                operation,
+                                routingSection,
+                                routingTotalSections,
+                                true);
+                            }
                         }
                     }
                 }

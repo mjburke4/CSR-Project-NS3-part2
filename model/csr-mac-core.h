@@ -215,6 +215,10 @@ class CsrMacCore
                                      uint64_t ackBitmap,
                                      uint64_t dackBitmap);
 
+  // Legacy PacketTxInfo.immediateTag replaces an older queued packet of the
+  // same type/tag.  KeyRequest uses the destination node as that tag.
+  uint32_t CancelQueuedFramesByType (CsrNodeId neighbor, uint8_t type);
+
   // Called by CsrNetDevice when a frame is successfully received
   void DeliverRxFrameToUp (Ptr<Packet> frame, double pathlossDb, double snrDb)
   {

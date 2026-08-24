@@ -54,7 +54,9 @@ enum CsrPktType : uint8_t
   CSR_PKT_DISCOVER        = 4,
   CSR_PKT_NEIGHBOR_CHECK  = 5,
   CSR_PKT_ROUTING_CONTROL = 6,
-  CSR_PKT_SNMP            = 7
+  CSR_PKT_SNMP            = 7,
+  CSR_PKT_KEY_REQUEST     = 8,
+  CSR_PKT_KEY_UPDATE      = 9
 };
 
 enum CsrDestType : uint8_t
@@ -90,11 +92,13 @@ public:
       m_isDack (false),
       m_hasAckWindow (false),
       m_hasLinkControl (false),
+      m_hasSecurityCount (false),
       m_ackBitmap (0),
       m_dackBitmap (0),
       m_type (CSR_PKT_DATA),
       m_destType (CSR_DEST_UNICAST),
       m_speedKey (8),
+      m_securityCount (0),
       m_txPowerDbmX10 (0),
       m_rxPowerDbmX10 (0)
   {}
@@ -110,11 +114,13 @@ public:
       m_isDack (false),
       m_hasAckWindow (false),
       m_hasLinkControl (false),
+      m_hasSecurityCount (false),
       m_ackBitmap (0),
       m_dackBitmap (0),
       m_type (isAck ? CSR_PKT_ACK : CSR_PKT_DATA),
       m_destType (CSR_DEST_UNICAST),
       m_speedKey (8),
+      m_securityCount (0),
       m_txPowerDbmX10 (0),
       m_rxPowerDbmX10 (0)
   {
@@ -156,6 +162,7 @@ public:
     return baseSize +
            (m_hasAckWindow ? 16 : 0) +
            (m_hasLinkControl ? 4 : 0) +
+           (m_hasSecurityCount ? 2 : 0) +
            targetListSize;
 
   }
@@ -169,6 +176,7 @@ public:
     if (m_hasAckWindow) { flags |= 0x08; }
     if (!m_destinationSequences.empty ()) { flags |= 0x10; }
     if (m_hasLinkControl) { flags |= 0x20; }
+    if (m_hasSecurityCount) { flags |= 0x40; }
 
     CsrWriteNodeId (start, m_src);
     CsrWriteNodeId (start, m_dst);
@@ -191,6 +199,11 @@ public:
           static_cast<uint16_t> (m_txPowerDbmX10));
         start.WriteHtonU16 (
           static_cast<uint16_t> (m_rxPowerDbmX10));
+      }
+
+    if (m_hasSecurityCount)
+      {
+        start.WriteHtonU16 (m_securityCount);
       }
 
     if (!m_destinationSequences.empty ())
@@ -219,6 +232,7 @@ public:
     m_hasAckWindow = (flags & 0x08) != 0;
     bool hasDestinationSequences = (flags & 0x10) != 0;
     m_hasLinkControl = (flags & 0x20) != 0;
+    m_hasSecurityCount = (flags & 0x40) != 0;
 
     // Always read the extended fields (Serialize always writes them)
     m_type     = start.ReadU8 ();
@@ -235,7 +249,6 @@ public:
         m_ackBitmap = 0;
         m_dackBitmap = 0;
       }
-
     if (m_hasLinkControl)
       {
         m_txPowerDbmX10 =
@@ -247,6 +260,15 @@ public:
       {
         m_txPowerDbmX10 = 0;
         m_rxPowerDbmX10 = 0;
+      }
+
+    if (m_hasSecurityCount)
+      {
+        m_securityCount = start.ReadNtohU16 ();
+      }
+    else
+      {
+        m_securityCount = 0;
       }
 
     m_destinationSequences.clear ();
@@ -278,6 +300,7 @@ public:
     return baseSize +
            (m_hasAckWindow ? 16 : 0) +
            (m_hasLinkControl ? 4 : 0) +
+           (m_hasSecurityCount ? 2 : 0) +
            targetListSize;
   }
 
@@ -292,6 +315,7 @@ public:
        << " isDack=" << m_isDack
        << " hasAckWindow=" << m_hasAckWindow
        << " hasLinkControl=" << m_hasLinkControl
+       << " hasSecurityCount=" << m_hasSecurityCount
        << " type=" << unsigned(m_type)
        << " destType=" << unsigned(m_destType)
        << " speedKey=" << unsigned(m_speedKey);
@@ -302,6 +326,11 @@ public:
            << static_cast<double> (m_txPowerDbmX10) / 10.0
            << " rxPowerDbm="
            << static_cast<double> (m_rxPowerDbmX10) / 10.0;
+      }
+
+    if (m_hasSecurityCount)
+      {
+        os << " securityCount=" << m_securityCount;
       }
 
     if (m_hasAckWindow)
@@ -378,6 +407,17 @@ public:
 
   void SetSpeedKey (uint8_t v)  { m_speedKey = v; }
   uint8_t GetSpeedKey () const  { return m_speedKey; }
+
+  void SetSecurityCount (uint16_t value)
+  {
+    NS_ABORT_MSG_IF (value > 0x0fff,
+                     "CSR security count exceeds the legacy 12-bit field");
+    m_securityCount = value;
+    m_hasSecurityCount = true;
+  }
+
+  bool HasSecurityCount () const { return m_hasSecurityCount; }
+  uint16_t GetSecurityCount () const { return m_securityCount; }
 
   void SetLinkControl (uint8_t speedKey,
                        double txPowerDbm,
@@ -485,11 +525,13 @@ private:
   bool     m_isDack;
   bool     m_hasAckWindow;
   bool     m_hasLinkControl;
+  bool     m_hasSecurityCount;
   uint64_t m_ackBitmap;
   uint64_t m_dackBitmap;
   uint8_t  m_type;
   uint8_t  m_destType;
   uint8_t  m_speedKey;
+  uint16_t m_securityCount;
   int16_t  m_txPowerDbmX10;
   int16_t  m_rxPowerDbmX10;
   std::vector<DestinationSequence> m_destinationSequences;

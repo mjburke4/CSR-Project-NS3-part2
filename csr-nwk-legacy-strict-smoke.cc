@@ -46,6 +46,8 @@ ConnectStack (Ptr<CsrNetDevice> device,
   hop->SetNodeId (nodeId);
   hop->SetMac (&device->GetMac ());
   nwk->SetNodeId (nodeId);
+  // Admission/key exchange has its own focused regression.
+  nwk->SetArlNeighborAdmissionEnabled (false);
   nwk->SetHop (hop);
 
   device->GetMac ().SetRxCallback (
@@ -302,6 +304,8 @@ RunLocalOnlyLinkCostScenario ()
   Ptr<CsrNetLayer> localOnly = CreateObject<CsrNetLayer> ();
   Ptr<CsrNetLayer> withRemoteInfo = CreateObject<CsrNetLayer> ();
 
+  localOnly->SetArlNeighborAdmissionEnabled (false);
+  withRemoteInfo->SetArlNeighborAdmissionEnabled (false);
   localOnly->SetNodeId (SOURCE_NODE);
   withRemoteInfo->SetNodeId (SOURCE_NODE);
 
