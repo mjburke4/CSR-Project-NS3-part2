@@ -60,7 +60,9 @@ enum CsrPktType : uint8_t
   CSR_PKT_ROUTING_CONTROL = 6,
   CSR_PKT_SNMP            = 7,
   CSR_PKT_KEY_REQUEST     = 8,
-  CSR_PKT_KEY_UPDATE      = 9
+  CSR_PKT_KEY_UPDATE      = 9,
+  CSR_PKT_PAIRWISE32_DATA = 10,
+  CSR_PKT_NEIGHBORCAST    = 11
 };
 
 enum CsrDestType : uint8_t

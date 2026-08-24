@@ -75,6 +75,13 @@ public:
     m_rxSnmpFromHopCb = cb;
   }
 
+  /** Set the one-hop AppNeighborcast delivery callback. */
+  void SetRxNeighborcastFromHopCallback (
+    Callback<void, Ptr<Packet>, CsrNodeId> cb)
+  {
+    m_rxNeighborcastFromHopCb = cb;
+  }
+
   // After SetRxFromHopCallback
   void SetNsdpDecrementCallback (
     Callback<void, CsrNodeId, CsrNodeId> cb)
@@ -161,6 +168,15 @@ public:
   // App/NWK send
   void SendData (CsrNodeId dst, uint8_t dscp,
                  Ptr<Packet> payload, bool ack);
+
+  /** Send one AES-CTR-encrypted Pairwise32 record to a direct neighbor. */
+  void SendPairwise32EncryptedData (CsrNodeId dst,
+                                    uint8_t dscp,
+                                    Ptr<Packet> payload,
+                                    bool ack);
+
+  /** Send one legacy AppNeighborcast Group32Encrypt broadcast. */
+  void SendNeighborcast (uint8_t dscp, Ptr<Packet> payload);
 
   // Legacy br_SNMP bypasses ACK/resend and DATA flow control.
   void SendSnmp (CsrNodeId hopDestination, Ptr<Packet> payload);
@@ -510,6 +526,12 @@ private:
     // DATA traffic, not reliable routing/control packets.
     bool flowControlTracked {false};
 
+    // Keep NWK source/destination bookkeeping outside the encrypted frame so
+    // ACK, DACK, and final-timeout completion can release the exact flow.
+    bool networkFlowMetadataValid {false};
+    CsrNodeId networkSource {0};
+    CsrNodeId networkDestination {0};
+
     // Routing callback metadata remains plaintext even when the resend frame
     // carries a Group16-protected CsrHelloHeader.
     bool routingMetadataValid {false};
@@ -520,6 +542,24 @@ private:
   };
 
   void HandleDataFrame (const CsrHeader &hdr, Ptr<Packet> payload, bool firstReception);
+  void SendProtectedPairwiseData (CsrNodeId dst,
+                                  uint8_t dscp,
+                                  Ptr<Packet> payload,
+                                  bool ack,
+                                  CsrPairwiseSecurityMode mode,
+                                  uint8_t legacyPacketType,
+                                  uint8_t packetType);
+  Ptr<Packet> ProtectPairwisePayload (
+    CsrNodeId destination,
+    CsrPairwiseSecurityMode mode,
+    uint8_t legacyPacketType,
+    Ptr<Packet> payload);
+  bool HandleProtectedPairwiseData (const CsrHeader &header,
+                                    Ptr<Packet> record,
+                                    CsrPairwiseSecurityMode mode,
+                                    uint8_t legacyPacketType);
+  bool HandleProtectedNeighborcast (const CsrHeader &header,
+                                    Ptr<Packet> record);
   void SendControlAck (const CsrHeader &received, const char *label);
   void DiscardOutstandingKeyUpdate (CsrNodeId neighbor);
   Ptr<Packet> ProtectGroupPayload (
@@ -560,6 +600,7 @@ private:
     m_rxHelloFromHopCb;
 
   Callback<void, Ptr<Packet>, CsrNodeId> m_rxSnmpFromHopCb;
+  Callback<void, Ptr<Packet>, CsrNodeId> m_rxNeighborcastFromHopCb;
 
   Callback<bool, CsrNodeId, CsrNodeId> m_shouldDackCb;
 
@@ -589,37 +630,19 @@ private:
     m_authenticatedGroupKeyNeededCb;
   Callback<void> m_localGroupKeyChangedCb;
 
-  void NotifyNsdpFromFrame (Ptr<Packet> frame)
+  void NotifyNsdpFromEntry (const ResendEntry &entry)
   {
     if (m_nsdpDecrCb.IsNull ())
       {
         return;
       }
 
-    // Copy, then remove MAC header and peek Net header
-    Ptr<Packet> copy = frame->Copy ();
-
-    CsrHeader mh;
-    if (!copy->PeekHeader (mh))
+    if (!entry.networkFlowMetadataValid)
       {
         return;
       }
 
-    if (mh.GetType () != CSR_PKT_DATA)
-      {
-        return;
-      }
-    copy->RemoveHeader (mh);
-
-    CsrNetHeader nh;
-    if (!copy->PeekHeader (nh))
-      {
-        return;
-      }
-
-    CsrNodeId nwkSrc = nh.GetSrc ();
-    CsrNodeId nwkDst = nh.GetDst ();
-    m_nsdpDecrCb (nwkSrc, nwkDst);
+    m_nsdpDecrCb (entry.networkSource, entry.networkDestination);
   }
 
    struct NeighborInfo
@@ -656,6 +679,9 @@ private:
   std::map<CsrNodeId, PendingGroupEstablish> m_pendingGroupEstablish;
 
   static constexpr uint8_t LEGACY_DISCOVER_PACKET_TYPE = 4;
+  static constexpr uint8_t LEGACY_APP_DATA_PACKET_TYPE = 3;
+  static constexpr uint8_t LEGACY_APP_NEIGHBORCAST_PACKET_TYPE = 6;
+  static constexpr uint8_t LEGACY_APP_DATA_NO_ACK_PACKET_TYPE = 7;
   static constexpr uint8_t LEGACY_ROUTING_UPDATE_PACKET_TYPE = 8;
 
   LinkControlResult ComputeLinkControl (CsrNodeId dest);
@@ -959,6 +985,28 @@ CsrHopLayer::ProtectGroupPayload (
                          protectedMessage.record.size ());
 }
 
+Ptr<Packet>
+CsrHopLayer::ProtectPairwisePayload (
+  CsrNodeId destination,
+  CsrPairwiseSecurityMode mode,
+  uint8_t legacyPacketType,
+  Ptr<Packet> payload)
+{
+  std::vector<uint8_t> plaintext (payload->GetSize ());
+  if (!plaintext.empty ())
+    {
+      payload->CopyData (plaintext.data (), plaintext.size ());
+    }
+
+  CsrProtectedPairwiseMessage protectedMessage =
+    m_hopSecurity.ProtectPairwiseMessage (destination,
+                                          mode,
+                                          legacyPacketType,
+                                          plaintext);
+  return Create<Packet> (protectedMessage.record.data (),
+                         protectedMessage.record.size ());
+}
+
 void
 CsrHopLayer::NotifyLocalGroupKeyChanged (bool generatedNewGroupKey)
 {
@@ -1109,6 +1157,44 @@ void
 CsrHopLayer::SendData (CsrNodeId dst, uint8_t dscp,
                        Ptr<Packet> payload, bool ack)
 {
+  SendProtectedPairwiseData (
+    dst,
+    dscp,
+    payload,
+    ack,
+    CsrPairwiseSecurityMode::Pairwise16,
+    ack ? LEGACY_APP_DATA_PACKET_TYPE
+        : LEGACY_APP_DATA_NO_ACK_PACKET_TYPE,
+    CSR_PKT_DATA);
+}
+
+void
+CsrHopLayer::SendPairwise32EncryptedData (CsrNodeId dst,
+                                          uint8_t dscp,
+                                          Ptr<Packet> payload,
+                                          bool ack)
+{
+  SendProtectedPairwiseData (
+    dst,
+    dscp,
+    payload,
+    ack,
+    CsrPairwiseSecurityMode::Pairwise32Encrypt,
+    ack ? LEGACY_APP_DATA_PACKET_TYPE
+        : LEGACY_APP_DATA_NO_ACK_PACKET_TYPE,
+    CSR_PKT_PAIRWISE32_DATA);
+}
+
+void
+CsrHopLayer::SendProtectedPairwiseData (
+  CsrNodeId dst,
+  uint8_t dscp,
+  Ptr<Packet> payload,
+  bool ack,
+  CsrPairwiseSecurityMode mode,
+  uint8_t legacyPacketType,
+  uint8_t packetType)
+{
   NS_ASSERT (m_mac != nullptr);
 
   uint16_t &lastSeq = m_lastSentSeqByDest[dst];
@@ -1116,12 +1202,15 @@ CsrHopLayer::SendData (CsrNodeId dst, uint8_t dscp,
   lastSeq = seq;
 
   CsrHeader hdr (m_nodeId, dst, seq, dscp, ack, false);
-  hdr.SetType(CSR_PKT_DATA);
-  hdr.SetDestType(CSR_DEST_UNICAST);
+  hdr.SetType (packetType);
+  hdr.SetDestType (CSR_DEST_UNICAST);
+  hdr.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
   ApplyLinkControl (hdr, {dst});
-  Ptr<Packet> frame = payload->Copy ();
+  Ptr<Packet> frame = ProtectPairwisePayload (dst,
+                                              mode,
+                                              legacyPacketType,
+                                              payload);
   frame->AddHeader (hdr);
-
 
   if (ack)
     {
@@ -1155,9 +1244,71 @@ CsrHopLayer::SendData (CsrNodeId dst, uint8_t dscp,
         seq,
         frame->Copy (),
         true);
+
+      ResendEntry *resendEntry = FindResendEntry (dst, seq);
+      CsrNetHeader networkHeader;
+      if (resendEntry != nullptr &&
+          payload->GetSize () >= networkHeader.GetSerializedSize () &&
+          payload->PeekHeader (networkHeader))
+        {
+          resendEntry->networkFlowMetadataValid = true;
+          resendEntry->networkSource = networkHeader.GetSrc ();
+          resendEntry->networkDestination = networkHeader.GetDst ();
+        }
     }
 
+  std::cout << "[HOP " << m_nodeId
+            << "] TX "
+            << (mode == CsrPairwiseSecurityMode::Pairwise16
+                  ? "Pairwise16"
+                  : "Pairwise32Encrypt")
+            << " DATA"
+            << " neighbor=" << dst
+            << " hopSeq=" << seq
+            << " securityCount="
+            << m_hopSecurity.GetOwnSecurityCount ()
+            << std::endl;
+
   m_mac->EnqueueTxFrame (frame, dst, dscp, ack);
+}
+
+void
+CsrHopLayer::SendNeighborcast (uint8_t dscp, Ptr<Packet> payload)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  bool generatedNewGroupKey = false;
+  Ptr<Packet> frame = ProtectGroupPayload (
+    CsrGroupSecurityMode::Group32Encrypt,
+    LEGACY_APP_NEIGHBORCAST_PACKET_TYPE,
+    payload,
+    generatedNewGroupKey);
+
+  static uint16_t neighborcastSequence = 0;
+  CsrHeader header;
+  header.SetSrc (m_nodeId);
+  header.SetDst (CSR_BROADCAST_ID);
+  header.SetSeq (++neighborcastSequence);
+  header.SetDscp (dscp);
+  header.SetAckable (false);
+  header.SetType (CSR_PKT_NEIGHBORCAST);
+  header.SetDestType (CSR_DEST_BROADCAST);
+  header.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
+  header.SetHasGroupSecurity (true);
+  ApplyLinkControl (header, {CSR_BROADCAST_ID});
+  frame->AddHeader (header);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX Group32Encrypt AppNeighborcast"
+            << " securityCount=" << m_hopSecurity.GetOwnSecurityCount ()
+            << " securityBytes=7"
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (frame,
+                         CSR_BROADCAST_ID,
+                         dscp,
+                         false);
+  NotifyLocalGroupKeyChanged (generatedNewGroupKey);
 }
 
 void
@@ -1648,6 +1799,155 @@ CsrHopLayer::ReplayPendingGroupEstablish (CsrNodeId source)
     }
 }
 
+bool
+CsrHopLayer::HandleProtectedPairwiseData (
+  const CsrHeader &header,
+  Ptr<Packet> recordPacket,
+  CsrPairwiseSecurityMode mode,
+  uint8_t legacyPacketType)
+{
+  if (!header.HasSecurityCount ())
+    {
+      return false;
+    }
+
+  std::vector<uint8_t> record (recordPacket->GetSize ());
+  if (!record.empty ())
+    {
+      recordPacket->CopyData (record.data (), record.size ());
+    }
+
+  CsrReceivedPairwiseMessage received =
+    m_hopSecurity.ReceivePairwiseMessage (header.GetSrc (),
+                                          header.GetSecurityCount (),
+                                          mode,
+                                          legacyPacketType,
+                                          record);
+
+  if (received.status ==
+        CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
+    {
+      // A retransmission reuses both its HOP and pairwise sequences.  Repeat
+      // the ACK only after authenticating it, without delivering it twice.
+      if (header.IsAckable ())
+        {
+          HandleDataFrame (header, Create<Packet> (), false);
+        }
+      return true;
+    }
+
+  if (received.status != CsrHopSecurityReceiveStatus::Accepted &&
+      received.status != CsrHopSecurityReceiveStatus::
+        AcceptedSecurityCountChanged)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop unauthenticated pairwise DATA"
+                << " from=" << header.GetSrc ()
+                << " status="
+                << static_cast<unsigned> (received.status)
+                << std::endl;
+      return true;
+    }
+
+  if (received.status == CsrHopSecurityReceiveStatus::
+        AcceptedSecurityCountChanged)
+    {
+      DiscardOutstandingKeyUpdate (header.GetSrc ());
+      if (!m_securityCountChangeCb.IsNull ())
+        {
+          m_securityCountChangeCb (header.GetSrc ());
+        }
+    }
+
+  Ptr<Packet> plaintext = Create<Packet> (received.payload.data (),
+                                          received.payload.size ());
+  bool firstReception = CheckReceivedSeq (header.GetSrc (),
+                                          header.GetSeq (),
+                                          true);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] RX authenticated "
+            << (mode == CsrPairwiseSecurityMode::Pairwise16
+                  ? "Pairwise16"
+                  : "Pairwise32Encrypt")
+            << " DATA"
+            << " from=" << header.GetSrc ()
+            << " keyId=" << received.keyId
+            << " keySeq=" << received.sequence
+            << std::endl;
+
+  HandleDataFrame (header, plaintext, firstReception);
+  return true;
+}
+
+bool
+CsrHopLayer::HandleProtectedNeighborcast (
+  const CsrHeader &header,
+  Ptr<Packet> recordPacket)
+{
+  if (header.GetDst () != CSR_BROADCAST_ID ||
+      header.GetDestType () != CSR_DEST_BROADCAST ||
+      header.IsAckable () ||
+      !header.HasGroupSecurity () ||
+      !header.HasSecurityCount ())
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop malformed AppNeighborcast"
+                << " from=" << header.GetSrc ()
+                << std::endl;
+      return true;
+    }
+
+  std::vector<uint8_t> record (recordPacket->GetSize ());
+  if (!record.empty ())
+    {
+      recordPacket->CopyData (record.data (), record.size ());
+    }
+
+  CsrReceivedGroupMessage received =
+    m_hopSecurity.ReceiveGroupMessage (
+      header.GetSrc (),
+      header.GetSecurityCount (),
+      CsrGroupSecurityMode::Group32Encrypt,
+      LEGACY_APP_NEIGHBORCAST_PACKET_TYPE,
+      record);
+
+  if (received.status != CsrHopSecurityReceiveStatus::Accepted &&
+      received.status != CsrHopSecurityReceiveStatus::
+        AcceptedSecurityCountChanged)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop unauthenticated AppNeighborcast"
+                << " from=" << header.GetSrc ()
+                << " status="
+                << static_cast<unsigned> (received.status)
+                << std::endl;
+      return true;
+    }
+
+  if (received.status == CsrHopSecurityReceiveStatus::
+        AcceptedSecurityCountChanged &&
+      !m_securityCountChangeCb.IsNull ())
+    {
+      m_securityCountChangeCb (header.GetSrc ());
+    }
+
+  Ptr<Packet> plaintext = Create<Packet> (received.payload.data (),
+                                          received.payload.size ());
+  std::cout << "[HOP " << m_nodeId
+            << "] RX authenticated Group32Encrypt AppNeighborcast"
+            << " from=" << header.GetSrc ()
+            << " keyId=" << received.groupKeyId
+            << " groupSeq=" << received.groupSequence
+            << std::endl;
+
+  if (!m_rxNeighborcastFromHopCb.IsNull ())
+    {
+      m_rxNeighborcastFromHopCb (plaintext, header.GetSrc ());
+    }
+  return true;
+}
+
 void
 CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 {
@@ -1764,6 +2064,12 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           m_rxHelloFromHopCb (frame, hdr.GetSrc (), pathlossDb, snrDb);
         }
 
+      return;
+    }
+
+  if (hdr.GetType () == CSR_PKT_NEIGHBORCAST)
+    {
+      HandleProtectedNeighborcast (hdr, frame);
       return;
     }
 
@@ -2169,6 +2475,29 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
       return;
     }
+
+  if (hdr.GetType () == CSR_PKT_PAIRWISE32_DATA)
+    {
+      HandleProtectedPairwiseData (
+        hdr,
+        frame,
+        CsrPairwiseSecurityMode::Pairwise32Encrypt,
+        hdr.IsAckable () ? LEGACY_APP_DATA_PACKET_TYPE
+                         : LEGACY_APP_DATA_NO_ACK_PACKET_TYPE);
+      return;
+    }
+
+  if (hdr.GetType () == CSR_PKT_DATA && hdr.HasSecurityCount ())
+    {
+      HandleProtectedPairwiseData (
+        hdr,
+        frame,
+        CsrPairwiseSecurityMode::Pairwise16,
+        hdr.IsAckable () ? LEGACY_APP_DATA_PACKET_TYPE
+                         : LEGACY_APP_DATA_NO_ACK_PACKET_TYPE);
+      return;
+    }
+
   // Duplicate suppression: check if this (src, seq) has been seen before
   bool firstReception =
     CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq (), true);
@@ -2430,7 +2759,7 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
 	  // Inform Net layer only when the single resend transaction is complete.
   if (allTargetsAcked)
     {
-      NotifyNsdpFromFrame (entry->frame);
+      NotifyNsdpFromEntry (*entry);
     }
 
   if (entry->flowControlTracked && allTargetsAcked)
@@ -2689,8 +3018,7 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
   // - release the NWK source/destination flow count immediately
   // - keep the HOP per-neighbor flow-control slot held until
   //   the DACK timer expires.
-  NotifyNsdpFromFrame (
-    entry->frame);
+  NotifyNsdpFromEntry (*entry);
 
   DackEntry de;
   de.dest =
@@ -3001,7 +3329,7 @@ CsrHopLayer::CheckResend ()
           // even after that target already ACKed.
 
           // Inform Net layer that this flow lost a packet
-          NotifyNsdpFromFrame (e.frame);
+          NotifyNsdpFromEntry (e);
 
           if (e.flowControlTracked)
             {
