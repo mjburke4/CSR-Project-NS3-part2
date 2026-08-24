@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-08-21
+Updated: 2026-08-24
 
 ## Scope and confidence limits
 
@@ -17,10 +17,11 @@ ARL implementation, including automatic changed-route fanout, routing requests,
 and full INFO/UPDATE/FLUSH snapshots. Together with `csr_api_routes.h`,
 `csr_api_linkchar.h`, and the original `br_*.pk.m` definitions, this supports a
 source-backed routing audit. The later-supplied `arlSecurity.c`,
-`arlSecurity.h`, `packetTypes.h`, and `msectime.*` additionally establish the
-KeyRequest/KeyUpdate security records, millisecond timer units, and the
-ACK-driven group-key lifecycle. Exact end-to-end certification still requires
-the production cryptographic dependencies and authoritative OPNET/ns-3 trace
+`arlSecurity.h`, `packetTypes.h`, `msectime.*`, and split
+`arlAuthTag.c`/`arlContext.c`/`arlEncrypt.c`/`arlKey.c` sources establish the
+KeyRequest/KeyUpdate security records, exact enabled cryptographic transforms,
+millisecond timer units, and the ACK-driven group-key lifecycle. Exact
+end-to-end certification still requires authoritative OPNET/ns-3 trace
 comparison.
 
 ## Current status
@@ -31,7 +32,7 @@ comparison.
 | Full NWK routing behavior | 84-90% | ARL byte-stream exchange, 24-bit node identifiers, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing, non-address packet-model fields, and untested edge cases rather than an unavailable routing implementation. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
 | HOP | 88-92% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, and OPNET DATA-versus-control timeout effects are covered. |
-| Production hop security | 35-45% | Exact 7-byte KeyRequest and 51-byte KeyUpdate records, pairwise counters, anti-replay state, key history, and security-count reset exist. AES/HMAC transforms, key derivation/provisioning, and authenticated acceptance are intentionally not implemented yet. |
+| Full hop security | 60-70% | KeyRequest and KeyUpdate now use source-faithful PBKDF2-HMAC-SHA1 derivation, HMAC tags, AES-256-CBC wrapping, injectable keys, a 128-entry replay window, and authentication-before-ACK/admission. GroupEstablish, Group16, Group32Encrypt, queued group decoding, and operational key-store hardware remain. |
 | MAC transmit/control | 80-90% | Slot selection, holdoff, ACK priority, queue limits, concatenation, rate/power aggregation, preamble selection, and freshness are covered. |
 | Full MAC including receive contention | 55-65% | OPNET Idle/Search/Track receive state, acquisition, overlapping signals, capture/collision, and RX-induced slot freezing are not yet reproduced. |
 | PHY | 15-30% | The current log-distance/PER model does not reproduce the supplied OPNET radio pipeline. |
@@ -63,6 +64,16 @@ completion.
 - Exact security-record layouts: seven-byte Pairwise32 KeyRequest and 51-byte
   KeyUpdate, including 12-bit packed key/sequence fields and the two-byte
   security-count envelope.
+- Enabled KeyRequest/KeyUpdate crypto: source-faithful A5/5A protection-key
+  derivation, four-/eight-byte truncated HMAC-SHA1 tags, pairwise wrapping-key
+  derivation, AES-256-CBC group-key wrap/unwrap, AES-256-CTR primitive, and
+  injectable synthetic mission/pairwise/group keys.
+- Authentication precedes KeyUpdate HOP replay bookkeeping, ACK generation,
+  group-key installation, and ARL admission. Tampered or wrong-key traffic
+  cannot poison the receive window or earn an ACK.
+- Target `SLIDINGWINDOW` behavior with 128 combined key-ID/sequence entries,
+  out-of-order acceptance, authenticated duplicate classification, full
+  16-bit security counts, and modulo restart-count validation.
 - Inactive-neighbor DATA rejection with CHECK_MESSAGE initiation, continued
   RoutingUpdate processing from inactive neighbors, and relationship reset on
   remote security-count change.
@@ -87,16 +98,20 @@ completion.
 - Aggregate rate/power and preamble selection across all destinations,
   preamble freshness, wireless overhearing, and live HOP link-control results.
 
-## Step 1: ARL admission and hop-security foundation
+## Steps 1-2: admission and KeyRequest/KeyUpdate crypto
 
-The first parity step is complete at the behavioral and wire-foundation level.
-The mapping is:
+The ARL admission step and enabled KeyRequest/KeyUpdate crypto step are
+complete. The mapping is:
 
 | Legacy source behavior | ns-3 implementation | Verification |
 | --- | --- | --- |
 | `routesRcvUnAuthedMsg(Discover)` resets 5000-ms delays and sends KeyRequest | `EvaluateNeighborAdmission()` and `SendKeyRequest()` | Admission smoke test observes KeyRequest and blocks pre-admission DATA. |
 | KeyRequest is unicast Pairwise32 with `NoAck`/`NoResend` and neighbor immediate tag | `CsrHopLayer::SendKeyRequest()` and MAC type cancellation | Seven-byte golden vector plus lifecycle test. |
 | KeyUpdate is reliable and carries KeyUpdate security | `CsrHopLayer::SendKeyUpdate()` through the existing ACK/resend queue | 51-byte golden vector and ACK-completion assertions. |
+| MNK + pairwise material + A5/5A pad PBKDF2 derives AES/HMAC protection keys | `CsrLegacyCrypto::DeriveProtectionKeys()` | Deterministic legacy record vectors plus standard PBKDF2/HMAC vectors. |
+| KeyUpdate HMAC covers the plaintext group key; its IV is tag + five-byte PRN + source | `ComputeKeyUpdateAuthTag()` and `BuildKeyUpdateIv()` | Exact independently generated 51-byte record and tamper tests. |
+| Pairwise wrapping key uses MNK + 64-byte pairwise material and source/count/group-ID/PRN salt | `DerivePairwiseWrappingKey()` | Exact AES-256-CBC ciphertext and recovered group-key assertions. |
+| Bad authentication is rejected before HOP ACK/replay/admission | KeyUpdate receive ordering in `CsrHopLayer::ReceiveFromMac()` | A bad frame followed by the valid frame with the same HOP sequence produces zero then one ACK. |
 | Valid KeyUpdate is ACKed and causes a reciprocal update | HOP receive path and `NoteKeyUpdateReceived()` | Both peers must report sent and received keys. |
 | Outbound key is sent only after its ACK | `MarkKeyUpdateAcked()` and `NoteKeyUpdateCompletion()` | State test proves enqueue alone is insufficient and records ACK time. |
 | Both key directions plus CHECK_DISCOVERY/CHECK_OVERHEARD/CHECK_MESSAGE admit a neighbor | `TryMakeNeighborActive()` and the admission check state | Route is unusable before admission and selectable afterward. |
@@ -104,37 +119,29 @@ The mapping is:
 
 The KeyUpdate wire record deliberately reserves six data-PRN bytes because
 that is what `hopSecLayer.c` places on the packet. `arlSecurity.h` defines a
-five-byte pseudorandom value, so the sixth byte is treated as a preserved wire
-byte. This discrepancy must remain visible when real crypto is connected.
+five-byte pseudorandom value, so enabled crypto uses only the first five bytes;
+the ns-3 sender makes the otherwise uninitialized sixth byte deterministic by
+setting it to zero.
 
-This is not production authentication yet. The legacy source contains a
-compile-time non-`SECURITY` fallback that zero-fills authentication fields, and
-the ns-3 foundation currently models that behavior. The subsequently supplied
-target `parameters.h` defines `SECURITY`, `SLIDINGWINDOW`, and `KEYS_IN_FLASH`,
-so final target-build parity requires the enabled AES/HMAC and provisioned-key
-path. The record sizes and lifecycle boundaries are ready for that provider
-without changing routing admission.
+The portable provider uses synthetic injected key material instead of
+`KEYS_IN_FLASH` and key-manager hardware. This preserves packet and state
+behavior without embedding operational keys or radio-specific storage in the
+simulator.
 
 ## Highest-priority remaining non-PHY work
 
-1. Implement and vector-test actual key provisioning, derivation, AES, HMAC,
-   KeyRequest authentication, and KeyUpdate wrap/verify behavior. The supplied
-   security bundle provides HMAC, key-lookup, parameters, sliding-window code,
-   and the AES interface, but still lacks the AES and SHA-160 implementations,
-   `arlSecurityInternal.c`, and a portable master/pairwise-key provisioning
-   path. Its `arlSecurityInternal.h` also lacks the security-count parameters
-   used by the supplied `arlSecurity.c`, indicating a source-version mismatch
-   that should be resolved before treating it as an executable oracle.
-2. Extend that crypto provider through the remaining `GroupEstablish`,
+1. Extend the portable crypto provider through the remaining `GroupEstablish`,
    `Group16`, and `Group32Encrypt` packet modes without changing the new
-   admission state machine.
-3. Resolve relay-holdoff signaling and control ordering against its legacy
+   admission state machine, including queued unauthenticated group messages.
+2. Resolve relay-holdoff signaling and control ordering against its legacy
    wrapper.
-4. Finish the non-address packet-model audit, especially aggregate nesting and
+3. Finish the non-address packet-model audit, especially aggregate nesting and
    fields represented by ns-3 compatibility envelopes rather than direct
    `br_*.pk.m` equivalents.
-5. Audit extra NWK queue wakeups and route/security edge cases with differential
+4. Audit extra NWK queue wakeups and route/security edge cases with differential
    traces from identical OPNET/ns-3 topologies, seeds, and loss schedules.
+5. Then implement the OPNET MAC receive/contention state machine before PHY
+   calibration.
 
 ## Deferred MAC/PHY work
 
@@ -155,18 +162,21 @@ without changing routing admission.
 4. Sustained lossy overload across all queue limits with counter invariants.
 5. Hidden-terminal and sleep/wake boundary cases after MAC/PHY work begins.
 6. Differential traces using identical OPNET/ns-3 topology, traffic, and seed.
-7. Lost KeyRequest, lost KeyUpdate ACK, security-count restart, and pairwise
-   sequence/key-ID rollover during admission.
+7. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
+   during admission. Focused tests now cover authenticated security-count
+   restart and wrap.
 
 ## Current regression baseline
 
-The complete ns-3 build, all 19 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision. The new admission test covers
-pre-admission DATA rejection, reciprocal key exchange, ACK-driven outbound-key
-completion, NeighborCheck activation, route selection, and exactly-once
-post-admission DATA delivery. The wire test covers exact 7/51-byte security
-records, shared pairwise sequencing, replay rejection, and security-count
-reset. The autonomous convergence test still covers a lossless 0-1-2 line with
-no static routes, complete ARL snapshot ACK/reassembly state, bidirectional
-two-hop learning, and exactly-once DATA delivery. Warnings are limited to the
-pre-existing unused callback/CSV helper warnings.
+The complete ns-3 build, all 20 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision (21/21). The crypto test covers
+standard primitive vectors, exact 7-/51-byte enabled-security vectors, tamper
+and wrong-key rejection, authentication-before-ACK, group-key recovery,
+128-entry replay behavior, and 16-bit security-count wrap. The admission test
+still covers pre-admission DATA rejection, reciprocal key exchange,
+ACK-driven outbound-key completion, NeighborCheck activation, route selection,
+and exactly-once post-admission DATA delivery. The autonomous convergence test
+still covers a lossless 0-1-2 line with no static routes, complete ARL snapshot
+ACK/reassembly state, bidirectional two-hop learning, and exactly-once DATA
+delivery. Warnings are limited to the pre-existing unused callback/CSV helper
+warnings.

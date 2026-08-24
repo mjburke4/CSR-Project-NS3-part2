@@ -1,16 +1,15 @@
 # ARL neighbor admission and hop-security foundation
 
-Updated: 2026-08-21
+Updated: 2026-08-24
 
 ## Implemented scope
 
 This implementation reproduces the legacy ARL neighbor-admission lifecycle and
-establishes final-size KeyRequest/KeyUpdate records. Counters, replay state,
-reliable completion, and admission are live, while cryptographic byte arrays
-remain zero-filled using the legacy source's compile-time non-`SECURITY`
-fallback. The subsequently supplied target `parameters.h` defines `SECURITY`,
-so this is an integration foundation rather than final target-build crypto
-parity.
+the enabled target build's KeyRequest/KeyUpdate cryptography. The model now
+uses the source's SHA-1, HMAC-SHA1, one-iteration PBKDF2 derivations,
+AES-256-CBC group-key wrapping, 128-entry pairwise replay window, reliable
+completion, and admission decisions. Embedded flash and key-manager access are
+replaced by injectable synthetic mission, pairwise, and group keys.
 
 The admission invariant is:
 
@@ -30,12 +29,15 @@ advertised.
 | KeyRequest uses Pairwise32, unicast, `NoAck`, `NoResend`, and neighbor immediate tag | `CsrHopLayer::SendKeyRequest()` / `CsrMacCore::CancelQueuedFramesByType()` |
 | Received KeyRequest sends KeyUpdate unless a previously ACKed key is already recorded | `CsrNetLayer::NoteKeyRequestReceived()` |
 | KeyUpdate is reliable; receive ACKs it and starts a reciprocal KeyUpdate | `CsrHopLayer` KeyUpdate receive path / `CsrNetLayer::NoteKeyUpdateReceived()` |
+| Pairwise protection keys use MNK + pairwise material + A5/5A pads and source/count/key-ID salt | `CsrLegacyCrypto::DeriveProtectionKeys()` |
+| KeyRequest authenticates its packed key-ID/sequence with a four-byte Pairwise32 HMAC | `CsrHopSecurityState::BuildKeyRequest()` / `ReceiveKeyRequest()` |
+| KeyUpdate authenticates the plaintext group key, derives a pairwise wrapping key, and uses AES-256-CBC | `CsrHopSecurityState::BuildKeyUpdate()` / `ReceiveKeyUpdate()` |
 | `setGroupKeySentTrue()` occurs only after reliable ACK | `CsrHopSecurityState::MarkKeyUpdateAcked()` |
 | Two key directions are required before NeighborCheck can activate the peer | `CsrNetLayer::TryMakeNeighborActive()` |
 | CHECK_DISCOVERY is deferred until outbound KeyUpdate ACK | `SendPendingDiscoveryCheck()` |
 | DATA from inactive peer is rejected and starts CHECK_MESSAGE | `AcceptFromNeighbor()` / `EnsureCheckMessage()` |
 | RoutingUpdate from inactive peer is processed while CHECK_MESSAGE starts | `ProcessArlRouteMessage()` |
-| Remote security-count change invalidates old key/admission state | `CsrHopSecurityState::AcceptPairwiseSequence()` / `NoteSecurityCountChange()` |
+| Remote security-count change invalidates old key/admission state after authentication | `CsrHopSecurityState::CommitAuthenticatedPairwise()` / `NoteSecurityCountChange()` |
 
 ## Security records
 
@@ -46,21 +48,28 @@ advertised.
 
 `arlSecurity.h` defines `PSEUDORANDOM_NUMBER_SIZE_IN_BYTES` as five bytes, but
 the legacy HOP-security packet construction reserves six bytes. The ns-3 record
-preserves the six-byte observed wire layout; real crypto should populate the
-five API bytes and explicitly define the remaining wire byte.
+preserves the six-byte observed wire layout. Crypto uses the first five bytes;
+the deterministic ns-3 sender sets the sixth reserved byte to zero and the
+receiver excludes it from authentication, matching the legacy call boundary.
 
-The security count is a 12-bit value carried in a two-byte optional field in
-the ns-3 HOP compatibility envelope. Existing packet sizes are unchanged when
-the field is absent.
+The security count is a full 16-bit restart counter carried in a two-byte
+optional field in the ns-3 HOP compatibility envelope. Key IDs and sequences
+remain 12-bit fields. Existing packet sizes are unchanged when the security
+count is absent.
 
 ## State and failure behavior
 
 - KeyRequest and KeyUpdate share one outbound pairwise key/sequence stream per
   neighbor.
-- Inbound pairwise key/sequence state rejects duplicate or stale records.
+- Inbound pairwise key/sequence state uses the target `SLIDINGWINDOW`
+  configuration's 128-entry window. Authenticated out-of-order records inside
+  the window are accepted; authenticated duplicates and records before the
+  window are rejected.
+- Authentication occurs before a KeyUpdate can consume HOP replay state,
+  receive an ACK, install a group key, or affect ARL admission.
 - A changed remote security count replaces the old neighbor security state,
   cancels an obsolete outbound KeyUpdate, and returns the NWK neighbor to
-  inactive.
+  inactive only after the first packet under the new count authenticates.
 - A KeyUpdate enqueue does not complete the outbound-key state. Only its HOP
   ACK records `groupKeySent` and the send-completion time.
 - Reliable KeyUpdate and NeighborCheck exhaustion are reported to NWK so their
@@ -70,25 +79,27 @@ the field is absent.
 
 ## Verification
 
-- `csr-wire-format-smoke.cc` checks golden 7-byte and 51-byte vectors, header
-  round trips, shared pairwise sequencing, ACK-only key-send completion,
-  replay rejection, and security-count reset.
+- `csr-hop-security-crypto-smoke.cc` checks standard SHA-1, HMAC-SHA1,
+  PBKDF2, AES-256-CBC, and AES-CTR vectors; independently generated 7-byte and
+  51-byte legacy security vectors; group-key recovery; tamper and wrong-key
+  rejection; authentication-before-ACK; the 128-entry replay window; and
+  16-bit security-count wrap.
+- `csr-wire-format-smoke.cc` checks hand-built record layouts, header round
+  trips, shared pairwise sequencing, ACK-only key-send completion,
+  authenticated replay classification, and security-count reset.
 - `csr-nwk-arl-admission-security-smoke.cc` checks pre-admission DATA rejection,
   reciprocal keys, NeighborCheck activation, admitted route selection, and
   exactly-once post-admission delivery.
-- The entire current regression baseline passes: 19 smoke targets plus
-  `csr-mac-demo-split`.
+- The complete build and regression pass: 20 focused smoke targets plus
+  `csr-mac-demo-split` (21/21).
 
 ## Deliberate boundary
 
-No packet is cryptographically authenticated or encrypted yet. Completing that
-work requires the internal derivation implementation, AES and SHA-160
-implementations, and a portable replacement or model for flash-backed mission
-and pairwise-key provisioning. The supplied follow-on bundle provides
-`hmacBasedOnSha160.*`, `arlKeyLookup.*`, `parameters.h`, `slidingw.*`, `aes.h`,
-and `arlSecurityInternal.h`. However, its internal header omits
-security-count arguments that are present at the corresponding call sites in
-the supplied `arlSecurity.c`; a matching `arlSecurityInternal.c/.h` pair or
-known-good crypto vectors is therefore needed before exact crypto integration.
-The new `CsrHopSecurityState` is the seam for that provider; the ARL admission
-state machine should not need to be redesigned.
+This step completes enabled crypto for KeyRequest and KeyUpdate, not every HOP
+security mode. `GroupEstablish`, `Group16`, and `Group32Encrypt`, including
+queued unauthenticated group traffic, remain to be connected to the portable
+provider. The default ns-3 key arrays are deterministic and non-secret so old
+scenarios remain runnable; parity or security experiments should explicitly
+inject synthetic per-scenario mission, pairwise, and group keys. The model does
+not reproduce flash storage, operational key loading, or key-manager hardware,
+and no operational keys are stored in the repository.
