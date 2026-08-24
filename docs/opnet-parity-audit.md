@@ -28,10 +28,10 @@ certification still requires authoritative OPNET/ns-3 trace comparison.
 
 | Area | Estimated parity | Evidence and remaining uncertainty |
 | --- | ---: | --- |
-| Visible NWK wrapper behavior | 92-95% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, active-node accounting, and automatic changed-route propagation are covered. |
+| Visible NWK wrapper behavior | 93-96% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, and automatic changed-route propagation are covered. |
 | Full NWK routing behavior | 84-90% | ARL byte-stream exchange, 24-bit node identifiers, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing, non-address packet-model fields, and untested edge cases rather than an unavailable routing implementation. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 89-93% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing control, and OPNET DATA-versus-control timeout effects are covered. |
+| HOP | 90-94% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing control, one-hop SNMP dispatch ordering, and OPNET DATA-versus-control timeout effects are covered. |
 | Full hop security | 78-85% | KeyRequest, KeyUpdate, GroupEstablish, Group16, and the Group32Encrypt provider now use source-faithful KDF, HMAC, AES, key-rotation, replay, deferred-decode, and authentication-before-ACK/admission behavior. Remaining gaps are live AppNeighborcast Group32 integration, Pairwise16/Pairwise32Encrypt data paths, exact outer packet wrappers, and operational key-store hardware. |
 | MAC transmit/control | 80-90% | Slot selection, holdoff, ACK priority, queue limits, concatenation, rate/power aggregation, preamble selection, and freshness are covered. |
 | Full MAC including receive contention | 55-65% | OPNET Idle/Search/Track receive state, acquisition, overlapping signals, capture/collision, and RX-induced slot freezing are not yet reproduced. |
@@ -39,7 +39,7 @@ certification still requires authoritative OPNET/ns-3 trace comparison.
 
 Overall estimates:
 
-- NWK/HOP/MAC protocol-control behavior excluding PHY: 85-91% complete.
+- NWK/HOP/MAC protocol-control behavior excluding PHY: 86-92% complete.
 - Whole in-scope radio behavior including PHY, excluding battery and BBN:
   62-71%
   complete.
@@ -95,6 +95,9 @@ completion.
   record tests. HOP sequence and ARL hop-count fields remain 16-bit.
 - Automatic ARL changed-route propagation and deterministic bidirectional
   three-node convergence from empty route tables without static routes.
+- Source-backed SNMP relay controls: command values 5/6, one-hop non-ACK
+  delivery, stable equal-priority ordering, no HOP-neighbor freshness update,
+  and the legacy stored-but-inert `relay_holdoff` flag.
 - Relay custody, reverse routes, invalidation, alternate paths, and no-route
   ACK behavior.
 - 16-bit HOP sequences, cumulative ACK/DACK windows, duplicate suppression,
@@ -144,18 +147,38 @@ The portable provider uses synthetic injected key material instead of
 behavior without embedding operational keys or radio-specific storage in the
 simulator.
 
+## Step 4: relay-holdoff signaling and control ordering
+
+The supplied wrapper resolves the relay-holdoff ambiguity as a control-state
+feature, not a working transit gate. `br_support.h` assigns commands 5 and 6,
+and `br_nwk.pr.c` stores or clears `BrT_Neighbor_Entry::relay_holdoff`. No
+supplied queue, forwarding, or flow-control path ever reads that field.
+Adding a transit block would therefore diverge from the executable OPNET
+wrapper.
+
+| Legacy source behavior | ns-3 implementation | Verification |
+| --- | --- | --- |
+| `SNMP_RELAY_HOLDOFF == 5` and `SNMP_RELAY_CLEAR == 6` | Explicit `CsrSnmpCommand` values and `SendRelayHoldoff()` / `SendRelayClear()` | Serialized command-byte assertions. |
+| `br_SNMP` bypasses ACK/resend and DATA flow control | Existing `CsrHopLayer::SendSnmp()` path with sequence zero, DSCP zero, and no ACK | No HOP pending-DATA, resend, or MAC ACK-queue entry. |
+| Equal-DSCP packets retain insertion order and may be concatenated | Existing stable MAC insertion and aggregate segment order | HOLD followed by CLEAR in one aggregate leaves the flag clear. |
+| HOP forwards SNMP before `update_neighbor()` and returns | SNMP dispatch remains before `UpdateNeighborHeard()` | Control reception leaves the HOP last-heard timestamp unchanged. |
+| NWK looks up the pre-existing source neighbor and writes the flag synchronously | Known-neighbor state in `ReceiveSnmpFromHop()` | Unknown controls do not create a neighbor; ordered controls update counters and final state. |
+| `check_nwk_queue()` never reads `relay_holdoff` | The flag is exposed for observation but deliberately omitted from queue admission | Three-node transit DATA is delivered while HOLD is stored. |
+
+The exact command IDs and behavior are now source-backed. The current compact
+SNMP compatibility envelope is retained; reproducing every outer `br_SNMP`
+field remains part of the next packet-model audit.
+
 ## Highest-priority remaining non-PHY work
 
-1. Resolve relay-holdoff signaling and control ordering against its legacy
-   wrapper.
-2. Finish the non-address packet-model audit, especially aggregate nesting,
+1. Finish the non-address packet-model audit, especially aggregate nesting,
    the live AppNeighborcast Group32 path, remaining pairwise modes, and fields
    represented by ns-3 compatibility envelopes rather than direct `br_*.pk.m`
    equivalents.
-3. Audit extra NWK queue wakeups and route/security edge cases with differential
+2. Audit extra NWK queue wakeups and route/security edge cases with differential
    traces from identical OPNET/ns-3 topologies, seeds, and loss schedules.
-4. Implement the OPNET MAC receive/contention state machine.
-5. Then calibrate the supplied OPNET PHY pipeline against differential traces.
+3. Implement the OPNET MAC receive/contention state machine.
+4. Then calibrate the supplied OPNET PHY pipeline against differential traces.
 
 ## Deferred MAC/PHY work
 
@@ -182,8 +205,11 @@ simulator.
 
 ## Current regression baseline
 
-The complete ns-3 build, all 21 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision (22/22). The pairwise crypto
+The complete ns-3 build, all 22 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision (23/23). The relay-holdoff
+test covers command bytes, one-hop no-ACK handling, FIFO HOLD/CLEAR ordering,
+known-neighbor state, no freshness update, and transit delivery while held.
+The pairwise crypto
 test covers standard primitive vectors, exact 7-/51-byte enabled-security
 vectors, tamper
 and wrong-key rejection, authentication-before-ACK, group-key recovery,
