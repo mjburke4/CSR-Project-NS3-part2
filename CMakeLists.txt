@@ -4,12 +4,14 @@ build_lib(
     model/csr-module.cc
     model/csr-arl-routing-message.cc
     model/csr-hello-header.cc
+    model/csr-legacy-crypto.cc
     model/csr-hop-security.cc
   HEADER_FILES
     model/csr-arl-routing-message.h
     model/csr-common.h
     model/csr-wire-format.h
     model/csr-hello-header.h
+    model/csr-legacy-crypto.h
     model/csr-hop-security.h
     model/csr-phy-model.h
     model/csr-mac-core.h

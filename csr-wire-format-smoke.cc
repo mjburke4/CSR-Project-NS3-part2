@@ -294,14 +294,19 @@ CheckHopSecurityState ()
   state.SetNodeId (0x010203);
   state.SetOwnSecurityCount (7);
 
+  CsrHopSecurityState peer;
+  peer.SetNodeId (0x040506);
+  peer.SetOwnSecurityCount (7);
+
   CsrKeyRequestHeader request = state.BuildKeyRequest (0x040506);
   CsrKeyUpdateHeader outbound = state.BuildKeyUpdate (0x040506);
 
-  Require (request.GetSequence () == 1 &&
-           outbound.GetSequence () == 2,
+  Require (request.GetSequence () == 2 &&
+           outbound.GetSequence () == 3,
            "pairwise sequence did not advance across security modes");
-  Require (outbound.GetGroupKeyId () == 0,
-           "non-SECURITY KeyUpdate did not use the legacy zero group-key ID");
+  Require (outbound.GetGroupKeyId () == 1 &&
+           outbound.GetDataPrn ().back () == 0,
+           "enabled-security KeyUpdate fields do not match the target build");
   Require (state.IsKeyUpdateSendActive (0x040506) &&
            !state.HasGroupKeySentTo (0x040506),
            "KeyUpdate was marked sent before its reliable ACK");
@@ -314,23 +319,20 @@ CheckHopSecurityState ()
            sentWhen == MilliSeconds (123),
            "ACK did not complete and timestamp the outbound group key");
 
-  CsrKeyUpdateHeader inbound;
-  inbound.SetKeyId (3);
-  inbound.SetSequence (9);
-  inbound.SetGroupKeyId (11);
+  CsrKeyUpdateHeader inbound = peer.BuildKeyUpdate (0x010203);
 
   Require (state.ReceiveKeyUpdate (0x040506, 7, inbound) ==
              CsrHopSecurityReceiveStatus::Accepted &&
            state.HasGroupKeyReceivedFrom (0x040506),
            "first inbound KeyUpdate was not accepted");
   Require (state.ReceiveKeyUpdate (0x040506, 7, inbound) ==
-             CsrHopSecurityReceiveStatus::DuplicateOrStale,
-           "replayed KeyUpdate bypassed pairwise anti-replay state");
+             CsrHopSecurityReceiveStatus::AuthenticatedDuplicate,
+           "authenticated KeyUpdate replay was not classified as duplicate");
 
-  CsrKeyUpdateHeader restarted;
-  restarted.SetKeyId (0);
-  restarted.SetSequence (1);
-  restarted.SetGroupKeyId (1);
+  CsrHopSecurityState restartedPeer;
+  restartedPeer.SetNodeId (0x040506);
+  restartedPeer.SetOwnSecurityCount (8);
+  CsrKeyUpdateHeader restarted = restartedPeer.BuildKeyUpdate (0x010203);
   Require (state.ReceiveKeyUpdate (0x040506, 8, restarted) ==
              CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged,
            "new security count did not reset pairwise replay state");

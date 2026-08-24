@@ -204,6 +204,34 @@ public:
     return m_hopSecurity.GetOwnSecurityCount ();
   }
 
+  /** Provision the mission key used by the portable security provider. */
+  void SetMissionKey (const CsrHopSecurityState::MissionKey &missionKey)
+  {
+    m_hopSecurity.SetMissionKey (missionKey);
+  }
+
+  /** Provision default pairwise material for simulation neighbors. */
+  void SetDefaultPairwiseKeyMaterial (
+    const CsrHopSecurityState::PairwiseKeyMaterial &pairwiseMaterial)
+  {
+    m_hopSecurity.SetDefaultPairwiseKeyMaterial (pairwiseMaterial);
+  }
+
+  /** Provision pairwise material shared with one neighbor. */
+  void SetPairwiseKeyMaterial (
+    CsrNodeId neighbor,
+    const CsrHopSecurityState::PairwiseKeyMaterial &pairwiseMaterial)
+  {
+    m_hopSecurity.SetPairwiseKeyMaterial (neighbor, pairwiseMaterial);
+  }
+
+  /** Provision the group key distributed by this node. */
+  void SetGroupKeyMaterial (
+    const CsrHopSecurityState::GroupKeyMaterial &groupKeyMaterial)
+  {
+    m_hopSecurity.SetGroupKeyMaterial (groupKeyMaterial);
+  }
+
   void PrintNeighbors () const;
 
   bool HasNeighbor (CsrNodeId neighbor) const
@@ -1433,7 +1461,19 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           hdr.GetSecurityCount (),
           securityHeader);
 
-      if (status == CsrHopSecurityReceiveStatus::DuplicateOrStale)
+      if (status == CsrHopSecurityReceiveStatus::AuthenticationFailed)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop unauthenticated KeyRequest"
+                    << " from=" << hdr.GetSrc ()
+                    << " keyId=" << securityHeader.GetKeyId ()
+                    << " keySeq=" << securityHeader.GetSequence ()
+                    << std::endl;
+          return;
+        }
+
+      if (status == CsrHopSecurityReceiveStatus::DuplicateOrStale ||
+          status == CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
         {
           std::cout << "[HOP " << m_nodeId
                     << "] Drop duplicate/stale KeyRequest"
@@ -1445,7 +1485,7 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
         }
 
       std::cout << "[HOP " << m_nodeId
-                << "] RX hop-security-foundation KeyRequest"
+                << "] RX authenticated KeyRequest"
                 << " from=" << hdr.GetSrc ()
                 << " keyId=" << securityHeader.GetKeyId ()
                 << " keySeq=" << securityHeader.GetSequence ()
@@ -1487,25 +1527,22 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
       CsrKeyUpdateHeader securityHeader;
       frame->RemoveHeader (securityHeader);
 
-      bool firstReception =
-        CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq (), false);
-
-      if (!firstReception)
-        {
-          // The original ACK may have been lost.  Do not re-run key state,
-          // but repeat the exact ACK as legacy HOP does for reliable traffic.
-          if (hdr.IsAckable ())
-            {
-              SendControlAck (hdr, "duplicate KeyUpdate");
-            }
-          return;
-        }
-
       CsrHopSecurityReceiveStatus status =
         m_hopSecurity.ReceiveKeyUpdate (
           hdr.GetSrc (),
           hdr.GetSecurityCount (),
           securityHeader);
+
+      if (status == CsrHopSecurityReceiveStatus::AuthenticationFailed)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop unauthenticated KeyUpdate"
+                    << " from=" << hdr.GetSrc ()
+                    << " keyId=" << securityHeader.GetKeyId ()
+                    << " keySeq=" << securityHeader.GetSequence ()
+                    << std::endl;
+          return;
+        }
 
       if (status == CsrHopSecurityReceiveStatus::DuplicateOrStale)
         {
@@ -1518,8 +1555,31 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           return;
         }
 
+      if (status == CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
+        {
+          // The original ACK may have been lost. Authenticate a retransmit
+          // before repeating its ACK, but do not apply its key state twice.
+          if (hdr.IsAckable ())
+            {
+              SendControlAck (hdr, "authenticated duplicate KeyUpdate");
+            }
+          return;
+        }
+
+      bool firstReception =
+        CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq (), false);
+
+      if (!firstReception)
+        {
+          if (hdr.IsAckable ())
+            {
+              SendControlAck (hdr, "duplicate KeyUpdate");
+            }
+          return;
+        }
+
       std::cout << "[HOP " << m_nodeId
-                << "] RX hop-security-foundation KeyUpdate"
+                << "] RX authenticated KeyUpdate"
                 << " from=" << hdr.GetSrc ()
                 << " keyId=" << securityHeader.GetKeyId ()
                 << " keySeq=" << securityHeader.GetSequence ()

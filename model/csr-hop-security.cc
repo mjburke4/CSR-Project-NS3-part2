@@ -2,12 +2,26 @@
 
 #include "ns3/abort.h"
 
+#include <algorithm>
+
 namespace ns3 {
 
 namespace
 {
 
 static constexpr uint16_t CSR_SECURITY_COUNTER_MAX = 0x0fff;
+static constexpr uint8_t CSR_LEGACY_KEY_UPDATE_TYPE = 0x01;
+static constexpr uint8_t CSR_LEGACY_KEY_REQUEST_TYPE = 0x02;
+
+std::array<uint8_t, 3>
+SerializePackedKeySequence (uint16_t keyId, uint16_t sequence)
+{
+  return {
+    static_cast<uint8_t> (keyId >> 4),
+    static_cast<uint8_t> ((keyId << 4) | (sequence >> 8)),
+    static_cast<uint8_t> (sequence)
+  };
+}
 
 void
 WritePackedKeySequence (Buffer::Iterator &start,
@@ -281,6 +295,25 @@ CsrKeyUpdateHeader::GetAuthTag () const
   return m_authTag;
 }
 
+CsrHopSecurityState::CsrHopSecurityState ()
+{
+  // These deterministic values are simulation-only defaults. Applications
+  // can inject synthetic scenario keys through the provisioning methods.
+  for (std::size_t i = 0; i < m_missionKey.size (); ++i)
+    {
+      m_missionKey[i] = static_cast<uint8_t> (i);
+    }
+  for (std::size_t i = 0; i < m_defaultPairwiseKeyMaterial.size (); ++i)
+    {
+      m_defaultPairwiseKeyMaterial[i] =
+        static_cast<uint8_t> (0x40 + i);
+    }
+  for (std::size_t i = 0; i < m_groupKeyMaterial.size (); ++i)
+    {
+      m_groupKeyMaterial[i] = static_cast<uint8_t> (0xa0 + i);
+    }
+}
+
 void
 CsrHopSecurityState::SetNodeId (CsrNodeId nodeId)
 {
@@ -298,7 +331,6 @@ CsrHopSecurityState::GetNodeId () const
 void
 CsrHopSecurityState::SetOwnSecurityCount (uint16_t securityCount)
 {
-  RequireTwelveBit (securityCount, "CSR security count");
   m_ownSecurityCount = securityCount;
 }
 
@@ -321,6 +353,63 @@ CsrHopSecurityState::GetGroupKeyId () const
   return m_groupKeyId;
 }
 
+void
+CsrHopSecurityState::SetMissionKey (const MissionKey &missionKey)
+{
+  m_missionKey = missionKey;
+}
+
+void
+CsrHopSecurityState::SetDefaultPairwiseKeyMaterial (
+  const PairwiseKeyMaterial &pairwiseMaterial)
+{
+  m_defaultPairwiseKeyMaterial = pairwiseMaterial;
+}
+
+void
+CsrHopSecurityState::SetPairwiseKeyMaterial (
+  CsrNodeId neighbor,
+  const PairwiseKeyMaterial &pairwiseMaterial)
+{
+  NS_ABORT_MSG_IF (!CsrIsValidNodeId (neighbor) ||
+                   neighbor == CSR_BROADCAST_ID,
+                   "CSR pairwise-key neighbor must be a unicast node");
+  m_pairwiseKeyMaterial[neighbor] = pairwiseMaterial;
+}
+
+void
+CsrHopSecurityState::SetGroupKeyMaterial (
+  const GroupKeyMaterial &groupKeyMaterial)
+{
+  m_groupKeyMaterial = groupKeyMaterial;
+}
+
+const CsrHopSecurityState::GroupKeyMaterial&
+CsrHopSecurityState::GetGroupKeyMaterial () const
+{
+  return m_groupKeyMaterial;
+}
+
+bool
+CsrHopSecurityState::GetReceivedGroupKeyMaterial (
+  CsrNodeId neighbor,
+  GroupKeyMaterial &groupKey) const
+{
+  const NeighborState *state = FindNeighbor (neighbor);
+  if (state == nullptr || !state->groupKeyReceived)
+    {
+      return false;
+    }
+  groupKey = state->groupKeyMaterial;
+  return true;
+}
+
+void
+CsrHopSecurityState::SetNextDataPrn (const CryptoPrn &prn)
+{
+  m_nextDataPrn = prn;
+}
+
 CsrKeyRequestHeader
 CsrHopSecurityState::BuildKeyRequest (CsrNodeId destination)
 {
@@ -333,9 +422,23 @@ CsrHopSecurityState::BuildKeyRequest (CsrNodeId destination)
   header.SetKeyId (keyId);
   header.SetSequence (sequence);
 
-  // The legacy non-SECURITY path zeroes this field.  Crypto can populate it
-  // later without changing the seven-byte record or state transitions.
-  header.SetAuthTag (CsrKeyRequestHeader::AuthTag {});
+  CsrLegacyCrypto::ProtectionKeys keys =
+    DerivePairwiseProtectionKeys (destination,
+                                  m_nodeId,
+                                  m_ownSecurityCount,
+                                  keyId);
+  std::array<uint8_t, 3> data =
+    SerializePackedKeySequence (keyId, sequence);
+  std::vector<uint8_t> tag = CsrLegacyCrypto::ComputePairwiseAuthTag (
+    keys.authentication,
+    m_nodeId,
+    destination,
+    CSR_LEGACY_KEY_REQUEST_TYPE,
+    data,
+    CsrKeyRequestHeader::AUTH_TAG_SIZE);
+  CsrKeyRequestHeader::AuthTag authTag {};
+  std::copy (tag.begin (), tag.end (), authTag.begin ());
+  header.SetAuthTag (authTag);
   return header;
 }
 
@@ -354,11 +457,45 @@ CsrHopSecurityState::BuildKeyUpdate (CsrNodeId destination)
   header.SetSequence (sequence);
   header.SetGroupKeyId (m_groupKeyId);
 
-  // These fields match the legacy non-SECURITY build.  Their exact sizes and
-  // positions are already final for a future AES/HMAC implementation.
-  header.SetDataPrn (CsrKeyUpdateHeader::DataPrn {});
-  header.SetWrappedKey (CsrKeyUpdateHeader::WrappedKey {});
-  header.SetAuthTag (CsrKeyUpdateHeader::AuthTag {});
+  CryptoPrn prn = GenerateDataPrn ();
+  CsrKeyUpdateHeader::DataPrn wirePrn {};
+  std::copy (prn.begin (), prn.end (), wirePrn.begin ());
+  header.SetDataPrn (wirePrn);
+
+  CsrLegacyCrypto::ProtectionKeys protectionKeys =
+    DerivePairwiseProtectionKeys (destination,
+                                  m_nodeId,
+                                  m_ownSecurityCount,
+                                  keyId);
+  CsrKeyUpdateHeader::AuthTag authTag =
+    CsrLegacyCrypto::ComputeKeyUpdateAuthTag (
+      protectionKeys.authentication,
+      CSR_LEGACY_KEY_UPDATE_TYPE,
+      m_nodeId,
+      m_ownSecurityCount,
+      keyId,
+      sequence,
+      destination,
+      0,
+      m_groupKeyId,
+      prn,
+      m_groupKeyMaterial);
+  header.SetAuthTag (authTag);
+
+  CsrLegacyCrypto::EncryptionKey wrappingKey =
+    CsrLegacyCrypto::DerivePairwiseWrappingKey (
+      m_missionKey,
+      GetPairwiseKeyMaterial (destination),
+      m_nodeId,
+      m_ownSecurityCount,
+      m_groupKeyId,
+      prn);
+  CsrLegacyCrypto::AesBlock iv =
+    CsrLegacyCrypto::BuildKeyUpdateIv (authTag, prn, m_nodeId);
+  header.SetWrappedKey (CsrLegacyCrypto::Aes256CbcEncrypt (
+    wrappingKey,
+    iv,
+    m_groupKeyMaterial));
   return header;
 }
 
@@ -369,10 +506,48 @@ CsrHopSecurityState::ReceiveKeyRequest (
   const CsrKeyRequestHeader &header)
 {
   NeighborState &neighbor = GetOrCreateNeighbor (source);
-  return AcceptPairwiseSequence (neighbor,
-                                 securityCount,
-                                 header.GetKeyId (),
-                                 header.GetSequence ());
+
+  bool securityCountChanged =
+    neighbor.securityCountValid && neighbor.securityCount != securityCount;
+  if (securityCountChanged &&
+      !IsSecurityCountChangeValid (neighbor.securityCount, securityCount))
+    {
+      return CsrHopSecurityReceiveStatus::DuplicateOrStale;
+    }
+
+  uint32_t value =
+    (static_cast<uint32_t> (header.GetKeyId ()) << 12) |
+    header.GetSequence ();
+  if (!securityCountChanged && neighbor.inboundPairwise.IsBeforeWindow (value))
+    {
+      return CsrHopSecurityReceiveStatus::DuplicateOrStale;
+    }
+
+  CsrLegacyCrypto::ProtectionKeys keys =
+    DerivePairwiseProtectionKeys (source,
+                                  source,
+                                  securityCount,
+                                  header.GetKeyId ());
+  std::array<uint8_t, 3> data = SerializePackedKeySequence (
+    header.GetKeyId (),
+    header.GetSequence ());
+  std::vector<uint8_t> expected = CsrLegacyCrypto::ComputePairwiseAuthTag (
+    keys.authentication,
+    source,
+    m_nodeId,
+    CSR_LEGACY_KEY_REQUEST_TYPE,
+    data,
+    CsrKeyRequestHeader::AUTH_TAG_SIZE);
+  if (!CsrLegacyCrypto::ConstantTimeEqual (expected, header.GetAuthTag ()))
+    {
+      return CsrHopSecurityReceiveStatus::AuthenticationFailed;
+    }
+
+  return CommitAuthenticatedPairwise (neighbor,
+                                      securityCount,
+                                      header.GetKeyId (),
+                                      header.GetSequence (),
+                                      securityCountChanged);
 }
 
 CsrHopSecurityReceiveStatus
@@ -382,28 +557,88 @@ CsrHopSecurityState::ReceiveKeyUpdate (
   const CsrKeyUpdateHeader &header)
 {
   NeighborState &neighbor = GetOrCreateNeighbor (source);
-  CsrHopSecurityReceiveStatus status =
-    AcceptPairwiseSequence (neighbor,
-                            securityCount,
-                            header.GetKeyId (),
-                            header.GetSequence ());
 
-  if (status == CsrHopSecurityReceiveStatus::DuplicateOrStale)
+  bool securityCountChanged =
+    neighbor.securityCountValid && neighbor.securityCount != securityCount;
+  if (securityCountChanged &&
+      !IsSecurityCountChangeValid (neighbor.securityCount, securityCount))
+    {
+      return CsrHopSecurityReceiveStatus::DuplicateOrStale;
+    }
+
+  uint32_t value =
+    (static_cast<uint32_t> (header.GetKeyId ()) << 12) |
+    header.GetSequence ();
+  if (!securityCountChanged && neighbor.inboundPairwise.IsBeforeWindow (value))
+    {
+      return CsrHopSecurityReceiveStatus::DuplicateOrStale;
+    }
+
+  CryptoPrn prn {};
+  std::copy_n (header.GetDataPrn ().begin (),
+               prn.size (),
+               prn.begin ());
+  CsrLegacyCrypto::EncryptionKey wrappingKey =
+    CsrLegacyCrypto::DerivePairwiseWrappingKey (
+      m_missionKey,
+      GetPairwiseKeyMaterial (source),
+      source,
+      securityCount,
+      header.GetGroupKeyId (),
+      prn);
+  CsrLegacyCrypto::AesBlock iv = CsrLegacyCrypto::BuildKeyUpdateIv (
+    header.GetAuthTag (),
+    prn,
+    source);
+  GroupKeyMaterial groupKey = CsrLegacyCrypto::Aes256CbcDecrypt (
+    wrappingKey,
+    iv,
+    header.GetWrappedKey ());
+
+  CsrLegacyCrypto::ProtectionKeys protectionKeys =
+    DerivePairwiseProtectionKeys (source,
+                                  source,
+                                  securityCount,
+                                  header.GetKeyId ());
+  CsrKeyUpdateHeader::AuthTag expected =
+    CsrLegacyCrypto::ComputeKeyUpdateAuthTag (
+      protectionKeys.authentication,
+      CSR_LEGACY_KEY_UPDATE_TYPE,
+      source,
+      securityCount,
+      header.GetKeyId (),
+      header.GetSequence (),
+      m_nodeId,
+      0,
+      header.GetGroupKeyId (),
+      prn,
+      groupKey);
+  if (!CsrLegacyCrypto::ConstantTimeEqual (expected, header.GetAuthTag ()))
+    {
+      return CsrHopSecurityReceiveStatus::AuthenticationFailed;
+    }
+
+  CsrHopSecurityReceiveStatus status = CommitAuthenticatedPairwise (
+    neighbor,
+    securityCount,
+    header.GetKeyId (),
+    header.GetSequence (),
+    securityCountChanged);
+  if (status == CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
     {
       return status;
     }
 
   if (!neighbor.previousGroupKeyReceived ||
-      neighbor.previousGroupKeyIdReceived !=
-        neighbor.lastGroupKeyIdReceived)
+      neighbor.previousGroupKeyIdReceived != neighbor.lastGroupKeyIdReceived)
     {
       neighbor.previousGroupKeyReceived = neighbor.groupKeyReceived;
-      neighbor.previousGroupKeyIdReceived =
-        neighbor.lastGroupKeyIdReceived;
+      neighbor.previousGroupKeyIdReceived = neighbor.lastGroupKeyIdReceived;
+      neighbor.previousGroupKeyMaterial = neighbor.groupKeyMaterial;
     }
-
   neighbor.groupKeyReceived = true;
   neighbor.lastGroupKeyIdReceived = header.GetGroupKeyId ();
+  neighbor.groupKeyMaterial = groupKey;
   return status;
 }
 
@@ -466,6 +701,55 @@ CsrHopSecurityState::ResetNeighbor (CsrNodeId neighbor)
   m_neighbors.erase (neighbor);
 }
 
+bool
+CsrHopSecurityState::ReplayWindow::IsBeforeWindow (uint32_t value) const
+{
+  return value < leftEdge;
+}
+
+bool
+CsrHopSecurityState::ReplayWindow::IsDuplicate (uint32_t value) const
+{
+  if (IsBeforeWindow (value))
+    {
+      return true;
+    }
+  if (value - leftEdge >= WINDOW_SIZE)
+    {
+      return false;
+    }
+  return received[value & (WINDOW_SIZE - 1)];
+}
+
+void
+CsrHopSecurityState::ReplayWindow::MarkReceived (uint32_t value)
+{
+  if (IsBeforeWindow (value))
+    {
+      return;
+    }
+
+  if (value - leftEdge >= WINDOW_SIZE)
+    {
+      uint32_t newLeftEdge = value - WINDOW_SIZE + 1;
+      uint32_t shift = newLeftEdge - leftEdge;
+      if (shift >= WINDOW_SIZE)
+        {
+          received.fill (false);
+        }
+      else
+        {
+          for (uint32_t old = leftEdge; old < newLeftEdge; ++old)
+            {
+              received[old & (WINDOW_SIZE - 1)] = false;
+            }
+        }
+      leftEdge = newLeftEdge;
+    }
+
+  received[value & (WINDOW_SIZE - 1)] = true;
+}
+
 CsrHopSecurityState::NeighborState&
 CsrHopSecurityState::GetOrCreateNeighbor (CsrNodeId neighbor)
 {
@@ -504,46 +788,112 @@ CsrHopSecurityState::NextPairwiseKeySequence (
 }
 
 CsrHopSecurityReceiveStatus
-CsrHopSecurityState::AcceptPairwiseSequence (
+CsrHopSecurityState::CommitAuthenticatedPairwise (
   NeighborState &neighbor,
   uint16_t securityCount,
   uint16_t keyId,
-  uint16_t sequence)
+  uint16_t sequence,
+  bool securityCountChanged)
 {
-  RequireTwelveBit (securityCount, "CSR received security count");
   RequireTwelveBit (keyId, "CSR received pairwise key identifier");
   RequireTwelveBit (sequence, "CSR received pairwise sequence");
 
-  bool securityCountChanged =
-    neighbor.securityCountValid &&
-    neighbor.securityCount != securityCount;
-
   if (securityCountChanged)
     {
-      // Mirrors routesSecurityCountChange(): the old group-key relationship
-      // and admission proof are invalid after a remote restart count change.
-      neighbor = NeighborState {};
+      ResetInboundForSecurityCountChange (neighbor);
     }
 
-  if (neighbor.inboundPairwiseValid)
+  uint32_t value = (static_cast<uint32_t> (keyId) << 12) | sequence;
+  if (neighbor.inboundPairwise.IsDuplicate (value))
     {
-      if (keyId < neighbor.inboundPairwiseKeyId ||
-          (keyId == neighbor.inboundPairwiseKeyId &&
-           sequence <= neighbor.inboundPairwiseSequence))
-        {
-          return CsrHopSecurityReceiveStatus::DuplicateOrStale;
-        }
+      return CsrHopSecurityReceiveStatus::AuthenticatedDuplicate;
     }
 
-  neighbor.inboundPairwiseValid = true;
-  neighbor.inboundPairwiseKeyId = keyId;
-  neighbor.inboundPairwiseSequence = sequence;
+  neighbor.inboundPairwise.MarkReceived (value);
   neighbor.securityCountValid = true;
   neighbor.securityCount = securityCount;
 
   return securityCountChanged
     ? CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged
     : CsrHopSecurityReceiveStatus::Accepted;
+}
+
+bool
+CsrHopSecurityState::IsSecurityCountChangeValid (
+  uint16_t current,
+  uint16_t received) const
+{
+  return static_cast<uint16_t> (received - current) <= 32768;
+}
+
+void
+CsrHopSecurityState::ResetInboundForSecurityCountChange (
+  NeighborState &neighbor)
+{
+  uint16_t outboundKeyId = neighbor.outboundPairwiseKeyId;
+  uint16_t outboundSequence = neighbor.outboundPairwiseSequence;
+  neighbor = NeighborState {};
+  neighbor.outboundPairwiseKeyId = outboundKeyId;
+  neighbor.outboundPairwiseSequence = outboundSequence;
+}
+
+const CsrHopSecurityState::PairwiseKeyMaterial&
+CsrHopSecurityState::GetPairwiseKeyMaterial (CsrNodeId neighbor) const
+{
+  auto it = m_pairwiseKeyMaterial.find (neighbor);
+  return it == m_pairwiseKeyMaterial.end ()
+    ? m_defaultPairwiseKeyMaterial
+    : it->second;
+}
+
+CsrLegacyCrypto::ProtectionKeys
+CsrHopSecurityState::DerivePairwiseProtectionKeys (
+  CsrNodeId peer,
+  CsrNodeId source,
+  uint16_t securityCount,
+  uint16_t keyId) const
+{
+  return CsrLegacyCrypto::DeriveProtectionKeys (
+    m_missionKey,
+    GetPairwiseKeyMaterial (peer),
+    source,
+    securityCount,
+    keyId);
+}
+
+CsrHopSecurityState::CryptoPrn
+CsrHopSecurityState::GenerateDataPrn ()
+{
+  if (m_nextDataPrn.has_value ())
+    {
+      CryptoPrn prn = *m_nextDataPrn;
+      m_nextDataPrn.reset ();
+      return prn;
+    }
+
+  std::array<uint8_t, 15> seed {
+    static_cast<uint8_t> (m_nodeId >> 16),
+    static_cast<uint8_t> (m_nodeId >> 8),
+    static_cast<uint8_t> (m_nodeId),
+    static_cast<uint8_t> (m_ownSecurityCount >> 8),
+    static_cast<uint8_t> (m_ownSecurityCount),
+    static_cast<uint8_t> (m_groupKeyId >> 8),
+    static_cast<uint8_t> (m_groupKeyId),
+    static_cast<uint8_t> (m_prnCounter >> 56),
+    static_cast<uint8_t> (m_prnCounter >> 48),
+    static_cast<uint8_t> (m_prnCounter >> 40),
+    static_cast<uint8_t> (m_prnCounter >> 32),
+    static_cast<uint8_t> (m_prnCounter >> 24),
+    static_cast<uint8_t> (m_prnCounter >> 16),
+    static_cast<uint8_t> (m_prnCounter >> 8),
+    static_cast<uint8_t> (m_prnCounter)
+  };
+  m_prnCounter++;
+  CsrLegacyCrypto::Sha1Digest digest =
+    CsrLegacyCrypto::HmacSha1 (m_missionKey, seed);
+  CryptoPrn prn {};
+  std::copy_n (digest.begin (), prn.size (), prn.begin ());
+  return prn;
 }
 
 } // namespace ns3

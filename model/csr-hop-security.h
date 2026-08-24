@@ -1,5 +1,6 @@
 #pragma once
 
+#include "csr-legacy-crypto.h"
 #include "csr-wire-format.h"
 
 #include "ns3/header.h"
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <ostream>
 
 namespace ns3 {
@@ -109,21 +111,30 @@ enum class CsrHopSecurityReceiveStatus : uint8_t
 {
   Accepted,
   AcceptedSecurityCountChanged,
-  DuplicateOrStale
+  AuthenticatedDuplicate,
+  DuplicateOrStale,
+  AuthenticationFailed
 };
 
 /**
- * Behavioral foundation for the legacy hopSec SecurityCTX/NeighborCTX state.
+ * Enabled legacy hopSec SecurityCTX/NeighborCTX behavior.
  *
- * This class intentionally models key/sequence bookkeeping, replay rejection,
- * security-count resets, and the ACK-driven group-key lifecycle.  The byte
- * arrays are zero-filled, matching the legacy non-SECURITY build.  Replacing
- * those arrays with AES/HMAC output can therefore be done without changing
- * routing admission or packet lifecycle code.
+ * The implementation uses the target build's PBKDF2-HMAC-SHA1 derivation,
+ * HMAC authentication, AES-256-CBC group-key wrapping, pairwise replay state,
+ * security-count resets, and ACK-driven group-key lifecycle. Embedded flash,
+ * key-manager, and hardware-randomness functions are replaced by injectable
+ * key material and deterministic simulation PRNs.
  */
 class CsrHopSecurityState
 {
 public:
+  using MissionKey = CsrLegacyCrypto::MissionKey;
+  using PairwiseKeyMaterial = CsrLegacyCrypto::PairwiseKeyMaterial;
+  using GroupKeyMaterial = CsrLegacyCrypto::GroupKeyMaterial;
+  using CryptoPrn = CsrLegacyCrypto::CryptoPrn;
+
+  CsrHopSecurityState ();
+
   void SetNodeId (CsrNodeId nodeId);
   CsrNodeId GetNodeId () const;
 
@@ -132,6 +143,42 @@ public:
 
   void SetGroupKeyId (uint16_t groupKeyId);
   uint16_t GetGroupKeyId () const;
+
+  /** Set the synthetic or externally provisioned mission key. */
+  void SetMissionKey (const MissionKey &missionKey);
+
+  /** Set pairwise material used when a neighbor-specific value is absent. */
+  void SetDefaultPairwiseKeyMaterial (
+    const PairwiseKeyMaterial &pairwiseMaterial);
+
+  /** Set pairwise material for one neighbor. */
+  void SetPairwiseKeyMaterial (
+    CsrNodeId neighbor,
+    const PairwiseKeyMaterial &pairwiseMaterial);
+
+  /** Set this node's outbound group-key material. */
+  void SetGroupKeyMaterial (const GroupKeyMaterial &groupKeyMaterial);
+
+  /** Return this node's outbound group-key material. */
+  const GroupKeyMaterial& GetGroupKeyMaterial () const;
+
+  /**
+   * Return the current authenticated group key received from a neighbor.
+   *
+   * @param neighbor Neighbor identifier.
+   * @param groupKey Destination for the recovered key.
+   * @return True when an authenticated group key is available.
+   */
+  bool GetReceivedGroupKeyMaterial (
+    CsrNodeId neighbor,
+    GroupKeyMaterial &groupKey) const;
+
+  /**
+   * Override the five cryptographic PRN bytes for the next KeyUpdate.
+   *
+   * The sixth wire byte remains reserved and is serialized as zero.
+   */
+  void SetNextDataPrn (const CryptoPrn &prn);
 
   CsrKeyRequestHeader BuildKeyRequest (CsrNodeId destination);
   CsrKeyUpdateHeader BuildKeyUpdate (CsrNodeId destination);
@@ -156,14 +203,24 @@ public:
   void ResetNeighbor (CsrNodeId neighbor);
 
 private:
+  struct ReplayWindow
+  {
+    static constexpr uint32_t WINDOW_SIZE = 128;
+
+    bool IsBeforeWindow (uint32_t value) const;
+    bool IsDuplicate (uint32_t value) const;
+    void MarkReceived (uint32_t value);
+
+    uint32_t leftEdge {0};
+    std::array<bool, WINDOW_SIZE> received {};
+  };
+
   struct NeighborState
   {
-    uint16_t outboundPairwiseKeyId {0};
-    uint16_t outboundPairwiseSequence {0};
+    uint16_t outboundPairwiseKeyId {1};
+    uint16_t outboundPairwiseSequence {1};
 
-    bool inboundPairwiseValid {false};
-    uint16_t inboundPairwiseKeyId {0};
-    uint16_t inboundPairwiseSequence {0};
+    ReplayWindow inboundPairwise;
 
     bool securityCountValid {false};
     uint16_t securityCount {0};
@@ -174,9 +231,11 @@ private:
 
     bool groupKeyReceived {false};
     uint16_t lastGroupKeyIdReceived {0};
+    GroupKeyMaterial groupKeyMaterial {};
 
     bool previousGroupKeyReceived {false};
     uint16_t previousGroupKeyIdReceived {0};
+    GroupKeyMaterial previousGroupKeyMaterial {};
   };
 
   NeighborState& GetOrCreateNeighbor (CsrNodeId neighbor);
@@ -187,16 +246,35 @@ private:
     uint16_t &keyId,
     uint16_t &sequence);
 
-  CsrHopSecurityReceiveStatus AcceptPairwiseSequence (
+  CsrHopSecurityReceiveStatus CommitAuthenticatedPairwise (
     NeighborState &neighbor,
     uint16_t securityCount,
     uint16_t keyId,
-    uint16_t sequence);
+    uint16_t sequence,
+    bool securityCountChanged);
+
+  bool IsSecurityCountChangeValid (uint16_t current,
+                                   uint16_t received) const;
+  void ResetInboundForSecurityCountChange (NeighborState &neighbor);
+
+  const PairwiseKeyMaterial& GetPairwiseKeyMaterial (
+    CsrNodeId neighbor) const;
+  CsrLegacyCrypto::ProtectionKeys DerivePairwiseProtectionKeys (
+    CsrNodeId peer,
+    CsrNodeId source,
+    uint16_t securityCount,
+    uint16_t keyId) const;
+  CryptoPrn GenerateDataPrn ();
 
   CsrNodeId m_nodeId {0};
   uint16_t m_ownSecurityCount {1};
-  // The legacy non-SECURITY KeyUpdate path writes groupKeyId=0.
-  uint16_t m_groupKeyId {0};
+  uint16_t m_groupKeyId {1};
+  MissionKey m_missionKey {};
+  PairwiseKeyMaterial m_defaultPairwiseKeyMaterial {};
+  GroupKeyMaterial m_groupKeyMaterial {};
+  std::map<CsrNodeId, PairwiseKeyMaterial> m_pairwiseKeyMaterial;
+  std::optional<CryptoPrn> m_nextDataPrn;
+  uint64_t m_prnCounter {0};
   std::map<CsrNodeId, NeighborState> m_neighbors;
 };
 
