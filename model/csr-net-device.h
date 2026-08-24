@@ -1,6 +1,7 @@
 #pragma once
 #include "csr-common.h"
 #include "csr-mac-core.h"
+#include "csr-opnet-envelope.h"
 #include "csr-phy-model.h"
 
 class CsrNetDevice : public Object
@@ -360,7 +361,7 @@ CsrNetDevice::SendFramesToPeers (
   frameCopies.reserve (frames.size ());
   for (const auto &segment : frames)
     {
-      payloadBytes += segment->GetSize ();
+      payloadBytes += CsrGetOpnetWireSize (segment);
       frameCopies.push_back (segment->Copy ());
     }
 
@@ -659,6 +660,8 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
                             uint8_t dscp,
                             bool ackable)
 {
+  CsrAnnotateOpnetEnvelope (frame);
+
   if (!m_slotTickEnabled)
     {
       StartSlotTick (m_slotTickPeriod);
@@ -953,7 +956,7 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
             selectedRate,
             SelectRateByPerTarget (
               target,
-              frame->GetSize () * 8,
+              CsrGetOpnetWireSize (frame) * 8,
               0.50));
         }
       return selectedRate;
@@ -965,7 +968,7 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
     }
 
   return SelectRateByPerTarget (dest,
-                                frame->GetSize () * 8,
+                                CsrGetOpnetWireSize (frame) * 8,
                                 0.50);
 }
 
@@ -1006,7 +1009,8 @@ CsrMacCore::FitsConcatFrame (Ptr<Packet> frame,
 {
   int aggregateRate = std::min (frameRateKbps, currentRateKbps);
   uint32_t limit = GetConcatByteLimit (aggregateRate);
-  return limit > 0 && byteCount + frame->GetSize () < limit;
+  return limit > 0 &&
+         byteCount + CsrGetOpnetWireSize (frame) < limit;
 }
 
 PreambleType
@@ -1084,7 +1088,7 @@ CsrMacCore::DoTx ()
             }
 
           aggregateRateKbps = std::min (aggregateRateKbps, rate);
-          byteCount += entry.frame->GetSize ();
+          byteCount += CsrGetOpnetWireSize (entry.frame);
           selected.push_back ({entry.frame->Copy (),
                                entry.dest,
                                false,
@@ -1115,7 +1119,7 @@ CsrMacCore::DoTx ()
             }
 
           aggregateRateKbps = std::min (aggregateRateKbps, rate);
-          byteCount += entry.frame->GetSize ();
+          byteCount += CsrGetOpnetWireSize (entry.frame);
           selected.push_back ({entry.frame->Copy (),
                                entry.dest,
                                entry.ackable,
@@ -1136,7 +1140,7 @@ CsrMacCore::DoTx ()
       aggregateRateKbps = SelectQueuedFrameRate (entry.frame,
                                                   entry.dest,
                                                   false);
-      byteCount = entry.frame->GetSize ();
+      byteCount = CsrGetOpnetWireSize (entry.frame);
       selected.push_back ({entry.frame->Copy (),
                            entry.dest,
                            false,
@@ -1151,7 +1155,7 @@ CsrMacCore::DoTx ()
       aggregateRateKbps = SelectQueuedFrameRate (entry.frame,
                                                   entry.dest,
                                                   entry.ackable);
-      byteCount = entry.frame->GetSize ();
+      byteCount = CsrGetOpnetWireSize (entry.frame);
       selected.push_back ({entry.frame->Copy (),
                            entry.dest,
                            entry.ackable,

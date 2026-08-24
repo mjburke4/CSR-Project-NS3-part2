@@ -28,20 +28,20 @@ certification still requires authoritative OPNET/ns-3 trace comparison.
 
 | Area | Estimated parity | Evidence and remaining uncertainty |
 | --- | ---: | --- |
-| Visible NWK wrapper behavior | 93-96% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, and automatic changed-route propagation are covered. |
-| Full NWK routing behavior | 84-90% | ARL byte-stream exchange, 24-bit node identifiers, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing, non-address packet-model fields, and untested edge cases rather than an unavailable routing implementation. |
+| Visible NWK wrapper behavior | 94-97% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, automatic changed-route propagation, and fixed packet/control envelopes are covered. |
+| Full NWK routing behavior | 86-91% | ARL byte-stream exchange, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing and untested edge cases rather than an unavailable routing implementation. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 90-94% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing control, one-hop SNMP dispatch ordering, and OPNET DATA-versus-control timeout effects are covered. |
+| HOP | 91-95% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing control, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
 | Full hop security | 78-85% | KeyRequest, KeyUpdate, GroupEstablish, Group16, and the Group32Encrypt provider now use source-faithful KDF, HMAC, AES, key-rotation, replay, deferred-decode, and authentication-before-ACK/admission behavior. Remaining gaps are live AppNeighborcast Group32 integration, Pairwise16/Pairwise32Encrypt data paths, exact outer packet wrappers, and operational key-store hardware. |
-| MAC transmit/control | 80-90% | Slot selection, holdoff, ACK priority, queue limits, concatenation, rate/power aggregation, preamble selection, and freshness are covered. |
+| MAC transmit/control | 85-92% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting, concatenation, rate/power aggregation, preamble selection, and freshness are covered. |
 | Full MAC including receive contention | 55-65% | OPNET Idle/Search/Track receive state, acquisition, overlapping signals, capture/collision, and RX-induced slot freezing are not yet reproduced. |
 | PHY | 15-30% | The current log-distance/PER model does not reproduce the supplied OPNET radio pipeline. |
 
 Overall estimates:
 
-- NWK/HOP/MAC protocol-control behavior excluding PHY: 86-92% complete.
+- NWK/HOP/MAC protocol-control behavior excluding PHY: 88-93% complete.
 - Whole in-scope radio behavior including PHY, excluding battery and BBN:
-  62-71%
+  64-72%
   complete.
 
 These ranges reflect confidence in observable behavior, not code-volume
@@ -98,6 +98,13 @@ completion.
 - Source-backed SNMP relay controls: command values 5/6, one-hop non-ACK
   delivery, stable equal-priority ordering, no HOP-neighbor freshness update,
   and the legacy stored-but-inert `relay_holdoff` flag.
+- Exact fixed-bit serializers for all eleven supplied `br_*.pk.m` formats,
+  including inherited-payload position, zero-bit metadata exclusion, and the
+  104-/7,888-bit OTA preamble fields.
+- Source-backed complete envelope nesting and modeled sizes for DATA, ACK,
+  routed SNMP, HELLO, and ARL route control. MAC concatenation, PHY packet
+  length, and payload airtime use those modeled sizes while compatibility
+  metadata remains available to the protocol implementation.
 - Relay custody, reverse routes, invalidation, alternate paths, and no-route
   ACK behavior.
 - 16-bit HOP sequences, cumulative ACK/DACK windows, duplicate suppression,
@@ -165,16 +172,28 @@ wrapper.
 | NWK looks up the pre-existing source neighbor and writes the flag synchronously | Known-neighbor state in `ReceiveSnmpFromHop()` | Unknown controls do not create a neighbor; ordered controls update counters and final state. |
 | `check_nwk_queue()` never reads `relay_holdoff` | The flag is exposed for observation but deliberately omitted from queue admission | Three-node transit DATA is delivered while HOLD is stored. |
 
-The exact command IDs and behavior are now source-backed. The current compact
-SNMP compatibility envelope is retained; reproducing every outer `br_SNMP`
-field remains part of the next packet-model audit.
+The exact command IDs and behavior are now source-backed. The compact SNMP
+compatibility envelope remains as state storage, but its wire-size annotation
+now maps it to the exact `br_Mac -> br_Hop -> br_SNMP` 31-byte envelope.
+
+## Step 5: exact packet and control envelopes
+
+All eleven supplied packet models now have direct, big-endian serializers and
+deserializers. Their declared fixed sizes, inherited-payload positions, and
+zero-bit metadata rules are covered by independent golden tests. Runtime
+packets retain semantic compatibility headers but carry a copied packet tag
+with the exact OPNET envelope tree and size; MAC packing, PER packet bits, and
+payload transmission duration consume the modeled size rather than
+`Packet::GetSize()`.
+
+The complete mapping, including the source conflict between the eight-bit
+`br_Hop.pk.m` sequence and the 16-bit HOP implementations, is documented in
+`docs/opnet-packet-envelope-parity.md`.
 
 ## Highest-priority remaining non-PHY work
 
-1. Finish the non-address packet-model audit, especially aggregate nesting,
-   the live AppNeighborcast Group32 path, remaining pairwise modes, and fields
-   represented by ns-3 compatibility envelopes rather than direct `br_*.pk.m`
-   equivalents.
+1. Finish the live AppNeighborcast Group32 path and remaining Pairwise16 /
+   Pairwise32Encrypt modes.
 2. Audit extra NWK queue wakeups and route/security edge cases with differential
    traces from identical OPNET/ns-3 topologies, seeds, and loss schedules.
 3. Implement the OPNET MAC receive/contention state machine.
@@ -205,19 +224,21 @@ field remains part of the next packet-model audit.
 
 ## Current regression baseline
 
-The complete ns-3 build, all 22 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision (23/23). The relay-holdoff
-test covers command bytes, one-hop no-ACK handling, FIFO HOLD/CLEAR ordering,
-known-neighbor state, no freshness update, and transit delivery while held.
-The pairwise crypto
-test covers standard primitive vectors, exact 7-/51-byte enabled-security
-vectors, tamper
-and wrong-key rejection, authentication-before-ACK, group-key recovery,
+The complete ns-3 build, all 23 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision (24/24). The packet-envelope
+test covers all eleven fixed formats, golden bytes, inherited payload order,
+zero-bit metadata, every live control-envelope inference branch, and aggregate
+size tags. The relay-holdoff test covers command bytes, one-hop no-ACK
+handling, FIFO
+HOLD/CLEAR ordering, known-neighbor state, no freshness update, and transit
+delivery while held. The pairwise crypto test covers standard primitive
+vectors, exact 7-/51-byte enabled-security vectors, tamper and wrong-key
+rejection, authentication-before-ACK, group-key recovery,
 128-entry replay behavior, and 16-bit security-count wrap. The group-security
 test adds exact GroupEstablish/Group16/Group32Encrypt records, deferred replay,
 both authentication halves, key evolution, previous-key handling, and fresh
-epoch redistribution. The admission test
-still covers pre-admission DATA rejection, reciprocal key exchange,
+epoch redistribution. The admission test still covers pre-admission DATA
+rejection, reciprocal key exchange,
 ACK-driven outbound-key completion, NeighborCheck activation, route selection,
 and exactly-once post-admission DATA delivery. The autonomous convergence test
 still covers a lossless 0-1-2 line with no static routes, complete ARL snapshot

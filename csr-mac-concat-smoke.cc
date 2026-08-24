@@ -25,12 +25,21 @@ Require (bool condition, const char* message)
 }
 
 Ptr<Packet>
-BuildFrame (uint16_t seq, bool ack, uint32_t payloadBytes = 0)
+BuildFrame (uint16_t seq,
+            bool ack,
+            uint32_t payloadBytes = 0,
+            int rateKbps = 8)
 {
   CsrHeader header (1, 2, seq, ack ? 0 : 5, false, ack);
   header.SetType (ack ? CSR_PKT_ACK : CSR_PKT_DATA);
   header.SetDestType (CSR_DEST_UNICAST);
   header.SetSpeedKey (8);
+  if (rateKbps != 8)
+    {
+      header.SetLinkControl (static_cast<uint8_t> (rateKbps),
+                             0.0,
+                             -90.0);
+    }
 
   Ptr<Packet> frame = Create<Packet> (payloadBytes);
   frame->AddHeader (header);
@@ -129,15 +138,17 @@ CheckByteLimit (Ptr<CsrNetDevice> sender)
 {
   Require (g_sequences.size () == 10,
            "byte-limit scenario did not deliver all DATA frames");
-  for (std::size_t i = 1; i < 7; ++i)
+  for (std::size_t i = 1; i < 5; ++i)
     {
       Require (g_receiveTimes[i] == g_receiveTimes[0],
                "8-kbps aggregate did not stop below 256 bytes");
     }
-  Require (g_receiveTimes[7] > g_receiveTimes[6],
-           "eighth 33-byte frame exceeded OPNET's strict byte limit");
-  Require (g_receiveTimes[8] == g_receiveTimes[7] &&
-             g_receiveTimes[9] == g_receiveTimes[7],
+  Require (g_receiveTimes[5] > g_receiveTimes[4],
+           "sixth 45-byte OPNET envelope exceeded the strict byte limit");
+  Require (g_receiveTimes[6] == g_receiveTimes[5] &&
+             g_receiveTimes[7] == g_receiveTimes[5] &&
+             g_receiveTimes[8] == g_receiveTimes[5] &&
+             g_receiveTimes[9] == g_receiveTimes[5],
            "smaller tail frame bypassed the non-fitting queue head");
   Require (sender->GetMac ().GetTransmittedFrameCount () == 2,
            "byte-limit scenario did not use exactly two OTA transmissions");
@@ -164,8 +175,9 @@ RunByteLimitScenario ()
       sender->GetMac ().EnqueueTxFrame (
         BuildFrame (seq, false, 20), 2, 5, false);
     }
-  // This smaller frame would fit behind the first seven, but OPNET never
-  // scans past the eighth frame after that queue head fails the size test.
+  // Exact br_Mac + br_Hop sizing makes each preceding frame 45 bytes.  This
+  // smaller 25-byte frame would fit behind the first five, but OPNET never
+  // scans past the sixth frame after that queue head fails the size test.
   sender->GetMac ().EnqueueTxFrame (
     BuildFrame (10, false), 2, 5, false);
 
@@ -194,7 +206,7 @@ RunSegmentLimitScenario ()
   for (uint16_t seq = 1; seq <= 17; ++seq)
     {
       sender->GetMac ().EnqueueTxFrame (
-        BuildFrame (seq, false), 2, 5, false);
+        BuildFrame (seq, false, 0, 128), 2, 5, false);
     }
 
   Simulator::Schedule (Seconds (3.5), &CheckSegmentLimit, sender);
