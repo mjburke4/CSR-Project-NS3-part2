@@ -20,9 +20,10 @@ source-backed routing audit. The later-supplied `arlSecurity.c`,
 `arlSecurity.h`, `packetTypes.h`, `msectime.*`, and split
 `arlAuthTag.c`/`arlContext.c`/`arlEncrypt.c`/`arlKey.c` sources establish the
 KeyRequest/KeyUpdate security records, exact enabled cryptographic transforms,
-millisecond timer units, the ACK-driven group-key lifecycle, all three group
-security modes, and the source's key-evolution rules. Exact end-to-end
-certification still requires authoritative OPNET/ns-3 trace comparison.
+millisecond timer units, the ACK-driven group-key lifecycle, all three
+pairwise and all three group security modes, and the source's key-evolution
+rules. Exact end-to-end certification still requires authoritative
+OPNET/ns-3 trace comparison.
 
 ## Current status
 
@@ -31,17 +32,17 @@ certification still requires authoritative OPNET/ns-3 trace comparison.
 | Visible NWK wrapper behavior | 94-97% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, automatic changed-route propagation, and fixed packet/control envelopes are covered. |
 | Full NWK routing behavior | 86-91% | ARL byte-stream exchange, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing and untested edge cases rather than an unavailable routing implementation. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 91-95% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing control, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
-| Full hop security | 78-85% | KeyRequest, KeyUpdate, GroupEstablish, Group16, and the Group32Encrypt provider now use source-faithful KDF, HMAC, AES, key-rotation, replay, deferred-decode, and authentication-before-ACK/admission behavior. Remaining gaps are live AppNeighborcast Group32 integration, Pairwise16/Pairwise32Encrypt data paths, exact outer packet wrappers, and operational key-store hardware. |
+| HOP | 93-96% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
+| Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 85-92% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting, concatenation, rate/power aggregation, preamble selection, and freshness are covered. |
 | Full MAC including receive contention | 55-65% | OPNET Idle/Search/Track receive state, acquisition, overlapping signals, capture/collision, and RX-induced slot freezing are not yet reproduced. |
 | PHY | 15-30% | The current log-distance/PER model does not reproduce the supplied OPNET radio pipeline. |
 
 Overall estimates:
 
-- NWK/HOP/MAC protocol-control behavior excluding PHY: 88-93% complete.
+- NWK/HOP/MAC protocol-control behavior excluding PHY: 89-94% complete.
 - Whole in-scope radio behavior including PHY, excluding battery and BBN:
-  64-72%
+  65-73%
   complete.
 
 These ranges reflect confidence in observable behavior, not code-volume
@@ -77,8 +78,13 @@ completion.
   held newest-per-source and replayed after KeyUpdate completion.
 - Source-faithful Group16 protection for routing broadcasts and reliable
   routing control, with authentication before HOP duplicate handling,
-  delivery, or ACK. Group32Encrypt is available through the same portable
-  provider with independent golden-vector coverage.
+  delivery, or ACK.
+- Source-faithful Pairwise16 protection for ordinary acknowledged and
+  unacknowledged DATA, plus Pairwise32Encrypt for explicit encrypted one-hop
+  DATA. HMAC binds the source, destination, packet type, length, and protected
+  record; AES-CTR uses the legacy source/destination/count/key/sequence IV.
+- Live Group32Encrypt AppNeighborcast with a broadcast, non-ACKable envelope,
+  authentication and replay checks before decrypt/delivery, and no HOP ACK.
 - Shared 12-bit group sequence/key-ID evolution, same-epoch one-way key
   derivation, one previous received key, fresh keys at 16-key boundaries, and
   KeyUpdate redistribution when a local fresh-key epoch begins.
@@ -141,6 +147,9 @@ complete. The mapping is:
 | A Discover authenticated only by its mission tag waits for the missing key | `HandleProtectedHello()` and `ReplayPendingGroupEstablish()` | Newest-per-source queue replacement and KeyUpdate-before-payload callback order. |
 | RoutingUpdate uses Group16 over its plaintext record | `SendAuthenticatedRoutingHello()` and protected `SendRoutingControl()` | Golden record plus valid/tampered/replayed reliable-control tests. |
 | Group32Encrypt authenticates encrypted payload | `ProtectGroupMessage()` / `ReceiveGroupMessage()` | Golden ciphertext/tag, wrong-key rejection, and decrypt round trip. |
+| AppData/AppDataNoAck use Pairwise16 | `SendData()` and `ReceivePairwiseMessage(Pairwise16)` | Independent golden record, tamper/replay checks, auth-before-ACK/delivery, and live over-air round trip. |
+| Pairwise32 and Pairwise32Encrypt use four-byte HMAC; the encrypted mode applies AES-CTR before HMAC | `ProtectPairwiseMessage()` / `ReceivePairwiseMessage()` | Independent records for all three pairwise modes plus wrong-key/type and ciphertext-tamper tests. |
+| AppNeighborcast uses non-ACKed Group32Encrypt broadcast | `SendNeighborcast()` / `HandleProtectedNeighborcast()` | Live one-hop encrypted delivery, exact-once replay behavior, and malformed-envelope rejection. |
 | Group sequence rollover evolves or replaces the key | `NextGroupKeySequence()` / `DeriveNextGroupKeyMaterial()` | ID 1-to-2 derived-key vector, previous-key receive, and ID 15-to-16 fresh-key redistribution state. |
 
 The KeyUpdate wire record deliberately reserves six data-PRN bytes because
@@ -192,10 +201,11 @@ The complete mapping, including the source conflict between the eight-bit
 
 ## Highest-priority remaining non-PHY work
 
-1. Finish the live AppNeighborcast Group32 path and remaining Pairwise16 /
-   Pairwise32Encrypt modes.
-2. Audit extra NWK queue wakeups and route/security edge cases with differential
+1. Audit extra NWK queue wakeups and route/security edge cases with differential
    traces from identical OPNET/ns-3 topologies, seeds, and loss schedules.
+2. Close exact security-wrapper gaps for remaining HOP control packets and the
+   distinct network-security modes once authoritative packet-type mapping or
+   trace evidence is available.
 3. Implement the OPNET MAC receive/contention state machine.
 4. Then calibrate the supplied OPNET PHY pipeline against differential traces.
 
@@ -224,8 +234,8 @@ The complete mapping, including the source conflict between the eight-bit
 
 ## Current regression baseline
 
-The complete ns-3 build, all 23 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision (24/24). The packet-envelope
+The complete ns-3 build, all 24 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision (25/25). The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
 size tags. The relay-holdoff test covers command bytes, one-hop no-ACK
@@ -237,7 +247,11 @@ rejection, authentication-before-ACK, group-key recovery,
 128-entry replay behavior, and 16-bit security-count wrap. The group-security
 test adds exact GroupEstablish/Group16/Group32Encrypt records, deferred replay,
 both authentication halves, key evolution, previous-key handling, and fresh
-epoch redistribution. The admission test still covers pre-admission DATA
+epoch redistribution. The remaining-security test adds independent
+Pairwise16/Pairwise32/Pairwise32Encrypt records, AES-CTR ciphertext, wrong-type
+and wrong-key rejection, pairwise auth-before-ACK/delivery, live encrypted
+AppNeighborcast, malformed-envelope rejection, and all three live send paths.
+The admission test still covers pre-admission DATA
 rejection, reciprocal key exchange,
 ACK-driven outbound-key completion, NeighborCheck activation, route selection,
 and exactly-once post-admission DATA delivery. The autonomous convergence test

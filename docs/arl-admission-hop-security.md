@@ -5,12 +5,13 @@ Updated: 2026-08-24
 ## Implemented scope
 
 This implementation reproduces the legacy ARL neighbor-admission lifecycle and
-the enabled target build's KeyRequest, KeyUpdate, GroupEstablish, Group16, and
-Group32Encrypt cryptography. The model uses the source's SHA-1, HMAC-SHA1,
-one-iteration PBKDF2 derivations, AES-256-CBC group-key wrapping, AES-256-CTR
-group encryption, 128-entry pairwise and group replay windows, reliable
-completion, and admission decisions. Embedded flash and key-manager access are
-replaced by injectable synthetic mission, pairwise, and group keys.
+the enabled target build's Pairwise16, Pairwise32, Pairwise32Encrypt,
+KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt
+cryptography. The model uses the source's SHA-1, HMAC-SHA1, one-iteration
+PBKDF2 derivations, AES-256-CBC group-key wrapping, AES-256-CTR pairwise/group
+encryption, 128-entry pairwise and group replay windows, reliable completion,
+and admission decisions. Embedded flash and key-manager access are replaced by
+injectable synthetic mission, pairwise, and group keys.
 
 The admission invariant is:
 
@@ -52,9 +53,12 @@ advertised.
 | --- | --- | ---: | --- |
 | KeyRequest | packed 12-bit pairwise key ID + 12-bit sequence (3), auth tag (4) | 7 bytes | No ACK, no resend |
 | KeyUpdate | packed key ID/sequence (3), reserved/group-key ID (2), data PRN wire field (6), wrapped group key (32), auth tag (8) | 51 bytes | ACK/resend |
+| Pairwise16 | packed pairwise key ID/sequence (3), plaintext, auth tag (2) | 5 bytes | Default acknowledged and unacknowledged DATA |
+| Pairwise32 | packed pairwise key ID/sequence (3), plaintext, auth tag (4) | 7 bytes | Portable provider and golden tests |
+| Pairwise32Encrypt | packed pairwise key ID/sequence (3), AES-CTR ciphertext, auth tag (4) | 7 bytes | Explicit encrypted one-hop DATA path |
 | GroupEstablish | packed group key ID/sequence (3), AES-CTR ciphertext, mission/group auth tag (4) | 7 bytes | Discover broadcasts |
 | Group16 | packed group key ID/sequence (3), plaintext, group auth tag (2) | 5 bytes | Routing broadcasts and reliable routing control |
-| Group32Encrypt | packed group key ID/sequence (3), AES-CTR ciphertext, group auth tag (4) | 7 bytes | Portable provider and golden tests; live app-neighborcast wrapper remains |
+| Group32Encrypt | packed group key ID/sequence (3), AES-CTR ciphertext, group auth tag (4) | 7 bytes | Non-ACKed AppNeighborcast broadcast |
 
 `arlSecurity.h` defines `PSEUDORANDOM_NUMBER_SIZE_IN_BYTES` as five bytes, but
 the legacy HOP-security packet construction reserves six bytes. The ns-3 record
@@ -69,8 +73,8 @@ count is absent.
 
 ## State and failure behavior
 
-- KeyRequest and KeyUpdate share one outbound pairwise key/sequence stream per
-  neighbor.
+- Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, and KeyUpdate share one
+  outbound pairwise key/sequence stream per neighbor.
 - GroupEstablish, Group16, and Group32Encrypt share one outbound group
   key/sequence stream. Sequence rollover evolves the group key one way; every
   16th key ID generates a fresh group key and invalidates all outbound
@@ -87,6 +91,13 @@ count is absent.
 - Group16 and Group32Encrypt require the sender's current key, the immediately
   previous key, or a derivable future key in the same 16-key epoch. Failed
   authentication does not advance replay or committed key state.
+- Pairwise DATA authentication occurs before pairwise or HOP replay state,
+  delivery, or ACK generation. An authenticated retransmission is ACKed again
+  without a second delivery; failed authentication cannot poison either replay
+  window.
+- AppNeighborcast requires a broadcast, non-ACKable envelope and authenticates
+  and decrypts before one-hop delivery. Tampered, replayed, and malformed
+  envelopes are never delivered or ACKed.
 - Authentication occurs before a KeyUpdate can consume HOP replay state,
   receive an ACK, install a group key, or affect ARL admission.
 - A changed remote security count replaces the old neighbor security state,
@@ -117,16 +128,23 @@ count is absent.
   rejection, deferred-record replacement/replay, callback ordering,
   authentication-before-ACK, same-epoch derivation, previous-key acceptance,
   and fresh 16-key epoch rollover.
-- The complete build and regression pass: 21 focused smoke targets plus
-  `csr-mac-demo-split` (22/22).
+- `csr-hop-remaining-security-smoke.cc` checks independent Pairwise16,
+  Pairwise32, and Pairwise32Encrypt golden records; plaintext/ciphertext round
+  trips; wrong-key, wrong-type, tamper, malformed, and replay rejection;
+  authentication-before-ACK/delivery; exact-once AppNeighborcast; and live
+  over-air sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
+- The complete build and regression pass: 24 focused smoke targets plus
+  `csr-mac-demo-split` (25/25).
 
 ## Deliberate boundary
 
-The enabled GroupEstablish and Group16 paths are connected end to end for
-Discover and routing traffic. Group32Encrypt is implemented and verified in
-the portable provider, but its legacy AppNeighborcast consumer does not yet
-have an exact live ns-3 packet wrapper. Pairwise16, Pairwise32Encrypt, and the
-network-security modes also remain outside this step.
+All enabled HOP-security transforms now have portable provider coverage.
+Pairwise16 is connected to ordinary DATA, Pairwise32Encrypt has an explicit
+one-hop DATA path, and Group32Encrypt is connected to AppNeighborcast. Exact
+security wrapping for every remaining control message, the distinct
+network-security modes, and operational key-store behavior remain outside this
+step and require packet-type-table or differential-trace confirmation before
+they can be claimed as equivalent.
 
 The default ns-3 key arrays are deterministic and non-secret so existing
 scenarios remain runnable; parity or security experiments should explicitly

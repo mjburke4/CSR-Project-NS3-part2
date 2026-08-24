@@ -14,6 +14,27 @@ static constexpr uint8_t CSR_LEGACY_KEY_UPDATE_TYPE = 0x01;
 static constexpr uint8_t CSR_LEGACY_KEY_REQUEST_TYPE = 0x02;
 static constexpr uint16_t CSR_GROUP_KEY_ID_STEP_SIZE = 16;
 static constexpr std::size_t CSR_GROUP_KEY_SEQUENCE_SIZE = 3;
+static constexpr std::size_t CSR_PAIRWISE_KEY_SEQUENCE_SIZE = 3;
+
+std::size_t
+GetPairwiseAuthTagSize (CsrPairwiseSecurityMode mode)
+{
+  switch (mode)
+    {
+    case CsrPairwiseSecurityMode::Pairwise16:
+      return 2;
+    case CsrPairwiseSecurityMode::Pairwise32:
+    case CsrPairwiseSecurityMode::Pairwise32Encrypt:
+      return 4;
+    }
+  return 0;
+}
+
+bool
+PairwiseModeEncryptsPayload (CsrPairwiseSecurityMode mode)
+{
+  return mode == CsrPairwiseSecurityMode::Pairwise32Encrypt;
+}
 
 std::size_t
 GetGroupAuthTagSize (CsrGroupSecurityMode mode)
@@ -683,6 +704,156 @@ CsrHopSecurityState::ReceiveKeyUpdate (
   neighbor.lastGroupKeyIdReceived = header.GetGroupKeyId ();
   neighbor.groupKeyMaterial = groupKey;
   return status;
+}
+
+CsrProtectedPairwiseMessage
+CsrHopSecurityState::ProtectPairwiseMessage (
+  CsrNodeId destination,
+  CsrPairwiseSecurityMode mode,
+  uint8_t legacyPacketType,
+  std::span<const uint8_t> payload)
+{
+  NS_ABORT_MSG_IF (!CsrIsValidNodeId (destination) ||
+                   destination == CSR_BROADCAST_ID,
+                   "CSR pairwise destination must be a unicast node");
+
+  std::size_t authLength = GetPairwiseAuthTagSize (mode);
+  NS_ABORT_MSG_IF (authLength == 0,
+                   "CSR pairwise security mode has no authentication tag");
+
+  NeighborState &neighbor = GetOrCreateNeighbor (destination);
+  uint16_t keyId = 0;
+  uint16_t sequence = 0;
+  NextPairwiseKeySequence (neighbor, keyId, sequence);
+
+  CsrLegacyCrypto::ProtectionKeys keys =
+    DerivePairwiseProtectionKeys (destination,
+                                  m_nodeId,
+                                  m_ownSecurityCount,
+                                  keyId);
+
+  std::vector<uint8_t> protectedPayload (payload.begin (), payload.end ());
+  if (PairwiseModeEncryptsPayload (mode) && !protectedPayload.empty ())
+    {
+      CsrLegacyCrypto::ApplyAes256Ctr (keys.encryption,
+                                       m_nodeId,
+                                       destination,
+                                       m_ownSecurityCount,
+                                       keyId,
+                                       sequence,
+                                       protectedPayload);
+    }
+
+  std::array<uint8_t, CSR_PAIRWISE_KEY_SEQUENCE_SIZE> packed =
+    SerializePackedKeySequence (keyId, sequence);
+  std::vector<uint8_t> record (packed.begin (), packed.end ());
+  record.insert (record.end (),
+                 protectedPayload.begin (),
+                 protectedPayload.end ());
+
+  std::vector<uint8_t> tag = CsrLegacyCrypto::ComputePairwiseAuthTag (
+    keys.authentication,
+    m_nodeId,
+    destination,
+    legacyPacketType,
+    record,
+    authLength);
+  record.insert (record.end (), tag.begin (), tag.end ());
+
+  return {keyId, sequence, std::move (record)};
+}
+
+CsrReceivedPairwiseMessage
+CsrHopSecurityState::ReceivePairwiseMessage (
+  CsrNodeId source,
+  uint16_t securityCount,
+  CsrPairwiseSecurityMode mode,
+  uint8_t legacyPacketType,
+  std::span<const uint8_t> record)
+{
+  CsrReceivedPairwiseMessage result;
+  std::size_t authLength = GetPairwiseAuthTagSize (mode);
+
+  if (!CsrIsValidNodeId (source) || source == CSR_BROADCAST_ID ||
+      authLength == 0 ||
+      record.size () < CSR_PAIRWISE_KEY_SEQUENCE_SIZE + authLength)
+    {
+      return result;
+    }
+
+  uint16_t keyId = static_cast<uint16_t> (
+    (static_cast<uint16_t> (record[0]) << 4) | (record[1] >> 4));
+  uint16_t sequence = static_cast<uint16_t> (
+    (static_cast<uint16_t> (record[1] & 0x0f) << 8) | record[2]);
+  result.keyId = keyId;
+  result.sequence = sequence;
+
+  NeighborState &neighbor = GetOrCreateNeighbor (source);
+  bool securityCountChanged =
+    neighbor.securityCountValid && neighbor.securityCount != securityCount;
+  if (securityCountChanged &&
+      !IsSecurityCountChangeValid (neighbor.securityCount, securityCount))
+    {
+      result.status = CsrHopSecurityReceiveStatus::DuplicateOrStale;
+      return result;
+    }
+
+  uint32_t replayValue =
+    (static_cast<uint32_t> (keyId) << 12) | sequence;
+  if (!securityCountChanged &&
+      neighbor.inboundPairwise.IsBeforeWindow (replayValue))
+    {
+      result.status = CsrHopSecurityReceiveStatus::DuplicateOrStale;
+      return result;
+    }
+
+  CsrLegacyCrypto::ProtectionKeys keys =
+    DerivePairwiseProtectionKeys (source,
+                                  source,
+                                  securityCount,
+                                  keyId);
+  std::span<const uint8_t> authenticatedRecord =
+    record.first (record.size () - authLength);
+  std::span<const uint8_t> receivedTag = record.last (authLength);
+  std::vector<uint8_t> expected = CsrLegacyCrypto::ComputePairwiseAuthTag (
+    keys.authentication,
+    source,
+    m_nodeId,
+    legacyPacketType,
+    authenticatedRecord,
+    authLength);
+  if (!CsrLegacyCrypto::ConstantTimeEqual (expected, receivedTag))
+    {
+      result.status = CsrHopSecurityReceiveStatus::AuthenticationFailed;
+      return result;
+    }
+
+  CsrHopSecurityReceiveStatus status = CommitAuthenticatedPairwise (
+    neighbor,
+    securityCount,
+    keyId,
+    sequence,
+    securityCountChanged);
+  result.status = status;
+  if (status == CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
+    {
+      return result;
+    }
+
+  std::span<const uint8_t> protectedPayload = authenticatedRecord.subspan (
+    CSR_PAIRWISE_KEY_SEQUENCE_SIZE);
+  result.payload.assign (protectedPayload.begin (), protectedPayload.end ());
+  if (PairwiseModeEncryptsPayload (mode) && !result.payload.empty ())
+    {
+      CsrLegacyCrypto::ApplyAes256Ctr (keys.encryption,
+                                       source,
+                                       m_nodeId,
+                                       securityCount,
+                                       keyId,
+                                       sequence,
+                                       result.payload);
+    }
+  return result;
 }
 
 CsrProtectedGroupMessage
