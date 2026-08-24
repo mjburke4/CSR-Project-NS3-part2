@@ -147,6 +147,13 @@ main (int argc, char *argv[])
   Ptr<CsrNetLayer> net2 = CreateObject<CsrNetLayer> ();
   Ptr<CsrNetLayer> net3 = CreateObject<CsrNetLayer> ();
 
+  // This legacy demo starts from pre-installed routes and intentionally skips
+  // the discovery/key-admission phase covered by the dedicated smoke test.
+  net0->SetArlNeighborAdmissionEnabled (false);
+  net1->SetArlNeighborAdmissionEnabled (false);
+  net2->SetArlNeighborAdmissionEnabled (false);
+  net3->SetArlNeighborAdmissionEnabled (false);
+
   net0->SetNodeId (0);
   net1->SetNodeId (1);
   net2->SetNodeId (2);

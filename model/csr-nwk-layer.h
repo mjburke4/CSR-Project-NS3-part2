@@ -212,6 +212,52 @@ public:
   bool IsOutboundRoutingSnapshotActive (
     CsrNodeId neighbor) const;
 
+  /** Enable the legacy two-sided-key plus NeighborCheck admission gate. */
+  void SetArlNeighborAdmissionEnabled (bool enable);
+
+  bool IsArlNeighborAdmissionEnabled () const
+  {
+    return m_arlNeighborAdmissionEnabled;
+  }
+
+  bool IsArlNeighborActive (CsrNodeId neighbor) const
+  {
+    auto it = m_nwkNeighbors.find (neighbor);
+    return it != m_nwkNeighbors.end () && it->second.arlActive;
+  }
+
+  bool HasReceivedHopKey (CsrNodeId neighbor) const
+  {
+    auto it = m_nwkNeighbors.find (neighbor);
+    return it != m_nwkNeighbors.end () && it->second.keyUpdateComplete;
+  }
+
+  bool HasSentHopKey (CsrNodeId neighbor) const
+  {
+    auto it = m_nwkNeighbors.find (neighbor);
+    return it != m_nwkNeighbors.end () && it->second.keySendComplete;
+  }
+
+  uint32_t GetKeyRequestSentCount () const
+  {
+    return m_keyRequestSentCount;
+  }
+
+  uint32_t GetKeyUpdateSentCount () const
+  {
+    return m_keyUpdateSentCount;
+  }
+
+  uint32_t GetKeyUpdateReceivedCount () const
+  {
+    return m_keyUpdateReceivedCount;
+  }
+
+  uint32_t GetInactiveNeighborDropCount () const
+  {
+    return m_inactiveNeighborDropCount;
+  }
+
   void
   SendNoPath (CsrNodeId neighbor, CsrNodeId unreachableDest)
   {
@@ -238,6 +284,7 @@ public:
               << " numFailures=" << ne.numFailures
               << std::endl;
 
+    MakeNeighborInactive (nextHop, "link failure");
     RecomputeRoutesViaNextHop (nextHop);
   }
 
@@ -389,6 +436,21 @@ public:
             "direct neighbor recovery");
         }
 
+      if (type == CsrNeighborCheckType::Discovery)
+        {
+          ne.admissionDiscoveryCheckActive = false;
+          ne.discoverySequence = discoverySequence;
+          ne.discoverySequenceValid = true;
+        }
+
+      ne.checkMessageActive = false;
+
+      // routesHopSecSentPacket() makes an ACKed NeighborCheck an admission
+      // proof.  routesMakeNeighborActive() still enforces both key directions.
+      TryMakeNeighborActive (
+        neighbor,
+        "ACKed NeighborCheck");
+
       ScheduleCheckNwkQueue ();
   }
 
@@ -428,8 +490,10 @@ public:
         NwkNeighborEntry &neighbor = kv.second;
 
         bool wasActive =
-          neighbor.lastHeardSec >= 0.0 &&
-          !neighbor.stale;
+          m_arlNeighborAdmissionEnabled
+            ? neighbor.arlActive
+            : (neighbor.lastHeardSec >= 0.0 &&
+               !neighbor.stale);
 
         if (wasActive)
           {
@@ -438,6 +502,7 @@ public:
           }
 
         neighbor.stale = true;
+        neighbor.arlActive = false;
         neighbor.wasActiveBeforeLastHello = false;
         neighbor.arlRoutingReassemblies.clear ();
 
@@ -593,6 +658,21 @@ public:
         m_hop->SetNeighborCheckSuccessCallback (
           MakeCallback (&CsrNetLayer::NoteNeighborCheckSuccess, this));
 
+        m_hop->SetNeighborCheckFailureCallback (
+          MakeCallback (&CsrNetLayer::NoteNeighborCheckFailure, this));
+
+        m_hop->SetKeyRequestReceivedCallback (
+          MakeCallback (&CsrNetLayer::NoteKeyRequestReceived, this));
+
+        m_hop->SetKeyUpdateReceivedCallback (
+          MakeCallback (&CsrNetLayer::NoteKeyUpdateReceived, this));
+
+        m_hop->SetKeyUpdateCompletionCallback (
+          MakeCallback (&CsrNetLayer::NoteKeyUpdateCompletion, this));
+
+        m_hop->SetSecurityCountChangeCallback (
+          MakeCallback (&CsrNetLayer::NoteSecurityCountChange, this));
+
         m_hop->SetRoutingControlFailureCallback (
           MakeCallback (
             &CsrNetLayer::
@@ -728,6 +808,21 @@ public:
     CsrNodeId nwkSrc = nh.GetSrc ();
     CsrNodeId nwkDst = nh.GetDst ();
     uint8_t  dscp   = nh.GetDscp ();
+
+    if (!AcceptFromNeighbor (hopSrc))
+      {
+        m_inactiveNeighborDropCount++;
+
+        std::cout << "[NWK " << m_nodeId
+                  << "] Drop DATA from inactive ARL neighbor"
+                  << " hopSrc=" << hopSrc
+                  << " nwkSrc=" << nwkSrc
+                  << " nwkDst=" << nwkDst
+                  << " drops=" << m_inactiveNeighborDropCount
+                  << std::endl;
+        return;
+      }
+
     UpdateReverseRoute (nwkSrc, hopSrc);
 
     if (nwkDst == m_nodeId)
@@ -1097,11 +1192,11 @@ public:
     NwkNeighborEntry &entry =
       neighborIt->second;
 
-    if (entry.stale)
+    if (entry.stale || !IsArlNeighborUsable (neighbor))
       {
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingRequest rejected"
-                  << " staleNeighbor="
+                  << " unavailableNeighbor="
                   << neighbor
                   << std::endl;
         return;
@@ -1165,11 +1260,12 @@ public:
         return;
       }
 
-    if (neighborIt->second.stale)
+    if (neighborIt->second.stale ||
+        !IsArlNeighborUsable (neighbor))
       {
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingDelete rejected"
-                  << " staleNeighbor="
+                  << " unavailableNeighbor="
                   << neighbor
                   << std::endl;
         return;
@@ -1322,6 +1418,33 @@ private:
     // OPNET BrT_Neighbor_Entry::num_failures
     uint32_t numFailures {0};
     bool stale {false};
+
+    // Legacy routes.c admission is distinct from freshness.  A neighbor is
+    // usable only after both group keys are exchanged and a NeighborCheck is
+    // received/ACKed.
+    bool arlActive {false};
+    bool keySendActive {false};
+    bool keySendComplete {false};
+    bool keyUpdateComplete {false};
+
+    bool keyRequestSentValid {false};
+    Time keyRequestSentWhen {Seconds (0.0)};
+    Time keyRequestDelay {MilliSeconds (5000)};
+
+    bool keySendValid {false};
+    Time keySendWhen {Seconds (0.0)};
+    Time keySendDelay {MilliSeconds (5000)};
+
+    bool overheardValid {false};
+    Time overheardWhen {Seconds (0.0)};
+    Time overheardDelay {MilliSeconds (5000)};
+
+    bool checkMessageActive {false};
+    bool admissionDiscoveryCheckPending {false};
+    bool admissionDiscoveryCheckActive {false};
+    uint32_t admissionDiscoverySequence {0};
+    bool admissionNeedsRoutingRequest {false};
+    EventId admissionRetryEvent;
 
     bool discoverySequenceValid {false};
     uint32_t discoverySequence {0};
@@ -1542,7 +1665,8 @@ private:
             m_nwkNeighbors.end () &&
           neighborIt->second.lastHeardSec >=
             0.0 &&
-          !neighborIt->second.stale;
+          !neighborIt->second.stale &&
+          IsArlNeighborUsable (reverseHop);
 
         if (reverseNeighborActive)
           {
@@ -2028,11 +2152,12 @@ public:
         return;
       }
 
-    if (neighborIt->second.stale)
+    if (neighborIt->second.stale ||
+        !IsArlNeighborUsable (neighbor))
       {
         std::cout << "[NWK " << m_nodeId
                   << "] Reliable RoutingUpdate rejected"
-                  << " staleNeighbor="
+                  << " unavailableNeighbor="
                   << neighbor
                   << std::endl;
         return;
@@ -2233,6 +2358,30 @@ private:
                            double snrDb,
                            uint32_t linkCost);
 
+  bool IsArlNeighborUsable (CsrNodeId neighbor) const;
+  bool AcceptFromNeighbor (CsrNodeId neighbor);
+  void SyncNeighborKeyState (CsrNodeId neighbor);
+  void EvaluateNeighborAdmission (
+    CsrNodeId neighbor,
+    bool receivedDiscovery = false);
+  void AdmissionRetry (CsrNodeId neighbor);
+  void ScheduleAdmissionRetry (CsrNodeId neighbor, Time delay);
+  void SendKeyRequest (CsrNodeId neighbor, bool resetDelay);
+  void SendKeyUpdate (CsrNodeId neighbor);
+  void SendPendingDiscoveryCheck (CsrNodeId neighbor);
+  void EnsureCheckMessage (CsrNodeId neighbor, const char *reason);
+  void TryMakeNeighborActive (CsrNodeId neighbor, const char *reason);
+  void MakeNeighborInactive (CsrNodeId neighbor, const char *reason);
+
+  void NoteKeyRequestReceived (CsrNodeId neighbor);
+  void NoteKeyUpdateReceived (CsrNodeId neighbor);
+  void NoteKeyUpdateCompletion (CsrNodeId neighbor, bool acknowledged);
+  void NoteSecurityCountChange (CsrNodeId neighbor);
+  void NoteNeighborCheckFailure (
+    CsrNodeId neighbor,
+    CsrNeighborCheckType type,
+    uint32_t discoverySequence);
+
   void UpdateReverseRoute (CsrNodeId netSrc, CsrNodeId hopSrc);
   bool RemoveReverseRouteFromReporter (CsrNodeId netSrc,
                                        CsrNodeId reporter);
@@ -2250,6 +2399,12 @@ private:
   void CheckNeighborFreshness ();
   void InvalidateRoutesViaNextHop (CsrNodeId nextHop, const char *reason);
   bool m_invalidateRoutesOnStaleNeighbor { false };
+
+  bool m_arlNeighborAdmissionEnabled {true};
+  uint32_t m_keyRequestSentCount {0};
+  uint32_t m_keyUpdateSentCount {0};
+  uint32_t m_keyUpdateReceivedCount {0};
+  uint32_t m_inactiveNeighborDropCount {0};
 
   EventId m_neighborFreshnessEvent;
   Time m_neighborFreshnessTimeout { Seconds (20.0) };
@@ -2506,6 +2661,625 @@ CsrNetLayer::GatewayStartupDiscoveryFire ()
 }
 
 void
+CsrNetLayer::SetArlNeighborAdmissionEnabled (bool enable)
+{
+  if (m_arlNeighborAdmissionEnabled == enable)
+    {
+      return;
+    }
+
+  m_arlNeighborAdmissionEnabled = enable;
+
+  for (auto &entry : m_nwkNeighbors)
+    {
+      NwkNeighborEntry &neighbor = entry.second;
+
+      if (!enable)
+        {
+          neighbor.arlActive =
+            neighbor.lastHeardSec >= 0.0 && !neighbor.stale;
+        }
+      else
+        {
+          neighbor.arlActive = false;
+          SyncNeighborKeyState (neighbor.nodeId);
+          EvaluateNeighborAdmission (neighbor.nodeId, false);
+        }
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] ARL neighbor admission="
+            << (enable ? "enabled" : "disabled")
+            << std::endl;
+
+  ScheduleCheckNwkQueue ();
+}
+
+bool
+CsrNetLayer::IsArlNeighborUsable (CsrNodeId neighbor) const
+{
+  if (!m_arlNeighborAdmissionEnabled)
+    {
+      return true;
+    }
+
+  auto it = m_nwkNeighbors.find (neighbor);
+  return it != m_nwkNeighbors.end () &&
+         it->second.arlActive &&
+         !it->second.stale;
+}
+
+void
+CsrNetLayer::SyncNeighborKeyState (CsrNodeId neighbor)
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end () || m_hop == nullptr)
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = it->second;
+  entry.keySendActive = m_hop->IsKeyUpdateSendActive (neighbor);
+  entry.keySendComplete = m_hop->HasGroupKeySentTo (neighbor);
+  entry.keyUpdateComplete = m_hop->HasGroupKeyReceivedFrom (neighbor);
+}
+
+void
+CsrNetLayer::ScheduleAdmissionRetry (
+  CsrNodeId neighbor,
+  Time delay)
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end () || it->second.arlActive)
+    {
+      return;
+    }
+
+  // There is one legacy-admission deadline per neighbor.  A new packet or a
+  // transition to the next key/check phase replaces the obsolete deadline.
+  if (it->second.admissionRetryEvent.IsPending ())
+    {
+      Simulator::Cancel (it->second.admissionRetryEvent);
+    }
+
+  it->second.admissionRetryEvent = Simulator::Schedule (
+    delay,
+    &CsrNetLayer::AdmissionRetry,
+    this,
+    neighbor);
+}
+
+void
+CsrNetLayer::AdmissionRetry (CsrNodeId neighbor)
+{
+  EvaluateNeighborAdmission (neighbor, false);
+}
+
+void
+CsrNetLayer::SendKeyRequest (
+  CsrNodeId neighbor,
+  bool resetDelay)
+{
+  if (m_hop == nullptr)
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  entry.nodeId = neighbor;
+
+  if (resetDelay)
+    {
+      entry.keyRequestDelay = MilliSeconds (5000);
+      entry.keySendDelay = MilliSeconds (5000);
+    }
+
+  entry.keyRequestSentValid = true;
+  entry.keyRequestSentWhen = Simulator::Now ();
+  m_keyRequestSentCount++;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending source-faithful KeyRequest"
+            << " neighbor=" << neighbor
+            << " noAck=1"
+            << " retryDelayMs="
+            << entry.keyRequestDelay.GetMilliSeconds ()
+            << std::endl;
+
+  m_hop->SendKeyRequest (neighbor);
+  ScheduleAdmissionRetry (neighbor, entry.keyRequestDelay);
+}
+
+void
+CsrNetLayer::SendKeyUpdate (CsrNodeId neighbor)
+{
+  if (m_hop == nullptr)
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  entry.nodeId = neighbor;
+  SyncNeighborKeyState (neighbor);
+
+  if (entry.keySendComplete || entry.keySendActive)
+    {
+      return;
+    }
+
+  entry.keySendValid = true;
+  entry.keySendWhen = Simulator::Now ();
+
+  if (m_hop->SendKeyUpdate (neighbor))
+    {
+      entry.keySendActive = true;
+      m_keyUpdateSentCount++;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] KeyUpdate send active"
+                << " neighbor=" << neighbor
+                << " reliable=1"
+                << " securityBytes="
+                << CsrKeyUpdateHeader::SERIALIZED_SIZE
+                << std::endl;
+
+      ScheduleAdmissionRetry (neighbor, entry.keySendDelay);
+    }
+}
+
+void
+CsrNetLayer::SendPendingDiscoveryCheck (CsrNodeId neighbor)
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = it->second;
+
+  if (!entry.admissionDiscoveryCheckPending ||
+      entry.admissionDiscoveryCheckActive ||
+      !entry.keySendComplete ||
+      !m_discoveryResponseEnabled)
+    {
+      return;
+    }
+
+  entry.admissionDiscoveryCheckPending = false;
+  entry.admissionDiscoveryCheckActive = true;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Sending deferred Discovery NeighborCheck"
+            << " neighbor=" << neighbor
+            << " sequence=" << entry.admissionDiscoverySequence
+            << " afterKeySend=1"
+            << std::endl;
+
+  SendNeighborCheck (neighbor,
+                     CsrNeighborCheckType::Discovery,
+                     CSR_BROADCAST_ID,
+                     entry.admissionDiscoverySequence);
+}
+
+void
+CsrNetLayer::EnsureCheckMessage (
+  CsrNodeId neighbor,
+  const char *reason)
+{
+  if (!m_arlNeighborAdmissionEnabled || m_hop == nullptr)
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  entry.nodeId = neighbor;
+
+  if (entry.arlActive ||
+      entry.checkMessageActive ||
+      entry.admissionDiscoveryCheckActive)
+    {
+      return;
+    }
+
+  entry.checkMessageActive = true;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Starting CHECK_MESSAGE admission proof"
+            << " neighbor=" << neighbor
+            << " reason=" << reason
+            << std::endl;
+
+  SendNeighborCheck (neighbor, CsrNeighborCheckType::Message);
+}
+
+void
+CsrNetLayer::TryMakeNeighborActive (
+  CsrNodeId neighbor,
+  const char *reason)
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = it->second;
+  SyncNeighborKeyState (neighbor);
+
+  if (m_arlNeighborAdmissionEnabled &&
+      (!entry.keyUpdateComplete || !entry.keySendComplete))
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Neighbor admission deferred"
+                << " neighbor=" << neighbor
+                << " reason=" << reason
+                << " receivedKey="
+                << (entry.keyUpdateComplete ? 1 : 0)
+                << " sentKey="
+                << (entry.keySendComplete ? 1 : 0)
+                << std::endl;
+      return;
+    }
+
+  if (entry.arlActive)
+    {
+      return;
+    }
+
+  std::map<CsrNodeId, SelectedRouteState> selectedBefore;
+  for (const auto &route : m_routes)
+    {
+      if (route.nextHop == neighbor &&
+          selectedBefore.find (route.nwkDst) == selectedBefore.end ())
+        {
+          selectedBefore.emplace (
+            route.nwkDst,
+            CaptureSelectedRouteState (route.nwkDst));
+        }
+    }
+
+  entry.arlActive = true;
+  entry.stale = false;
+  entry.overheardDelay = MilliSeconds (5000);
+  entry.checkMessageActive = false;
+  entry.admissionDiscoveryCheckActive = false;
+
+  if (entry.admissionRetryEvent.IsPending ())
+    {
+      Simulator::Cancel (entry.admissionRetryEvent);
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] ARL neighbor ACTIVE"
+            << " neighbor=" << neighbor
+            << " reason=" << reason
+            << " keys=two-sided"
+            << std::endl;
+
+  for (const auto &before : selectedBefore)
+    {
+      SelectedRouteState after =
+        CaptureSelectedRouteState (before.first);
+
+      if (!SameSelectedRouteState (before.second, after))
+        {
+          MarkSelectedRouteChanged (before.first, "neighbor admitted");
+        }
+    }
+
+  // routesMakeNeighborActive() sets needsUpdate.  A complete reliable ARL
+  // snapshot is this model's INFO/UPDATE/FLUSH equivalent of that flag.
+  Simulator::Schedule (
+    MilliSeconds (20),
+    &CsrNetLayer::StartReliableRoutingSnapshot,
+    this,
+    neighbor);
+
+  if (entry.admissionNeedsRoutingRequest)
+    {
+      entry.admissionNeedsRoutingRequest = false;
+      Simulator::ScheduleNow (
+        &CsrNetLayer::SendRoutingRequest,
+        this,
+        neighbor);
+    }
+
+  ScheduleCheckNwkQueue ();
+}
+
+void
+CsrNetLayer::MakeNeighborInactive (
+  CsrNodeId neighbor,
+  const char *reason)
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end () || !it->second.arlActive)
+    {
+      return;
+    }
+
+  std::map<CsrNodeId, SelectedRouteState> selectedBefore;
+  for (const auto &route : m_routes)
+    {
+      if (route.nextHop == neighbor &&
+          selectedBefore.find (route.nwkDst) == selectedBefore.end ())
+        {
+          selectedBefore.emplace (
+            route.nwkDst,
+            CaptureSelectedRouteState (route.nwkDst));
+        }
+    }
+
+  NwkNeighborEntry &entry = it->second;
+  entry.arlActive = false;
+  entry.checkMessageActive = false;
+  entry.admissionDiscoveryCheckActive = false;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] ARL neighbor INACTIVE"
+            << " neighbor=" << neighbor
+            << " reason=" << reason
+            << std::endl;
+
+  for (const auto &before : selectedBefore)
+    {
+      SelectedRouteState after =
+        CaptureSelectedRouteState (before.first);
+
+      if (!SameSelectedRouteState (before.second, after))
+        {
+          MarkSelectedRouteChanged (before.first, "neighbor inactive");
+        }
+    }
+}
+
+void
+CsrNetLayer::EvaluateNeighborAdmission (
+  CsrNodeId neighbor,
+  bool receivedDiscovery)
+{
+  if (!m_arlNeighborAdmissionEnabled || m_hop == nullptr)
+    {
+      return;
+    }
+
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  SyncNeighborKeyState (neighbor);
+  NwkNeighborEntry &entry = it->second;
+
+  if (entry.stale || entry.arlActive)
+    {
+      return;
+    }
+
+  Time now = Simulator::Now ();
+
+  if (!entry.keyUpdateComplete)
+    {
+      if (receivedDiscovery)
+        {
+          // routesRcvUnAuthedMsg() resets both delays to 5000 ms and sends a
+          // new no-ACK KeyRequest for the authenticated-but-not-decryptable
+          // Discover.
+          SendKeyRequest (neighbor, true);
+        }
+      else if (!entry.keyRequestSentValid ||
+               now - entry.keyRequestSentWhen >= entry.keyRequestDelay)
+        {
+          // routesValidRx() doubles the next eligibility interval before it
+          // emits a retry.  routesRcvUnAuthedMsg() is the special initial
+          // Discover path above and keeps the reset 5000-ms interval.
+          entry.keyRequestDelay = entry.keyRequestDelay * 2;
+          SendKeyRequest (neighbor, false);
+        }
+      return;
+    }
+
+  if (!entry.keySendComplete)
+    {
+      if (!entry.keySendActive &&
+          (!entry.keySendValid ||
+           now - entry.keySendWhen >= entry.keySendDelay))
+        {
+          if (entry.keySendValid)
+            {
+              entry.keySendDelay = entry.keySendDelay * 2;
+            }
+          SendKeyUpdate (neighbor);
+        }
+      return;
+    }
+
+  if (entry.admissionDiscoveryCheckPending)
+    {
+      SendPendingDiscoveryCheck (neighbor);
+      return;
+    }
+
+  if (!entry.overheardValid ||
+      now - entry.overheardWhen >= entry.overheardDelay)
+    {
+      entry.overheardValid = true;
+      entry.overheardWhen = now;
+      entry.overheardDelay = entry.overheardDelay * 2;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Sending CHECK_OVERHEARD after two-sided key exchange"
+                << " neighbor=" << neighbor
+                << std::endl;
+
+      SendNeighborCheck (neighbor, CsrNeighborCheckType::Overheard);
+      ScheduleAdmissionRetry (neighbor, entry.overheardDelay);
+    }
+}
+
+bool
+CsrNetLayer::AcceptFromNeighbor (CsrNodeId neighbor)
+{
+  if (!m_arlNeighborAdmissionEnabled)
+    {
+      return true;
+    }
+
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  entry.nodeId = neighbor;
+  SyncNeighborKeyState (neighbor);
+
+  if (!entry.arlActive)
+    {
+      EnsureCheckMessage (neighbor, "DATA from inactive neighbor");
+      EvaluateNeighborAdmission (neighbor, false);
+    }
+
+  return entry.arlActive;
+}
+
+void
+CsrNetLayer::NoteKeyRequestReceived (CsrNodeId neighbor)
+{
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  entry.nodeId = neighbor;
+  SyncNeighborKeyState (neighbor);
+
+  Time sentWhen;
+  if (m_hop != nullptr &&
+      m_hop->GetGroupKeySentWhen (neighbor, sentWhen))
+    {
+      Time age = Simulator::Now () - sentWhen;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] KeyRequest received after completed KeyUpdate"
+                << " neighbor=" << neighbor
+                << " ageMs=" << age.GetMilliSeconds ()
+                << (age > MilliSeconds (5000)
+                      ? " needs-mission-key-check"
+                      : " recent-key-suppressed")
+                << std::endl;
+      return;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] KeyRequest accepted"
+            << " neighbor=" << neighbor
+            << std::endl;
+
+  SendKeyUpdate (neighbor);
+}
+
+void
+CsrNetLayer::NoteKeyUpdateReceived (CsrNodeId neighbor)
+{
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  entry.nodeId = neighbor;
+  SyncNeighborKeyState (neighbor);
+  m_keyUpdateReceivedCount++;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] KeyUpdate complete"
+            << " neighbor=" << neighbor
+            << " receivedKey="
+            << (entry.keyUpdateComplete ? 1 : 0)
+            << std::endl;
+
+  // routesKeyUpdateComplete() immediately sends our reciprocal group key.
+  SendKeyUpdate (neighbor);
+  EvaluateNeighborAdmission (neighbor, false);
+}
+
+void
+CsrNetLayer::NoteKeyUpdateCompletion (
+  CsrNodeId neighbor,
+  bool acknowledged)
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = it->second;
+  entry.keySendActive = false;
+  SyncNeighborKeyState (neighbor);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] KeyUpdate send completion"
+            << " neighbor=" << neighbor
+            << " acknowledged=" << (acknowledged ? 1 : 0)
+            << " sentKey=" << (entry.keySendComplete ? 1 : 0)
+            << std::endl;
+
+  EvaluateNeighborAdmission (neighbor, false);
+}
+
+void
+CsrNetLayer::NoteSecurityCountChange (CsrNodeId neighbor)
+{
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  entry.nodeId = neighbor;
+
+  MakeNeighborInactive (neighbor, "security count changed");
+
+  entry.discoverySequenceValid = false;
+  entry.keyUpdateComplete = false;
+  entry.keyRequestSentValid = false;
+  entry.keySendComplete = false;
+  entry.keySendActive = false;
+  entry.keySendValid = false;
+  entry.overheardValid = false;
+  entry.keyRequestDelay = MilliSeconds (5000);
+  entry.keySendDelay = MilliSeconds (5000);
+  entry.overheardDelay = MilliSeconds (5000);
+  entry.numFailures = 0;
+
+  if (entry.admissionRetryEvent.IsPending ())
+    {
+      Simulator::Cancel (entry.admissionRetryEvent);
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Reset ARL admission after security-count change"
+            << " neighbor=" << neighbor
+            << std::endl;
+}
+
+void
+CsrNetLayer::NoteNeighborCheckFailure (
+  CsrNodeId neighbor,
+  CsrNeighborCheckType type,
+  uint32_t discoverySequence)
+{
+  auto it = m_nwkNeighbors.find (neighbor);
+  if (it == m_nwkNeighbors.end ())
+    {
+      return;
+    }
+
+  NwkNeighborEntry &entry = it->second;
+  entry.checkMessageActive = false;
+
+  if (type == CsrNeighborCheckType::Discovery)
+    {
+      entry.admissionDiscoveryCheckActive = false;
+      entry.admissionDiscoveryCheckPending = true;
+      entry.admissionDiscoverySequence = discoverySequence;
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] NeighborCheck admission proof failed"
+            << " neighbor=" << neighbor
+            << " subtype=" << NeighborCheckTypeName (type)
+            << std::endl;
+
+  ScheduleAdmissionRetry (neighbor, MilliSeconds (5000));
+}
+
+void
 CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
                             CsrNodeId hopSrc,
                             double pathlossDb,
@@ -2553,7 +3327,9 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   ne.nodeType = senderType;
 
   ne.wasActiveBeforeLastHello =
-    !isNew && !wasStale;
+    m_arlNeighborAdmissionEnabled
+      ? ne.arlActive
+      : (!isNew && !wasStale);
 
   ne.nodeId = src;
   ne.lastHeardSec = now;
@@ -2563,6 +3339,13 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
   ne.rxPowerDbmX10 = hh.GetRxPowerDbmX10 ();
   ne.activeNodes = hh.GetActiveNodes ();
   ne.stale = false;
+
+  if (!m_arlNeighborAdmissionEnabled)
+    {
+      ne.arlActive = true;
+    }
+
+  SyncNeighborKeyState (src);
 
   if (wasStale)
     {
@@ -2661,6 +3444,11 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
                         snrDb,
                         linkCost);
 
+  EvaluateNeighborAdmission (
+    src,
+    hh.GetArlRouteMsgType () == CsrArlRouteMsgType::Discover &&
+      !ne.keyUpdateComplete);
+
     DumpRoutes ();
 
     // Discovery/route update may have unblocked queued packets.
@@ -2710,6 +3498,16 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
         break;
 
       case CsrArlRouteMsgType::RoutingUpdate:
+        if (m_arlNeighborAdmissionEnabled &&
+            !IsArlNeighborUsable (helloSrc))
+          {
+            // routesRcvMsg() still processes and ACKs an update from an
+            // inactive neighbor, but starts CHECK_MESSAGE in parallel.
+            EnsureCheckMessage (
+              helloSrc,
+              "RoutingUpdate from inactive neighbor");
+          }
+
         if (routingPayload != nullptr &&
             routingPayload->GetSize () >=
               CsrArlRoutingMessage::SECTION_PREFIX_SIZE)
@@ -2747,9 +3545,10 @@ CsrNetLayer::ProcessArlRouteMessage (const CsrHelloHeader &hh,
         break;
 
       case CsrArlRouteMsgType::KeyRequest:
-        std::cout << "[NWK " << m_nodeId
-                  << "] KeyRequest handling is not implemented yet"
-                  << std::endl;
+        // Compatibility path for older scenarios that embedded KeyRequest in
+        // CsrHelloHeader.  New traffic uses the exact Pairwise32 HOP-security
+        // record and reaches the same handler through CsrHopLayer.
+        NoteKeyRequestReceived (helloSrc);
         break;
 
       case CsrArlRouteMsgType::None:
@@ -4476,6 +5275,9 @@ CsrNetLayer::CheckNeighborFreshness ()
 
       if (!ne.stale && ageSec > timeoutSec)
         {
+          MakeNeighborInactive (
+            ne.nodeId,
+            "freshness timeout");
           ne.stale = true;
 
           bool hadPendingRoutingRequest =
@@ -4753,20 +5555,45 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
 
             if (m_discoveryResponseEnabled)
               {
-                std::cout << "[NWK " << m_nodeId
-                          << "] Scheduling Discovery NeighborCheck response to "
-                          << helloSrc
-                          << " for sequence=" << receivedSequence
-                          << std::endl;
+                if (m_arlNeighborAdmissionEnabled)
+                  {
+                    // routesProcess() holds CHECK_DISCOVERY until our group
+                    // key has been ACKed by this neighbor.
+                    neighbor.admissionDiscoveryCheckPending = true;
+                    neighbor.admissionDiscoverySequence = receivedSequence;
 
-                Simulator::Schedule (
-                  MilliSeconds (20),
-                  &CsrNetLayer::SendNeighborCheck,
-                  this,
-                  helloSrc,
-                  CsrNeighborCheckType::Discovery,
-                  CSR_BROADCAST_ID,
-                  receivedSequence);
+                    std::cout << "[NWK " << m_nodeId
+                              << "] Discovery response pending key-send ACK"
+                              << " neighbor=" << helloSrc
+                              << " sequence=" << receivedSequence
+                              << std::endl;
+
+                    if (neighbor.keySendComplete)
+                      {
+                        Simulator::Schedule (
+                          MilliSeconds (20),
+                          &CsrNetLayer::SendPendingDiscoveryCheck,
+                          this,
+                          helloSrc);
+                      }
+                  }
+                else
+                  {
+                    std::cout << "[NWK " << m_nodeId
+                              << "] Scheduling Discovery NeighborCheck response to "
+                              << helloSrc
+                              << " for sequence=" << receivedSequence
+                              << std::endl;
+
+                    Simulator::Schedule (
+                      MilliSeconds (20),
+                      &CsrNetLayer::SendNeighborCheck,
+                      this,
+                      helloSrc,
+                      CsrNeighborCheckType::Discovery,
+                      CSR_BROADCAST_ID,
+                      receivedSequence);
+                  }
               }
             else
               {
@@ -4905,6 +5732,25 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
       {
         uint32_t responseSequence = hh.GetDiscoverySequence ();
 
+        NwkNeighborEntry &admissionNeighbor =
+          m_nwkNeighbors[helloSrc];
+        admissionNeighbor.nodeId = helloSrc;
+
+        bool remoteArlActive =
+          hh.GetActiveNodes () == 3; // legacy NEIGHBOR_ACTIVE
+
+        if (!admissionNeighbor.arlActive && remoteArlActive)
+          {
+            admissionNeighbor.admissionNeedsRoutingRequest = true;
+          }
+
+        if (!admissionNeighbor.arlActive || !remoteArlActive)
+          {
+            TryMakeNeighborActive (
+              helloSrc,
+              "received CHECK_DISCOVERY");
+          }
+
         std::cout << "[NWK " << m_nodeId
                   << "] Discovery response from neighbor="
                   << helloSrc
@@ -4965,11 +5811,17 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
       }
 
     case CsrNeighborCheckType::Message:
-      std::cout << "[NWK " << m_nodeId
-                << "] NeighborCheck Message confirms link with "
-                << helloSrc
-                << std::endl;
-      break;
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] NeighborCheck Message confirms link with "
+                  << helloSrc
+                  << std::endl;
+
+        TryMakeNeighborActive (
+          helloSrc,
+          "received CHECK_MESSAGE");
+        break;
+      }
 
     case CsrNeighborCheckType::Verify:
       {
@@ -4998,15 +5850,25 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
                   << " link confirmed"
                   << std::endl;
 
+        TryMakeNeighborActive (
+          helloSrc,
+          "received CHECK_VERIFY");
+
         break;
       }
 
     case CsrNeighborCheckType::Overheard:
-      std::cout << "[NWK " << m_nodeId
-                << "] NeighborCheck Overheard received from "
-                << helloSrc
-                << std::endl;
-      break;
+      {
+        std::cout << "[NWK " << m_nodeId
+                  << "] NeighborCheck Overheard received from "
+                  << helloSrc
+                  << std::endl;
+
+        EnsureCheckMessage (
+          helloSrc,
+          "received CHECK_OVERHEARD");
+        break;
+      }
 
     /*case CsrNeighborCheckType::NoPath:
       std::cout << "[NWK " << m_nodeId
@@ -5300,6 +6162,48 @@ CsrNetLayer::DiscoveryHelloTick ()
 
   if (m_discoveryBroadcastsRemaining == 0)
     {
+      if (m_arlNeighborAdmissionEnabled)
+        {
+          uint32_t pendingAdmissions = 0;
+
+          for (const auto &item : m_nwkNeighbors)
+            {
+              const NwkNeighborEntry &neighbor = item.second;
+
+              if (neighbor.arlActive || neighbor.stale)
+                {
+                  continue;
+                }
+
+              // In OPNET the key/check exchange normally finishes during
+              // the three-broadcast discovery window.  ns-3 can still have
+              // those reliable frames in flight when the one-second
+              // broadcaster expires.  Keep the lifecycle open so
+              // sensorAppEndedDiscovery() sees the same admitted neighbor;
+              // the separately scheduled DiscoveryStop remains the bound.
+              if (neighbor.admissionDiscoveryCheckPending ||
+                  neighbor.admissionDiscoveryCheckActive ||
+                  neighbor.keyRequestSentValid ||
+                  neighbor.keySendValid ||
+                  neighbor.keySendActive ||
+                  neighbor.keySendComplete ||
+                  neighbor.keyUpdateComplete)
+                {
+                  pendingAdmissions++;
+                }
+            }
+
+          if (pendingAdmissions > 0)
+            {
+              std::cout << "[NWK " << m_nodeId
+                        << "] Discovery completion waiting for ARL admission"
+                        << " pending=" << pendingAdmissions
+                        << std::endl;
+              ScheduleDiscoveryHello ();
+              return;
+            }
+        }
+
       DiscoveryStop ();
       return;
     }
@@ -5385,8 +6289,9 @@ CsrNetLayer::SendHelloBroadcast (
         {
           const NwkNeighborEntry &neighbor = kv.second;
 
-          // "Fresh" is the current NS-3 proxy for legacy NEIGHBOR_ACTIVE.
-          if (neighbor.lastHeardSec < 0.0 || neighbor.stale)
+          if (neighbor.lastHeardSec < 0.0 ||
+              neighbor.stale ||
+              !IsArlNeighborUsable (neighbor.nodeId))
             {
               continue;
             }
@@ -5560,8 +6465,20 @@ CsrNetLayer::SendNeighborCheck (
   hh.SetRxPowerDbmX10 (
     static_cast<int16_t> (std::round (s0PowerDbm * 10.0)));
 
-  hh.SetActiveNodes (
-    static_cast<uint8_t> (GetActiveNodeCount ()));
+  if (type == CsrNeighborCheckType::Discovery &&
+      m_arlNeighborAdmissionEnabled)
+    {
+      // CHECK_DISCOVERY carries the sender's neighbor state byte.  The
+      // legacy value is NEIGHBOR_ACTIVE == 3, not the global node count used
+      // by ordinary HELLOs.
+      hh.SetActiveNodes (
+        IsArlNeighborActive (neighbor) ? 3 : 0);
+    }
+  else
+    {
+      hh.SetActiveNodes (
+        static_cast<uint8_t> (GetActiveNodeCount ()));
+    }
 
   hh.SetArlRouteMsgType (
     CsrArlRouteMsgType::NeighborCheck);
@@ -5953,6 +6870,11 @@ CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
     }
 
   if (!re.valid)
+    {
+      return false;
+    }
+
+  if (!IsArlNeighborUsable (re.nextHop))
     {
       return false;
     }
@@ -6672,11 +7594,12 @@ CsrNetLayer::StartReliableRoutingSnapshot (
       return;
     }
 
-  if (neighborIt->second.stale)
+  if (neighborIt->second.stale ||
+      !IsArlNeighborUsable (neighbor))
     {
       std::cout << "[NWK " << m_nodeId
                 << "] RoutingSnapshot rejected"
-                << " staleNeighbor="
+                << " unavailableNeighbor="
                 << neighbor
                 << std::endl;
       return;
@@ -6900,14 +7823,14 @@ CsrNetLayer::SendRoutingRequestAttempt (
       return;
     }
 
-  if (entry.stale)
+  if (entry.stale || !IsArlNeighborUsable (neighbor))
     {
       entry.routingRequestPending = false;
       entry.routingRequestRetryCount = 0;
 
       std::cout << "[NWK " << m_nodeId
                 << "] RoutingRequest aborted"
-                << " neighbor became stale="
+                << " neighbor became unavailable="
                 << neighbor
                 << std::endl;
       return;
@@ -7079,6 +8002,11 @@ CsrNetLayer::FindBestRoute (
     {
       if (route.nwkDst != destination ||
           !route.valid)
+        {
+          continue;
+        }
+
+      if (!IsArlNeighborUsable (route.nextHop))
         {
           continue;
         }
@@ -7281,7 +8209,8 @@ ReportPendingSelectedRouteChanges ()
 
       bool fresh =
         neighbor.lastHeardSec >= 0.0 &&
-        !neighbor.stale;
+        !neighbor.stale &&
+        IsArlNeighborUsable (neighbor.nodeId);
 
       if (!fresh)
         {
@@ -7367,7 +8296,8 @@ TrySendAutomaticRouteUpdates ()
 
       if (neighborIt ==
             m_nwkNeighbors.end () ||
-          neighborIt->second.stale)
+          neighborIt->second.stale ||
+          !IsArlNeighborUsable (neighborId))
         {
           std::cout << "[NWK " << m_nodeId
                     << "] Dropping automatic route propagation"
@@ -7866,7 +8796,8 @@ RefreshRoutesAfterDiscovery ()
 
       bool active =
         neighbor.lastHeardSec >= 0.0 &&
-        !neighbor.stale;
+        !neighbor.stale &&
+        IsArlNeighborUsable (neighbor.nodeId);
 
       if (!active)
         {

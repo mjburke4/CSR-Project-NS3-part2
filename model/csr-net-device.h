@@ -778,6 +778,40 @@ CsrMacCore::CancelAcknowledgedFrames (CsrNodeId neighbor,
   return removed;
 }
 
+uint32_t
+CsrMacCore::CancelQueuedFramesByType (CsrNodeId neighbor, uint8_t type)
+{
+  uint32_t removed = 0;
+
+  for (auto it = m_queue.begin (); it != m_queue.end (); )
+    {
+      CsrHeader header;
+      if (it->dest == neighbor &&
+          it->frame != nullptr &&
+          it->frame->PeekHeader (header) &&
+          header.GetType () == type)
+        {
+          it = m_queue.erase (it);
+          removed++;
+          continue;
+        }
+
+      ++it;
+    }
+
+  if (removed > 0)
+    {
+      std::cout << "[MAC " << m_nodeId
+                << "] Replace immediate-tag frame"
+                << " neighbor=" << neighbor
+                << " type=" << unsigned (type)
+                << " removed=" << removed
+                << std::endl;
+    }
+
+  return removed;
+}
+
 void
 CsrMacCore::MaybeScheduleNextTx ()
 {

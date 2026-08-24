@@ -59,6 +59,7 @@ main ()
     CreateObject<CsrNetDevice> (RELAY_NODE);
   Ptr<CsrHopLayer> relayHop = CreateObject<CsrHopLayer> ();
   Ptr<CsrNetLayer> relayNwk = CreateObject<CsrNetLayer> ();
+  relayNwk->SetArlNeighborAdmissionEnabled (false);
 
   relayHop->SetNodeId (RELAY_NODE);
   relayHop->SetMac (&relayDevice->GetMac ());

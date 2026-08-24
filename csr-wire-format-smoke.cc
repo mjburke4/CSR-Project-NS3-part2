@@ -2,6 +2,7 @@
 #include "ns3/csr-arl-routing-message.h"
 #include "ns3/csr-common.h"
 #include "ns3/csr-hello-header.h"
+#include "ns3/csr-hop-security.h"
 #include "ns3/csr-net-device.h"
 #include "ns3/csr-hop-layer.h"
 #include "ns3/csr-nwk-layer.h"
@@ -204,6 +205,141 @@ CheckSnmpHeader ()
 }
 
 void
+CheckHopSecurityHeaders ()
+{
+  CsrKeyRequestHeader request;
+  request.SetKeyId (0x0abc);
+  request.SetSequence (0x0def);
+  request.SetAuthTag ({0x10, 0x20, 0x30, 0x40});
+
+  const std::vector<uint8_t> expectedRequest {
+    0xab, 0xcd, 0xef,
+    0x10, 0x20, 0x30, 0x40
+  };
+
+  Require (request.GetSerializedSize () == 7,
+           "KeyRequest Pairwise32 record is not seven bytes");
+  RequireBytes (SerializeHeader (request), expectedRequest,
+                "KeyRequest 12-bit key/sequence packing is incorrect");
+
+  CsrKeyUpdateHeader update;
+  update.SetKeyId (0x0123);
+  update.SetSequence (0x0456);
+  update.SetGroupKeyId (0x0789);
+  update.SetDataPrn ({0, 1, 2, 3, 4, 5});
+
+  CsrKeyUpdateHeader::WrappedKey wrappedKey {};
+  for (uint8_t index = 0; index < wrappedKey.size (); ++index)
+    {
+      wrappedKey[index] = static_cast<uint8_t> (0x80 + index);
+    }
+  update.SetWrappedKey (wrappedKey);
+  update.SetAuthTag ({0xf0, 0xf1, 0xf2, 0xf3,
+                      0xf4, 0xf5, 0xf6, 0xf7});
+
+  std::vector<uint8_t> expectedUpdate {
+    0x12, 0x34, 0x56,
+    0x07, 0x89,
+    0, 1, 2, 3, 4, 5
+  };
+  expectedUpdate.insert (expectedUpdate.end (),
+                         wrappedKey.begin (),
+                         wrappedKey.end ());
+  expectedUpdate.insert (expectedUpdate.end (),
+                         {0xf0, 0xf1, 0xf2, 0xf3,
+                          0xf4, 0xf5, 0xf6, 0xf7});
+
+  Require (update.GetSerializedSize () == 51,
+           "KeyUpdate security record is not the legacy 51 bytes");
+  RequireBytes (SerializeHeader (update), expectedUpdate,
+                "KeyUpdate wire layout does not match hopSecLayer.c");
+
+  Ptr<Packet> packet = Create<Packet> (
+    expectedUpdate.data (), expectedUpdate.size ());
+  CsrKeyUpdateHeader decoded;
+  Require (packet->RemoveHeader (decoded) == expectedUpdate.size (),
+           "KeyUpdate did not consume its exact wire size");
+  const CsrKeyUpdateHeader::DataPrn expectedPrn {0, 1, 2, 3, 4, 5};
+  Require (decoded.GetKeyId () == 0x0123 &&
+           decoded.GetSequence () == 0x0456 &&
+           decoded.GetGroupKeyId () == 0x0789 &&
+           decoded.GetDataPrn () == expectedPrn &&
+           decoded.GetWrappedKey () == wrappedKey,
+           "KeyUpdate fields did not round-trip exactly");
+
+  CsrHeader securedHop (0x010203,
+                        0x040506,
+                        0x0708,
+                        7,
+                        false,
+                        false);
+  securedHop.SetType (CSR_PKT_KEY_REQUEST);
+  securedHop.SetSecurityCount (0x0abc);
+  Require (securedHop.GetSerializedSize () == 15,
+           "optional MAC security count did not add two bytes");
+
+  Ptr<Packet> securedPacket = Create<Packet> ();
+  securedPacket->AddHeader (securedHop);
+  CsrHeader decodedHop;
+  securedPacket->RemoveHeader (decodedHop);
+  Require (decodedHop.HasSecurityCount () &&
+           decodedHop.GetSecurityCount () == 0x0abc,
+           "MAC security count did not round-trip");
+}
+
+void
+CheckHopSecurityState ()
+{
+  CsrHopSecurityState state;
+  state.SetNodeId (0x010203);
+  state.SetOwnSecurityCount (7);
+
+  CsrKeyRequestHeader request = state.BuildKeyRequest (0x040506);
+  CsrKeyUpdateHeader outbound = state.BuildKeyUpdate (0x040506);
+
+  Require (request.GetSequence () == 1 &&
+           outbound.GetSequence () == 2,
+           "pairwise sequence did not advance across security modes");
+  Require (outbound.GetGroupKeyId () == 0,
+           "non-SECURITY KeyUpdate did not use the legacy zero group-key ID");
+  Require (state.IsKeyUpdateSendActive (0x040506) &&
+           !state.HasGroupKeySentTo (0x040506),
+           "KeyUpdate was marked sent before its reliable ACK");
+
+  state.MarkKeyUpdateAcked (0x040506, MilliSeconds (123));
+  Time sentWhen;
+  Require (!state.IsKeyUpdateSendActive (0x040506) &&
+           state.HasGroupKeySentTo (0x040506) &&
+           state.GetGroupKeySentWhen (0x040506, sentWhen) &&
+           sentWhen == MilliSeconds (123),
+           "ACK did not complete and timestamp the outbound group key");
+
+  CsrKeyUpdateHeader inbound;
+  inbound.SetKeyId (3);
+  inbound.SetSequence (9);
+  inbound.SetGroupKeyId (11);
+
+  Require (state.ReceiveKeyUpdate (0x040506, 7, inbound) ==
+             CsrHopSecurityReceiveStatus::Accepted &&
+           state.HasGroupKeyReceivedFrom (0x040506),
+           "first inbound KeyUpdate was not accepted");
+  Require (state.ReceiveKeyUpdate (0x040506, 7, inbound) ==
+             CsrHopSecurityReceiveStatus::DuplicateOrStale,
+           "replayed KeyUpdate bypassed pairwise anti-replay state");
+
+  CsrKeyUpdateHeader restarted;
+  restarted.SetKeyId (0);
+  restarted.SetSequence (1);
+  restarted.SetGroupKeyId (1);
+  Require (state.ReceiveKeyUpdate (0x040506, 8, restarted) ==
+             CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged,
+           "new security count did not reset pairwise replay state");
+  Require (!state.HasGroupKeySentTo (0x040506) &&
+           state.HasGroupKeyReceivedFrom (0x040506),
+           "security-count change did not replace the old key relationship");
+}
+
+void
 CheckHelloHeader ()
 {
   CsrHelloHeader header;
@@ -329,6 +465,7 @@ ConnectHighIdStack (Ptr<CsrNetDevice> device,
   hop->SetNodeId (nodeId);
   hop->SetMac (&device->GetMac ());
   nwk->SetNodeId (nodeId);
+  nwk->SetArlNeighborAdmissionEnabled (false);
   nwk->SetHop (hop);
   device->GetMac ().SetRxCallback (
     MakeCallback (&CsrHopLayer::ReceiveFromMac, hop));
@@ -400,6 +537,8 @@ main ()
 {
   CheckNetworkHeader ();
   CheckHopHeader ();
+  CheckHopSecurityHeaders ();
+  CheckHopSecurityState ();
   CheckSnmpHeader ();
   CheckHelloHeader ();
   CheckArlRecord ();

@@ -258,6 +258,7 @@ RunOutOfOrderAtomicReassemblyScenario ()
   constexpr CsrNodeId oldDestination = 900;
 
   Ptr<CsrNetLayer> receiver = CreateObject<CsrNetLayer> ();
+  receiver->SetArlNeighborAdmissionEnabled (false);
   receiver->SetNodeId (receiverId);
   receiver->ProcessHello (
     MakePlainHello (senderId),
@@ -364,6 +365,7 @@ RunIndependentHopTransmissionScenario ()
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceId);
   Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
   Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  nwk->SetArlNeighborAdmissionEnabled (false);
 
   hop->SetNodeId (sourceId);
   hop->SetMac (&device->GetMac ());
