@@ -583,6 +583,37 @@ CsrLegacyCrypto::DeriveProtectionKeys (
   return keys;
 }
 
+CsrLegacyCrypto::GroupKeyMaterial
+CsrLegacyCrypto::DeriveNextGroupKeyMaterial (
+  const MissionKey &missionKey,
+  const GroupKeyMaterial &currentGroupKey,
+  CsrNodeId sourceId,
+  uint16_t securityCount,
+  uint16_t nextGroupKeyId)
+{
+  RequireSecurityField (nextGroupKeyId,
+                        "CSR next group-key identifier");
+
+  std::vector<uint8_t> password (missionKey.begin (), missionKey.end ());
+  password.insert (password.end (),
+                   currentGroupKey.begin (),
+                   currentGroupKey.end ());
+
+  std::vector<uint8_t> salt;
+  salt.reserve (7);
+  AppendNodeId (salt, sourceId);
+  AppendBe16 (salt, securityCount);
+  AppendBe16 (salt, nextGroupKeyId);
+
+  std::vector<uint8_t> derived =
+    Pbkdf2HmacSha1 (password, salt, 1, GROUP_KEY_MATERIAL_SIZE);
+  GroupKeyMaterial next {};
+  std::copy (derived.begin (), derived.end (), next.begin ());
+  std::fill (password.begin (), password.end (), 0);
+  std::fill (derived.begin (), derived.end (), 0);
+  return next;
+}
+
 CsrLegacyCrypto::EncryptionKey
 CsrLegacyCrypto::DerivePairwiseWrappingKey (
   const MissionKey &missionKey,
@@ -642,6 +673,85 @@ CsrLegacyCrypto::ComputePairwiseAuthTag (
   Sha1Digest digest = HmacSha1 (authenticationKey, input);
   return std::vector<uint8_t> (digest.begin (),
                                digest.begin () + authLength);
+}
+
+std::vector<uint8_t>
+CsrLegacyCrypto::ComputeGroupAuthTag (
+  const AuthenticationKey &authenticationKey,
+  CsrNodeId sourceId,
+  uint8_t packetType,
+  std::span<const uint8_t> data,
+  std::size_t authLength)
+{
+  return ComputePairwiseAuthTag (authenticationKey,
+                                 sourceId,
+                                 0,
+                                 packetType,
+                                 data,
+                                 authLength);
+}
+
+std::array<uint8_t, 4>
+CsrLegacyCrypto::ComputeGroupEstablishAuthTag (
+  const MissionKey &missionKey,
+  const AuthenticationKey *groupAuthenticationKey,
+  uint8_t packetType,
+  CsrNodeId sourceId,
+  uint16_t securityCount,
+  uint16_t groupKeyId,
+  uint16_t groupSequence,
+  std::span<const uint8_t> encryptedPayload)
+{
+  RequireSecurityField (groupKeyId,
+                        "CSR GroupEstablish group-key identifier");
+  RequireSecurityField (groupSequence,
+                        "CSR GroupEstablish group sequence");
+  NS_ABORT_MSG_IF (encryptedPayload.size () >
+                     std::numeric_limits<uint16_t>::max (),
+                   "CSR GroupEstablish payload exceeds 16-bit length");
+
+  std::vector<uint8_t> common;
+  common.reserve (1 + 3 + 3 + 2 + encryptedPayload.size ());
+  common.push_back (packetType);
+  AppendNodeId (common, sourceId);
+  AppendAuthPackedKeySequence (common, groupKeyId, groupSequence);
+  AppendBe16 (common,
+              static_cast<uint16_t> (encryptedPayload.size ()));
+  common.insert (common.end (),
+                 encryptedPayload.begin (),
+                 encryptedPayload.end ());
+
+  // computeDiscoveryHopAuthTag() initializes the mission-key half with
+  // AUTHENTICATION_KEY_SIZE_IN_BYTES, even though the stored MNK is 32 bytes.
+  Sha1Digest missionDigest = HmacSha1 (
+    std::span<const uint8_t> (missionKey.data (), AUTHENTICATION_KEY_SIZE),
+    common);
+
+  std::array<uint8_t, 4> tag {};
+  std::copy_n (missionDigest.begin (), 2, tag.begin ());
+
+  if (groupAuthenticationKey != nullptr)
+    {
+      std::vector<uint8_t> groupInput;
+      groupInput.reserve (common.size () + 2);
+      groupInput.push_back (packetType);
+      AppendNodeId (groupInput, sourceId);
+      AppendBe16 (groupInput, securityCount);
+      AppendAuthPackedKeySequence (groupInput,
+                                   groupKeyId,
+                                   groupSequence);
+      AppendBe16 (groupInput,
+                  static_cast<uint16_t> (encryptedPayload.size ()));
+      groupInput.insert (groupInput.end (),
+                         encryptedPayload.begin (),
+                         encryptedPayload.end ());
+
+      Sha1Digest groupDigest = HmacSha1 (*groupAuthenticationKey,
+                                        groupInput);
+      std::copy_n (groupDigest.begin (), 2, tag.begin () + 2);
+    }
+
+  return tag;
 }
 
 std::array<uint8_t, 8>

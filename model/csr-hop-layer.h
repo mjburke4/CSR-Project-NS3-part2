@@ -147,6 +147,17 @@ public:
     m_securityCountChangeCb = cb;
   }
 
+  void SetAuthenticatedGroupKeyNeededCallback (
+    Callback<void, CsrNodeId, double, double> cb)
+  {
+    m_authenticatedGroupKeyNeededCb = cb;
+  }
+
+  void SetLocalGroupKeyChangedCallback (Callback<void> cb)
+  {
+    m_localGroupKeyChangedCb = cb;
+  }
+
   // App/NWK send
   void SendData (CsrNodeId dst, uint8_t dscp,
                  Ptr<Packet> payload, bool ack);
@@ -161,6 +172,12 @@ public:
   //void SendHello ();
   // instead of void SendHello();
   void SendHello (Ptr<Packet> helloPayload);
+
+  /** Send a legacy GroupEstablish-protected Discover broadcast. */
+  void SendProtectedDiscovery (Ptr<Packet> discoveryPayload);
+
+  /** Send a legacy Group16-protected routing HELLO broadcast. */
+  void SendAuthenticatedRoutingHello (Ptr<Packet> routingPayload);
 
   void SendNeighborCheck (CsrNodeId dst, Ptr<Packet> payload);
 
@@ -230,6 +247,11 @@ public:
     const CsrHopSecurityState::GroupKeyMaterial &groupKeyMaterial)
   {
     m_hopSecurity.SetGroupKeyMaterial (groupKeyMaterial);
+  }
+
+  uint32_t GetPendingGroupEstablishCount () const
+  {
+    return static_cast<uint32_t> (m_pendingGroupEstablish.size ());
   }
 
   void PrintNeighbors () const;
@@ -487,11 +509,30 @@ private:
     // Legacy network flow control applies to ordinary
     // DATA traffic, not reliable routing/control packets.
     bool flowControlTracked {false};
+
+    // Routing callback metadata remains plaintext even when the resend frame
+    // carries a Group16-protected CsrHelloHeader.
+    bool routingMetadataValid {false};
+    uint32_t routingSequence {0};
+    CsrRoutingOperation routingOperation {CsrRoutingOperation::None};
+    uint8_t routingSection {0};
+    uint8_t routingTotalSections {1};
   };
 
   void HandleDataFrame (const CsrHeader &hdr, Ptr<Packet> payload, bool firstReception);
   void SendControlAck (const CsrHeader &received, const char *label);
   void DiscardOutstandingKeyUpdate (CsrNodeId neighbor);
+  Ptr<Packet> ProtectGroupPayload (
+    CsrGroupSecurityMode mode,
+    uint8_t legacyPacketType,
+    Ptr<Packet> payload,
+    bool &generatedNewGroupKey);
+  bool HandleProtectedHello (const CsrHeader &header,
+                             Ptr<Packet> record,
+                             double pathlossDb,
+                             double snrDb);
+  void ReplayPendingGroupEstablish (CsrNodeId source);
+  void NotifyLocalGroupKeyChanged (bool generatedNewGroupKey);
   void HandleAckFrame  (const CsrHeader &hdr);
   void HandleAckWindow (const CsrHeader &hdr);
 
@@ -544,6 +585,9 @@ private:
   Callback<void, CsrNodeId> m_keyUpdateReceivedCb;
   Callback<void, CsrNodeId, bool> m_keyUpdateCompletionCb;
   Callback<void, CsrNodeId> m_securityCountChangeCb;
+  Callback<void, CsrNodeId, double, double>
+    m_authenticatedGroupKeyNeededCb;
+  Callback<void> m_localGroupKeyChangedCb;
 
   void NotifyNsdpFromFrame (Ptr<Packet> frame)
   {
@@ -599,6 +643,20 @@ private:
   std::map<CsrNodeId, NeighborInfo> m_neighbors;
 
   CsrHopSecurityState m_hopSecurity;
+
+  struct PendingGroupEstablish
+  {
+    uint16_t securityCount {0};
+    uint8_t legacyPacketType {0};
+    std::vector<uint8_t> record;
+    double pathlossDb {0.0};
+    double snrDb {0.0};
+  };
+
+  std::map<CsrNodeId, PendingGroupEstablish> m_pendingGroupEstablish;
+
+  static constexpr uint8_t LEGACY_DISCOVER_PACKET_TYPE = 4;
+  static constexpr uint8_t LEGACY_ROUTING_UPDATE_PACKET_TYPE = 8;
 
   LinkControlResult ComputeLinkControl (CsrNodeId dest);
   void ApplyLinkControl (CsrHeader &header,
@@ -877,6 +935,109 @@ void CsrHopLayer::SendHello (Ptr<Packet> helloPayload)
   helloPayload->AddHeader (h);
 
   m_mac->EnqueueTxFrame (helloPayload, CSR_BROADCAST_ID, 7, false);
+}
+
+Ptr<Packet>
+CsrHopLayer::ProtectGroupPayload (
+  CsrGroupSecurityMode mode,
+  uint8_t legacyPacketType,
+  Ptr<Packet> payload,
+  bool &generatedNewGroupKey)
+{
+  std::vector<uint8_t> plaintext (payload->GetSize ());
+  if (!plaintext.empty ())
+    {
+      payload->CopyData (plaintext.data (), plaintext.size ());
+    }
+
+  CsrProtectedGroupMessage protectedMessage =
+    m_hopSecurity.ProtectGroupMessage (mode,
+                                       legacyPacketType,
+                                       plaintext);
+  generatedNewGroupKey = protectedMessage.generatedNewGroupKey;
+  return Create<Packet> (protectedMessage.record.data (),
+                         protectedMessage.record.size ());
+}
+
+void
+CsrHopLayer::NotifyLocalGroupKeyChanged (bool generatedNewGroupKey)
+{
+  if (generatedNewGroupKey && !m_localGroupKeyChangedCb.IsNull ())
+    {
+      m_localGroupKeyChangedCb ();
+    }
+}
+
+void
+CsrHopLayer::SendProtectedDiscovery (Ptr<Packet> discoveryPayload)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  bool generatedNewGroupKey = false;
+  Ptr<Packet> frame = ProtectGroupPayload (
+    CsrGroupSecurityMode::GroupEstablish,
+    LEGACY_DISCOVER_PACKET_TYPE,
+    discoveryPayload,
+    generatedNewGroupKey);
+
+  static uint16_t discoverySequence = 0;
+  CsrHeader header;
+  header.SetSrc (m_nodeId);
+  header.SetDst (CSR_BROADCAST_ID);
+  header.SetSeq (++discoverySequence);
+  header.SetDscp (7);
+  header.SetAckable (false);
+  header.SetType (CSR_PKT_DISCOVER);
+  header.SetDestType (CSR_DEST_BROADCAST);
+  header.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
+  header.SetHasGroupSecurity (true);
+  ApplyLinkControl (header, {CSR_BROADCAST_ID});
+  frame->AddHeader (header);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX GroupEstablish Discover"
+            << " securityCount=" << m_hopSecurity.GetOwnSecurityCount ()
+            << " securityBytes=7"
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (frame, CSR_BROADCAST_ID, 7, false);
+  NotifyLocalGroupKeyChanged (generatedNewGroupKey);
+}
+
+void
+CsrHopLayer::SendAuthenticatedRoutingHello (Ptr<Packet> routingPayload)
+{
+  NS_ASSERT (m_mac != nullptr);
+
+  bool generatedNewGroupKey = false;
+  Ptr<Packet> frame = ProtectGroupPayload (
+    CsrGroupSecurityMode::Group16,
+    LEGACY_ROUTING_UPDATE_PACKET_TYPE,
+    routingPayload,
+    generatedNewGroupKey);
+
+  static uint16_t routingHelloSequence = 0;
+  CsrHeader header;
+  header.SetSrc (m_nodeId);
+  header.SetDst (CSR_BROADCAST_ID);
+  header.SetSeq (++routingHelloSequence);
+  header.SetDscp (7);
+  header.SetAckable (false);
+  header.SetType (CSR_PKT_HELLO);
+  header.SetDestType (CSR_DEST_BROADCAST);
+  header.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
+  header.SetHasGroupSecurity (true);
+  ApplyLinkControl (header, {CSR_BROADCAST_ID});
+  frame->AddHeader (header);
+
+  std::cout << "[HOP " << m_nodeId
+            << "] TX Group16 RoutingUpdate broadcast"
+            << " securityCount=" << m_hopSecurity.GetOwnSecurityCount ()
+            << " securityBytes=5"
+            << std::endl;
+
+  m_mac->EnqueueTxFrame (frame, CSR_BROADCAST_ID, 7, false);
+  NotifyLocalGroupKeyChanged (generatedNewGroupKey);
 }
 
 void
@@ -1194,15 +1355,35 @@ CsrHopLayer::SendRoutingControl (
   hdr.SetType (CSR_PKT_ROUTING_CONTROL);
   hdr.SetDestType (CSR_DEST_MULTICAST);
   hdr.SetDestinationSequences (targets);
+  hdr.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
+  hdr.SetHasGroupSecurity (true);
   ApplyLinkControl (hdr, destinations);
 
-  Ptr<Packet> frame = payload->Copy ();
+  bool generatedNewGroupKey = false;
+  Ptr<Packet> frame = ProtectGroupPayload (
+    CsrGroupSecurityMode::Group16,
+    LEGACY_ROUTING_UPDATE_PACKET_TYPE,
+    payload,
+    generatedNewGroupKey);
   frame->AddHeader (hdr);
 
   EnqueueResend (
     targets,
     frame->Copy (),
     false);
+
+  CsrHelloHeader routingMetadata;
+  ResendEntry *resendEntry =
+    FindResendEntry (primaryDestination, primarySequence);
+  if (resendEntry != nullptr && payload->PeekHeader (routingMetadata))
+    {
+      resendEntry->routingMetadataValid = true;
+      resendEntry->routingSequence = routingMetadata.GetRoutingSequence ();
+      resendEntry->routingOperation = routingMetadata.GetRoutingOperation ();
+      resendEntry->routingSection = routingMetadata.GetRoutingSection ();
+      resendEntry->routingTotalSections =
+        routingMetadata.GetRoutingTotalSections ();
+    }
 
   std::cout << "[HOP " << m_nodeId
             << "] TX reliable RoutingControl targets=";
@@ -1223,6 +1404,7 @@ CsrHopLayer::SendRoutingControl (
     primaryDestination,
     7,
     true);
+  NotifyLocalGroupKeyChanged (generatedNewGroupKey);
 }
 
 void
@@ -1285,6 +1467,184 @@ CsrHopLayer::DiscardOutstandingKeyUpdate (CsrNodeId neighbor)
                 << std::endl;
 
       it = m_resendQueue.erase (it);
+    }
+}
+
+bool
+CsrHopLayer::HandleProtectedHello (
+  const CsrHeader &header,
+  Ptr<Packet> recordPacket,
+  double pathlossDb,
+  double snrDb)
+{
+  if (!header.HasGroupSecurity ())
+    {
+      return false;
+    }
+
+  if (!header.HasSecurityCount ())
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop group-protected control without security count"
+                << " from=" << header.GetSrc ()
+                << std::endl;
+      return true;
+    }
+
+  CsrGroupSecurityMode mode =
+    header.GetType () == CSR_PKT_DISCOVER
+      ? CsrGroupSecurityMode::GroupEstablish
+      : CsrGroupSecurityMode::Group16;
+  uint8_t legacyPacketType =
+    header.GetType () == CSR_PKT_DISCOVER
+      ? LEGACY_DISCOVER_PACKET_TYPE
+      : LEGACY_ROUTING_UPDATE_PACKET_TYPE;
+
+  std::vector<uint8_t> record (recordPacket->GetSize ());
+  if (!record.empty ())
+    {
+      recordPacket->CopyData (record.data (), record.size ());
+    }
+
+  CsrReceivedGroupMessage received =
+    m_hopSecurity.ReceiveGroupMessage (header.GetSrc (),
+                                       header.GetSecurityCount (),
+                                       mode,
+                                       legacyPacketType,
+                                       record);
+
+  if (received.status == CsrHopSecurityReceiveStatus::Accepted ||
+      received.status ==
+        CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged)
+    {
+      if (received.status ==
+          CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged)
+        {
+          DiscardOutstandingKeyUpdate (header.GetSrc ());
+          if (!m_securityCountChangeCb.IsNull ())
+            {
+              m_securityCountChangeCb (header.GetSrc ());
+            }
+        }
+
+      Ptr<Packet> plaintext = Create<Packet> (received.payload.data (),
+                                             received.payload.size ());
+      std::cout << "[HOP " << m_nodeId << "] RX authenticated "
+                << (mode == CsrGroupSecurityMode::GroupEstablish
+                      ? "GroupEstablish Discover"
+                      : "Group16 RoutingUpdate")
+                << " from=" << header.GetSrc ()
+                << " keyId=" << received.groupKeyId
+                << " groupSeq=" << received.groupSequence
+                << std::endl;
+
+      if (!m_rxHelloFromHopCb.IsNull ())
+        {
+          m_rxHelloFromHopCb (plaintext,
+                              header.GetSrc (),
+                              pathlossDb,
+                              snrDb);
+        }
+      return true;
+    }
+
+  if (received.status ==
+        CsrHopSecurityReceiveStatus::AuthenticatedGroupKeyNeeded ||
+      received.status == CsrHopSecurityReceiveStatus::
+        AuthenticatedGroupKeyNeededSecurityCountChanged)
+    {
+      PendingGroupEstablish &pending =
+        m_pendingGroupEstablish[header.GetSrc ()];
+      pending.securityCount = header.GetSecurityCount ();
+      pending.legacyPacketType = legacyPacketType;
+      pending.record = std::move (record);
+      pending.pathlossDb = pathlossDb;
+      pending.snrDb = snrDb;
+
+      if (received.status == CsrHopSecurityReceiveStatus::
+          AuthenticatedGroupKeyNeededSecurityCountChanged)
+        {
+          DiscardOutstandingKeyUpdate (header.GetSrc ());
+          if (!m_securityCountChangeCb.IsNull ())
+            {
+              m_securityCountChangeCb (header.GetSrc ());
+            }
+        }
+
+      std::cout << "[HOP " << m_nodeId
+                << "] Queue authenticated GroupEstablish pending KeyUpdate"
+                << " from=" << header.GetSrc ()
+                << " keyId=" << received.groupKeyId
+                << " groupSeq=" << received.groupSequence
+                << std::endl;
+
+      if (!m_authenticatedGroupKeyNeededCb.IsNull ())
+        {
+          m_authenticatedGroupKeyNeededCb (header.GetSrc (),
+                                           pathlossDb,
+                                           snrDb);
+        }
+      return true;
+    }
+
+  std::cout << "[HOP " << m_nodeId
+            << "] Drop group-protected control"
+            << " from=" << header.GetSrc ()
+            << " status=" << static_cast<unsigned> (received.status)
+            << std::endl;
+  return true;
+}
+
+void
+CsrHopLayer::ReplayPendingGroupEstablish (CsrNodeId source)
+{
+  auto pendingIt = m_pendingGroupEstablish.find (source);
+  if (pendingIt == m_pendingGroupEstablish.end ())
+    {
+      return;
+    }
+
+  PendingGroupEstablish pending = pendingIt->second;
+  CsrReceivedGroupMessage received =
+    m_hopSecurity.ReceiveGroupMessage (
+      source,
+      pending.securityCount,
+      CsrGroupSecurityMode::GroupEstablish,
+      pending.legacyPacketType,
+      pending.record);
+
+  if (received.status == CsrHopSecurityReceiveStatus::Accepted ||
+      received.status ==
+        CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged)
+    {
+      m_pendingGroupEstablish.erase (pendingIt);
+      Ptr<Packet> plaintext = Create<Packet> (received.payload.data (),
+                                             received.payload.size ());
+
+      std::cout << "[HOP " << m_nodeId
+                << "] Replay queued GroupEstablish after KeyUpdate"
+                << " from=" << source
+                << " keyId=" << received.groupKeyId
+                << " groupSeq=" << received.groupSequence
+                << std::endl;
+
+      if (!m_rxHelloFromHopCb.IsNull ())
+        {
+          m_rxHelloFromHopCb (plaintext,
+                              source,
+                              pending.pathlossDb,
+                              pending.snrDb);
+        }
+      return;
+    }
+
+  if (received.status == CsrHopSecurityReceiveStatus::AuthenticationFailed ||
+      received.status == CsrHopSecurityReceiveStatus::DuplicateOrStale ||
+      received.status ==
+        CsrHopSecurityReceiveStatus::AuthenticatedDuplicate ||
+      received.status == CsrHopSecurityReceiveStatus::Malformed)
+    {
+      m_pendingGroupEstablish.erase (pendingIt);
     }
 }
 
@@ -1383,9 +1743,16 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
     {
       return;
     }*/
-   // HELLO is discovery/control. OPNET sends br_Hello up to NWK proc_hello().
-  if (hdr.GetType () == CSR_PKT_HELLO)
+  // HELLO/Discover is discovery control. Protected messages must authenticate
+  // before their payload reaches NWK.
+  if (hdr.GetType () == CSR_PKT_HELLO ||
+      hdr.GetType () == CSR_PKT_DISCOVER)
     {
+      if (HandleProtectedHello (hdr, frame, pathlossDb, snrDb))
+        {
+          return;
+        }
+
       std::cout << "[HOP " << m_nodeId << "] RX HELLO from "
                 << hdr.GetSrc ()
                 << " pathloss=" << pathlossDb
@@ -1608,6 +1975,10 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           m_keyUpdateReceivedCb (hdr.GetSrc ());
         }
 
+      // hopSecRcvKeyUpdate() invokes routesKeyUpdateComplete() first, then
+      // retries the one saved GroupEstablish record from this source.
+      ReplayPendingGroupEstablish (hdr.GetSrc ());
+
       return;
     }
 
@@ -1674,6 +2045,67 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
       if (hdr.GetDst () != m_nodeId)
         {
           return;
+        }
+
+      if (hdr.HasGroupSecurity ())
+        {
+          if (!hdr.HasSecurityCount ())
+            {
+              std::cout << "[HOP " << m_nodeId
+                        << "] Drop Group16 RoutingControl without security count"
+                        << " from=" << hdr.GetSrc ()
+                        << std::endl;
+              return;
+            }
+
+          std::vector<uint8_t> record (frame->GetSize ());
+          if (!record.empty ())
+            {
+              frame->CopyData (record.data (), record.size ());
+            }
+
+          CsrReceivedGroupMessage received =
+            m_hopSecurity.ReceiveGroupMessage (
+              hdr.GetSrc (),
+              hdr.GetSecurityCount (),
+              CsrGroupSecurityMode::Group16,
+              LEGACY_ROUTING_UPDATE_PACKET_TYPE,
+              record);
+
+          if (received.status ==
+              CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
+            {
+              if (hdr.IsAckable ())
+                {
+                  SendControlAck (
+                    hdr,
+                    "authenticated duplicate Group16 RoutingControl");
+                }
+              return;
+            }
+
+          if (received.status != CsrHopSecurityReceiveStatus::Accepted &&
+              received.status != CsrHopSecurityReceiveStatus::
+                AcceptedSecurityCountChanged)
+            {
+              std::cout << "[HOP " << m_nodeId
+                        << "] Drop unauthenticated Group16 RoutingControl"
+                        << " from=" << hdr.GetSrc ()
+                        << " status="
+                        << static_cast<unsigned> (received.status)
+                        << std::endl;
+              return;
+            }
+
+          if (received.status == CsrHopSecurityReceiveStatus::
+              AcceptedSecurityCountChanged &&
+              !m_securityCountChangeCb.IsNull ())
+            {
+              m_securityCountChangeCb (hdr.GetSrc ());
+            }
+
+          frame = Create<Packet> (received.payload.data (),
+                                  received.payload.size ());
         }
 
       bool firstReception =
@@ -1964,34 +2396,28 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
             {
               routingControlCompleted = true;
 
-              CsrHelloHeader controlHeader;
-
-              if (originalFrame->RemoveHeader (
-                    controlHeader))
+              if (entry->routingMetadataValid)
                 {
-	                  completedRoutingSequence =
-	                    controlHeader
-	                      .GetRoutingSequence ();
-	                  completedRoutingOperation =
-	                    controlHeader.GetRoutingOperation ();
-	                  completedRoutingSection =
-	                    controlHeader.GetRoutingSection ();
-	                  completedRoutingTotalSections =
-	                    controlHeader.GetRoutingTotalSections ();
-	                }
-              else
+                  completedRoutingSequence = entry->routingSequence;
+                  completedRoutingOperation = entry->routingOperation;
+                  completedRoutingSection = entry->routingSection;
+                  completedRoutingTotalSections =
+                    entry->routingTotalSections;
+                }
+              else if (!originalHdr.HasGroupSecurity ())
                 {
-                  std::cout << "[HOP " << m_nodeId
-                            << "] Reliable RoutingControl completed with "
-                            << src
-                            << " seq=" << seq
-                            << " routingSequence="
-                            << completedRoutingSequence
-                            << " operation="
-                            << unsigned (
-                                static_cast<uint8_t> (
-                                  completedRoutingOperation))
-                            << std::endl;
+                  CsrHelloHeader controlHeader;
+                  if (originalFrame->RemoveHeader (controlHeader))
+                    {
+                      completedRoutingSequence =
+                        controlHeader.GetRoutingSequence ();
+                      completedRoutingOperation =
+                        controlHeader.GetRoutingOperation ();
+                      completedRoutingSection =
+                        controlHeader.GetRoutingSection ();
+                      completedRoutingTotalSections =
+                        controlHeader.GetRoutingTotalSections ();
+                    }
                 }
             }
           else if (originalHdr.GetType () == CSR_PKT_KEY_UPDATE)
@@ -2506,22 +2932,33 @@ CsrHopLayer::CheckResend ()
                   else if (failedHopHeader.GetType () ==
                            CSR_PKT_ROUTING_CONTROL)
                     {
-                      CsrHelloHeader controlHeader;
+                      bool haveMetadata = e.routingMetadataValid;
+                      uint32_t routingSequence = e.routingSequence;
+                      CsrRoutingOperation operation = e.routingOperation;
+                      uint8_t routingSection = e.routingSection;
+                      uint8_t routingTotalSections =
+                        e.routingTotalSections;
 
-                      if (failedFrame->RemoveHeader (controlHeader))
+                      if (!haveMetadata &&
+                          !failedHopHeader.HasGroupSecurity ())
                         {
-                          uint32_t routingSequence =
-                            controlHeader.GetRoutingSequence ();
+                          CsrHelloHeader controlHeader;
+                          if (failedFrame->RemoveHeader (controlHeader))
+                            {
+                              haveMetadata = true;
+                              routingSequence =
+                                controlHeader.GetRoutingSequence ();
+                              operation =
+                                controlHeader.GetRoutingOperation ();
+                              routingSection =
+                                controlHeader.GetRoutingSection ();
+                              routingTotalSections =
+                                controlHeader.GetRoutingTotalSections ();
+                            }
+                        }
 
-                          CsrRoutingOperation operation =
-                            controlHeader.GetRoutingOperation ();
-
-                          uint8_t routingSection =
-                            controlHeader.GetRoutingSection ();
-
-                          uint8_t routingTotalSections =
-                            controlHeader.GetRoutingTotalSections ();
-
+                      if (haveMetadata)
+                        {
                           std::cout << "[HOP " << m_nodeId
                                     << "] Reliable RoutingControl FAILED"
                                     << " neighbor=" << e.dest

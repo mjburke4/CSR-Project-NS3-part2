@@ -673,6 +673,14 @@ public:
         m_hop->SetSecurityCountChangeCallback (
           MakeCallback (&CsrNetLayer::NoteSecurityCountChange, this));
 
+        m_hop->SetAuthenticatedGroupKeyNeededCallback (
+          MakeCallback (
+            &CsrNetLayer::NoteAuthenticatedGroupKeyNeeded,
+            this));
+
+        m_hop->SetLocalGroupKeyChangedCallback (
+          MakeCallback (&CsrNetLayer::NoteLocalGroupKeyChanged, this));
+
         m_hop->SetRoutingControlFailureCallback (
           MakeCallback (
             &CsrNetLayer::
@@ -2377,6 +2385,10 @@ private:
   void NoteKeyUpdateReceived (CsrNodeId neighbor);
   void NoteKeyUpdateCompletion (CsrNodeId neighbor, bool acknowledged);
   void NoteSecurityCountChange (CsrNodeId neighbor);
+  void NoteAuthenticatedGroupKeyNeeded (CsrNodeId neighbor,
+                                        double pathlossDb,
+                                        double snrDb);
+  void NoteLocalGroupKeyChanged ();
   void NoteNeighborCheckFailure (
     CsrNodeId neighbor,
     CsrNeighborCheckType type,
@@ -3246,6 +3258,58 @@ CsrNetLayer::NoteSecurityCountChange (CsrNodeId neighbor)
             << "] Reset ARL admission after security-count change"
             << " neighbor=" << neighbor
             << std::endl;
+}
+
+void
+CsrNetLayer::NoteAuthenticatedGroupKeyNeeded (
+  CsrNodeId neighbor,
+  double pathlossDb,
+  double snrDb)
+{
+  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  bool isNew = entry.lastHeardSec < 0.0;
+  entry.nodeId = neighbor;
+  entry.lastHeardSec = Simulator::Now ().GetSeconds ();
+  entry.lastPathlossDb = pathlossDb;
+  entry.lastSnrDb = snrDb;
+  entry.stale = false;
+  SyncNeighborKeyState (neighbor);
+  UpdateMacActiveNodes ();
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Authenticated Discover awaits group key"
+            << " neighbor=" << neighbor
+            << " newNeighbor=" << (isNew ? 1 : 0)
+            << std::endl;
+
+  // routesRcvUnAuthedMsg() sends a fresh KeyRequest for every authenticated
+  // Discover whose payload cannot yet be decrypted, including active peers
+  // that crossed a new group-key epoch.
+  SendKeyRequest (neighbor, true);
+}
+
+void
+CsrNetLayer::NoteLocalGroupKeyChanged ()
+{
+  std::cout << "[NWK " << m_nodeId
+            << "] Local group-key epoch changed"
+            << std::endl;
+
+  for (auto &item : m_nwkNeighbors)
+    {
+      NwkNeighborEntry &entry = item.second;
+      SyncNeighborKeyState (entry.nodeId);
+      entry.keySendComplete = false;
+      entry.keySendValid = false;
+
+      bool usable = m_arlNeighborAdmissionEnabled
+        ? entry.arlActive && !entry.stale
+        : entry.lastHeardSec >= 0.0 && !entry.stale;
+      if (usable && !entry.keySendActive)
+        {
+          SendKeyUpdate (entry.nodeId);
+        }
+    }
 }
 
 void
@@ -6373,7 +6437,18 @@ CsrNetLayer::SendHelloBroadcast (
 
     p->AddHeader (hh);
 
-    m_hop->SendHello (p); // HOP wraps outer CsrHeader + broadcasts
+    if (type == CsrArlRouteMsgType::Discover)
+      {
+        m_hop->SendProtectedDiscovery (p);
+      }
+    else if (type == CsrArlRouteMsgType::RoutingUpdate)
+      {
+        m_hop->SendAuthenticatedRoutingHello (p);
+      }
+    else
+      {
+        m_hop->SendHello (p);
+      }
 
 }
 

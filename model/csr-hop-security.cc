@@ -12,6 +12,29 @@ namespace
 static constexpr uint16_t CSR_SECURITY_COUNTER_MAX = 0x0fff;
 static constexpr uint8_t CSR_LEGACY_KEY_UPDATE_TYPE = 0x01;
 static constexpr uint8_t CSR_LEGACY_KEY_REQUEST_TYPE = 0x02;
+static constexpr uint16_t CSR_GROUP_KEY_ID_STEP_SIZE = 16;
+static constexpr std::size_t CSR_GROUP_KEY_SEQUENCE_SIZE = 3;
+
+std::size_t
+GetGroupAuthTagSize (CsrGroupSecurityMode mode)
+{
+  switch (mode)
+    {
+    case CsrGroupSecurityMode::Group16:
+      return 2;
+    case CsrGroupSecurityMode::GroupEstablish:
+    case CsrGroupSecurityMode::Group32Encrypt:
+      return 4;
+    }
+  return 0;
+}
+
+bool
+GroupModeEncryptsPayload (CsrGroupSecurityMode mode)
+{
+  return mode == CsrGroupSecurityMode::GroupEstablish ||
+         mode == CsrGroupSecurityMode::Group32Encrypt;
+}
 
 std::array<uint8_t, 3>
 SerializePackedKeySequence (uint16_t keyId, uint16_t sequence)
@@ -354,6 +377,19 @@ CsrHopSecurityState::GetGroupKeyId () const
 }
 
 void
+CsrHopSecurityState::SetGroupSequence (uint16_t groupSequence)
+{
+  RequireTwelveBit (groupSequence, "CSR group sequence");
+  m_groupSequence = groupSequence;
+}
+
+uint16_t
+CsrHopSecurityState::GetGroupSequence () const
+{
+  return m_groupSequence;
+}
+
+void
 CsrHopSecurityState::SetMissionKey (const MissionKey &missionKey)
 {
   m_missionKey = missionKey;
@@ -388,6 +424,13 @@ const CsrHopSecurityState::GroupKeyMaterial&
 CsrHopSecurityState::GetGroupKeyMaterial () const
 {
   return m_groupKeyMaterial;
+}
+
+void
+CsrHopSecurityState::SetNextGeneratedGroupKeyMaterial (
+  const GroupKeyMaterial &groupKeyMaterial)
+{
+  m_nextGeneratedGroupKeyMaterial = groupKeyMaterial;
 }
 
 bool
@@ -629,10 +672,10 @@ CsrHopSecurityState::ReceiveKeyUpdate (
       return status;
     }
 
-  if (!neighbor.previousGroupKeyReceived ||
-      neighbor.previousGroupKeyIdReceived != neighbor.lastGroupKeyIdReceived)
+  if (neighbor.groupKeyReceived &&
+      header.GetGroupKeyId () != neighbor.lastGroupKeyIdReceived)
     {
-      neighbor.previousGroupKeyReceived = neighbor.groupKeyReceived;
+      neighbor.previousGroupKeyReceived = true;
       neighbor.previousGroupKeyIdReceived = neighbor.lastGroupKeyIdReceived;
       neighbor.previousGroupKeyMaterial = neighbor.groupKeyMaterial;
     }
@@ -640,6 +683,309 @@ CsrHopSecurityState::ReceiveKeyUpdate (
   neighbor.lastGroupKeyIdReceived = header.GetGroupKeyId ();
   neighbor.groupKeyMaterial = groupKey;
   return status;
+}
+
+CsrProtectedGroupMessage
+CsrHopSecurityState::ProtectGroupMessage (
+  CsrGroupSecurityMode mode,
+  uint8_t legacyPacketType,
+  std::span<const uint8_t> payload)
+{
+  bool generatedNewGroupKey = NextGroupKeySequence ();
+
+  CsrLegacyCrypto::ProtectionKeys keys =
+    CsrLegacyCrypto::DeriveProtectionKeys (m_missionKey,
+                                           m_groupKeyMaterial,
+                                           m_nodeId,
+                                           m_ownSecurityCount,
+                                           m_groupKeyId);
+
+  std::vector<uint8_t> protectedPayload (payload.begin (), payload.end ());
+  if (GroupModeEncryptsPayload (mode) && !protectedPayload.empty ())
+    {
+      CsrLegacyCrypto::ApplyAes256Ctr (keys.encryption,
+                                       m_nodeId,
+                                       0,
+                                       m_ownSecurityCount,
+                                       m_groupKeyId,
+                                       m_groupSequence,
+                                       protectedPayload);
+    }
+
+  std::array<uint8_t, CSR_GROUP_KEY_SEQUENCE_SIZE> packed =
+    SerializePackedKeySequence (m_groupKeyId, m_groupSequence);
+  std::vector<uint8_t> record (packed.begin (), packed.end ());
+  record.insert (record.end (),
+                 protectedPayload.begin (),
+                 protectedPayload.end ());
+
+  if (mode == CsrGroupSecurityMode::GroupEstablish)
+    {
+      std::array<uint8_t, 4> tag =
+        CsrLegacyCrypto::ComputeGroupEstablishAuthTag (
+          m_missionKey,
+          &keys.authentication,
+          legacyPacketType,
+          m_nodeId,
+          m_ownSecurityCount,
+          m_groupKeyId,
+          m_groupSequence,
+          protectedPayload);
+      record.insert (record.end (), tag.begin (), tag.end ());
+    }
+  else
+    {
+      std::size_t authLength = GetGroupAuthTagSize (mode);
+      std::vector<uint8_t> tag = CsrLegacyCrypto::ComputeGroupAuthTag (
+        keys.authentication,
+        m_nodeId,
+        legacyPacketType,
+        record,
+        authLength);
+      record.insert (record.end (), tag.begin (), tag.end ());
+    }
+
+  return {
+    m_groupKeyId,
+    m_groupSequence,
+    generatedNewGroupKey,
+    std::move (record)
+  };
+}
+
+CsrReceivedGroupMessage
+CsrHopSecurityState::ReceiveGroupMessage (
+  CsrNodeId source,
+  uint16_t securityCount,
+  CsrGroupSecurityMode mode,
+  uint8_t legacyPacketType,
+  std::span<const uint8_t> record)
+{
+  CsrReceivedGroupMessage result;
+  std::size_t authLength = GetGroupAuthTagSize (mode);
+
+  if (!CsrIsValidNodeId (source) || source == CSR_BROADCAST_ID ||
+      authLength == 0 ||
+      record.size () < CSR_GROUP_KEY_SEQUENCE_SIZE + authLength)
+    {
+      return result;
+    }
+
+  uint16_t groupKeyId = static_cast<uint16_t> (
+    (static_cast<uint16_t> (record[0]) << 4) | (record[1] >> 4));
+  uint16_t groupSequence = static_cast<uint16_t> (
+    (static_cast<uint16_t> (record[1] & 0x0f) << 8) | record[2]);
+  result.groupKeyId = groupKeyId;
+  result.groupSequence = groupSequence;
+
+  std::size_t payloadLength =
+    record.size () - CSR_GROUP_KEY_SEQUENCE_SIZE - authLength;
+  std::span<const uint8_t> protectedPayload = record.subspan (
+    CSR_GROUP_KEY_SEQUENCE_SIZE,
+    payloadLength);
+  std::span<const uint8_t> receivedTag = record.last (authLength);
+
+  NeighborState *neighbor = nullptr;
+  auto neighborIt = m_neighbors.find (source);
+  if (neighborIt != m_neighbors.end ())
+    {
+      neighbor = &neighborIt->second;
+    }
+
+  bool securityCountChanged =
+    neighbor != nullptr && neighbor->securityCountValid &&
+    neighbor->securityCount != securityCount;
+  if (securityCountChanged &&
+      !IsSecurityCountChangeValid (neighbor->securityCount, securityCount))
+    {
+      result.status = CsrHopSecurityReceiveStatus::DuplicateOrStale;
+      return result;
+    }
+
+  if (mode == CsrGroupSecurityMode::GroupEstablish)
+    {
+      std::array<uint8_t, 4> missionTag =
+        CsrLegacyCrypto::ComputeGroupEstablishAuthTag (
+          m_missionKey,
+          nullptr,
+          legacyPacketType,
+          source,
+          securityCount,
+          groupKeyId,
+          groupSequence,
+          protectedPayload);
+      if (!CsrLegacyCrypto::ConstantTimeEqual (
+            std::span<const uint8_t> (missionTag.data (), 2),
+            receivedTag.first (2)))
+        {
+          result.status = CsrHopSecurityReceiveStatus::AuthenticationFailed;
+          return result;
+        }
+
+      neighbor = &GetOrCreateNeighbor (source);
+      if (securityCountChanged)
+        {
+          ResetInboundForSecurityCountChange (*neighbor);
+        }
+    }
+  else if (neighbor == nullptr || securityCountChanged)
+    {
+      result.status = CsrHopSecurityReceiveStatus::GroupKeyUnavailable;
+      return result;
+    }
+
+  GroupKeyMaterial candidateGroupKey {};
+  bool haveCandidate = false;
+  bool candidateIsDerived = false;
+
+  if (neighbor->groupKeyReceived &&
+      groupKeyId == neighbor->lastGroupKeyIdReceived)
+    {
+      candidateGroupKey = neighbor->groupKeyMaterial;
+      haveCandidate = true;
+    }
+  else if (neighbor->previousGroupKeyReceived &&
+           groupKeyId == neighbor->previousGroupKeyIdReceived)
+    {
+      candidateGroupKey = neighbor->previousGroupKeyMaterial;
+      haveCandidate = true;
+    }
+  else if (neighbor->groupKeyReceived &&
+           groupKeyId > neighbor->lastGroupKeyIdReceived &&
+           groupKeyId / CSR_GROUP_KEY_ID_STEP_SIZE ==
+             neighbor->lastGroupKeyIdReceived / CSR_GROUP_KEY_ID_STEP_SIZE)
+    {
+      candidateGroupKey = neighbor->groupKeyMaterial;
+      for (uint16_t keyId = static_cast<uint16_t> (
+             neighbor->lastGroupKeyIdReceived + 1);
+           keyId <= groupKeyId;
+           ++keyId)
+        {
+          candidateGroupKey =
+            CsrLegacyCrypto::DeriveNextGroupKeyMaterial (
+              m_missionKey,
+              candidateGroupKey,
+              source,
+              securityCount,
+              keyId);
+        }
+      haveCandidate = true;
+      candidateIsDerived = true;
+    }
+
+  if (!haveCandidate)
+    {
+      if (mode == CsrGroupSecurityMode::GroupEstablish)
+        {
+          if (neighbor->groupKeyReceived)
+            {
+              neighbor->previousGroupKeyReceived = true;
+              neighbor->previousGroupKeyIdReceived =
+                neighbor->lastGroupKeyIdReceived;
+              neighbor->previousGroupKeyMaterial =
+                neighbor->groupKeyMaterial;
+              neighbor->groupKeyReceived = false;
+            }
+          neighbor->securityCountValid = true;
+          neighbor->securityCount = securityCount;
+          neighbor->lastGroupKeyIdReceived = groupKeyId;
+          result.status = securityCountChanged
+            ? CsrHopSecurityReceiveStatus::
+                AuthenticatedGroupKeyNeededSecurityCountChanged
+            : CsrHopSecurityReceiveStatus::AuthenticatedGroupKeyNeeded;
+        }
+      else
+        {
+          result.status = CsrHopSecurityReceiveStatus::GroupKeyUnavailable;
+        }
+      return result;
+    }
+
+  CsrLegacyCrypto::ProtectionKeys keys =
+    CsrLegacyCrypto::DeriveProtectionKeys (m_missionKey,
+                                           candidateGroupKey,
+                                           source,
+                                           securityCount,
+                                           groupKeyId);
+
+  bool authenticated = false;
+  if (mode == CsrGroupSecurityMode::GroupEstablish)
+    {
+      std::array<uint8_t, 4> expected =
+        CsrLegacyCrypto::ComputeGroupEstablishAuthTag (
+          m_missionKey,
+          &keys.authentication,
+          legacyPacketType,
+          source,
+          securityCount,
+          groupKeyId,
+          groupSequence,
+          protectedPayload);
+      authenticated = CsrLegacyCrypto::ConstantTimeEqual (expected,
+                                                          receivedTag);
+    }
+  else
+    {
+      std::span<const uint8_t> authenticatedRecord =
+        record.first (record.size () - authLength);
+      std::vector<uint8_t> expected =
+        CsrLegacyCrypto::ComputeGroupAuthTag (keys.authentication,
+                                              source,
+                                              legacyPacketType,
+                                              authenticatedRecord,
+                                              authLength);
+      authenticated = CsrLegacyCrypto::ConstantTimeEqual (expected,
+                                                          receivedTag);
+    }
+
+  if (!authenticated)
+    {
+      result.status = CsrHopSecurityReceiveStatus::AuthenticationFailed;
+      return result;
+    }
+
+  uint32_t replayValue =
+    (static_cast<uint32_t> (groupKeyId) << 12) | groupSequence;
+  if (neighbor->inboundGroup.IsBeforeWindow (replayValue))
+    {
+      result.status = CsrHopSecurityReceiveStatus::DuplicateOrStale;
+      return result;
+    }
+  if (neighbor->inboundGroup.IsDuplicate (replayValue))
+    {
+      result.status = CsrHopSecurityReceiveStatus::AuthenticatedDuplicate;
+      return result;
+    }
+
+  result.payload.assign (protectedPayload.begin (), protectedPayload.end ());
+  if (GroupModeEncryptsPayload (mode) && !result.payload.empty ())
+    {
+      CsrLegacyCrypto::ApplyAes256Ctr (keys.encryption,
+                                       source,
+                                       0,
+                                       securityCount,
+                                       groupKeyId,
+                                       groupSequence,
+                                       result.payload);
+    }
+
+  if (candidateIsDerived)
+    {
+      neighbor->previousGroupKeyReceived = neighbor->groupKeyReceived;
+      neighbor->previousGroupKeyIdReceived = neighbor->lastGroupKeyIdReceived;
+      neighbor->previousGroupKeyMaterial = neighbor->groupKeyMaterial;
+      neighbor->groupKeyReceived = true;
+      neighbor->lastGroupKeyIdReceived = groupKeyId;
+      neighbor->groupKeyMaterial = candidateGroupKey;
+    }
+
+  neighbor->inboundGroup.MarkReceived (replayValue);
+  neighbor->securityCountValid = true;
+  neighbor->securityCount = securityCount;
+  result.status = securityCountChanged
+    ? CsrHopSecurityReceiveStatus::AcceptedSecurityCountChanged
+    : CsrHopSecurityReceiveStatus::Accepted;
+  return result;
 }
 
 bool
@@ -785,6 +1131,89 @@ CsrHopSecurityState::NextPairwiseKeySequence (
 
   keyId = neighbor.outboundPairwiseKeyId;
   sequence = neighbor.outboundPairwiseSequence;
+}
+
+bool
+CsrHopSecurityState::NextGroupKeySequence ()
+{
+  if (m_groupSequence != CSR_SECURITY_COUNTER_MAX)
+    {
+      m_groupSequence++;
+      return false;
+    }
+
+  m_groupSequence = 0;
+  m_groupKeyId = static_cast<uint16_t> (
+    (m_groupKeyId + 1) & CSR_SECURITY_COUNTER_MAX);
+
+  bool generatedNewGroupKey =
+    (m_groupKeyId % CSR_GROUP_KEY_ID_STEP_SIZE) == 0;
+  if (generatedNewGroupKey)
+    {
+      m_groupKeyMaterial = GenerateNewGroupKeyMaterial ();
+
+      // setGroupKeySentUpdate() invalidates every neighbor's distribution
+      // state when the source crosses a fresh-key epoch boundary.
+      for (auto &item : m_neighbors)
+        {
+          item.second.groupKeySent = false;
+        }
+    }
+  else
+    {
+      m_groupKeyMaterial = CsrLegacyCrypto::DeriveNextGroupKeyMaterial (
+        m_missionKey,
+        m_groupKeyMaterial,
+        m_nodeId,
+        m_ownSecurityCount,
+        m_groupKeyId);
+    }
+
+  return generatedNewGroupKey;
+}
+
+CsrHopSecurityState::GroupKeyMaterial
+CsrHopSecurityState::GenerateNewGroupKeyMaterial ()
+{
+  if (m_nextGeneratedGroupKeyMaterial.has_value ())
+    {
+      GroupKeyMaterial groupKey = *m_nextGeneratedGroupKeyMaterial;
+      m_nextGeneratedGroupKeyMaterial.reset ();
+      return groupKey;
+    }
+
+  // The radio obtains fresh bytes from its hardware noise source.  The
+  // simulator substitutes a deterministic PBKDF2 stream so runs remain
+  // reproducible while preserving the observable fresh-key transition.
+  std::vector<uint8_t> salt {
+    'C', 'S', 'R', '-', 'G', 'R', 'O', 'U', 'P', '-', 'K', 'E', 'Y',
+    static_cast<uint8_t> (m_nodeId >> 16),
+    static_cast<uint8_t> (m_nodeId >> 8),
+    static_cast<uint8_t> (m_nodeId),
+    static_cast<uint8_t> (m_ownSecurityCount >> 8),
+    static_cast<uint8_t> (m_ownSecurityCount),
+    static_cast<uint8_t> (m_groupKeyId >> 8),
+    static_cast<uint8_t> (m_groupKeyId),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter >> 56),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter >> 48),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter >> 40),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter >> 32),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter >> 24),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter >> 16),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter >> 8),
+    static_cast<uint8_t> (m_groupKeyGenerationCounter)
+  };
+  m_groupKeyGenerationCounter++;
+
+  std::vector<uint8_t> bytes = CsrLegacyCrypto::Pbkdf2HmacSha1 (
+    m_missionKey,
+    salt,
+    1,
+    CsrLegacyCrypto::GROUP_KEY_MATERIAL_SIZE);
+  GroupKeyMaterial groupKey {};
+  std::copy (bytes.begin (), bytes.end (), groupKey.begin ());
+  std::fill (bytes.begin (), bytes.end (), 0);
+  return groupKey;
 }
 
 CsrHopSecurityReceiveStatus
