@@ -68,8 +68,12 @@ enum CsrDestType : uint8_t
 
 enum CsrSnmpCommand : uint8_t
 {
-  CSR_SNMP_START_DISCOVERY = 1,
-  CSR_SNMP_DISCOVERY_DONE  = 2
+  CSR_SNMP_START_DISCOVERY   = 1,
+  CSR_SNMP_DISCOVERY_DONE    = 2,
+  CSR_SNMP_START_REDISCOVER  = 3,
+  CSR_SNMP_PRINT_ROUTES_INFO = 4,
+  CSR_SNMP_RELAY_HOLDOFF     = 5,
+  CSR_SNMP_RELAY_CLEAR       = 6
 };
 
 // ------------------------------------------------------------

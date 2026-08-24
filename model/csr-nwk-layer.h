@@ -107,6 +107,69 @@ public:
     return m_snmpDoneReceivedCount;
   }
 
+  /**
+   * Send the legacy one-hop relay-holdoff control to a neighbor.
+   *
+   * @param neighbor Final SNMP destination.
+   * @return True when a route exists and the control was queued at HOP.
+   */
+  bool SendRelayHoldoff (CsrNodeId neighbor)
+  {
+    return SendSnmp (neighbor, CSR_SNMP_RELAY_HOLDOFF, 0);
+  }
+
+  /**
+   * Send the legacy one-hop relay-clear control to a neighbor.
+   *
+   * @param neighbor Final SNMP destination.
+   * @return True when a route exists and the control was queued at HOP.
+   */
+  bool SendRelayClear (CsrNodeId neighbor)
+  {
+    return SendSnmp (neighbor, CSR_SNMP_RELAY_CLEAR, 0);
+  }
+
+  /**
+   * Read the last relay-control state received from a known neighbor.
+   *
+   * The supplied OPNET wrapper stores this flag but never consults it while
+   * releasing the NWK queue.  It is therefore observable control state, not a
+   * transit-forwarding gate.
+   *
+   * @param neighbor Neighbor whose received state should be queried.
+   * @return True after RELAY_HOLDOFF and false after RELAY_CLEAR or when the
+   *         neighbor is unknown.
+   */
+  bool IsRelayHoldoffSet (CsrNodeId neighbor) const
+  {
+    auto it = m_nwkNeighbors.find (neighbor);
+    return it != m_nwkNeighbors.end () && it->second.relayHoldoff;
+  }
+
+  /** @return Number of relay-holdoff controls queued by this node. */
+  uint32_t GetRelayHoldoffSentCount () const
+  {
+    return m_relayHoldoffSentCount;
+  }
+
+  /** @return Number of relay-clear controls queued by this node. */
+  uint32_t GetRelayClearSentCount () const
+  {
+    return m_relayClearSentCount;
+  }
+
+  /** @return Number of relay-holdoff controls applied by this node. */
+  uint32_t GetRelayHoldoffReceivedCount () const
+  {
+    return m_relayHoldoffReceivedCount;
+  }
+
+  /** @return Number of relay-clear controls applied by this node. */
+  uint32_t GetRelayClearReceivedCount () const
+  {
+    return m_relayClearReceivedCount;
+  }
+
   uint32_t GetPendingDiscoveryCount () const
   {
     return static_cast<uint32_t> (
@@ -1427,6 +1490,10 @@ private:
     uint32_t numFailures {0};
     bool stale {false};
 
+    // br_nwk stores SNMP_RELAY_HOLDOFF/CLEAR here, but its queue-release
+    // routine never reads the field.  Preserve that observable no-op state.
+    bool relayHoldoff {false};
+
     // Legacy routes.c admission is distinct from freshness.  A neighbor is
     // usable only after both group keys are exchanged and a NeighborCheck is
     // received/ACKed.
@@ -1580,6 +1647,8 @@ private:
     // A packet with no route or a saturated next hop does not block
     // eligible traffic for another destination. NSDP is bookkeeping
     // for ACK/DACK selection, not a NWK-to-HOP admission gate.
+    // BrT_Neighbor_Entry::relay_holdoff is likewise never consulted by the
+    // supplied wrapper, so a stored relay control does not gate this scan.
     for (auto it = m_nwkQueue.begin ();
          it != m_nwkQueue.end ();)
       {
@@ -2267,6 +2336,10 @@ private:
   uint32_t m_snmpStartReceivedCount {0};
   uint32_t m_snmpDoneSentCount {0};
   uint32_t m_snmpDoneReceivedCount {0};
+  uint32_t m_relayHoldoffSentCount {0};
+  uint32_t m_relayHoldoffReceivedCount {0};
+  uint32_t m_relayClearSentCount {0};
+  uint32_t m_relayClearReceivedCount {0};
 
   bool m_discoveryResponseEnabled {true};
 
@@ -6331,7 +6404,7 @@ CsrNetLayer::SendHelloBroadcast (
   double s0PowerDbm = m_rxS0BaseLevelDbm + m_linkMarginDb;
   hh.SetRxPowerDbmX10 (static_cast<int16_t> (std::round (s0PowerDbm * 10.0)));
 
-    // OPNET-ish “active” proxy: neighbor count (or 0 for now)
+    // OPNET-ish "active" proxy: neighbor count (or 0 for now)
     //hh.SetActiveNodes (static_cast<uint8_t>(GetNeighborCount ()));
   hh.SetActiveNodes (static_cast<uint8_t> (GetActiveNodeCount ()));
 
@@ -6729,6 +6802,14 @@ CsrNetLayer::SendSnmp (
     {
       m_snmpDoneSentCount++;
     }
+  else if (command == CSR_SNMP_RELAY_HOLDOFF)
+    {
+      m_relayHoldoffSentCount++;
+    }
+  else if (command == CSR_SNMP_RELAY_CLEAR)
+    {
+      m_relayClearSentCount++;
+    }
 
   std::cout << "[NWK " << m_nodeId
             << "] TX legacy SNMP"
@@ -6839,6 +6920,52 @@ CsrNetLayer::ReceiveSnmpFromHop (
         }
 
       CheckDiscoveryTable ();
+      return;
+    }
+
+  if (header.GetCommand () == CSR_SNMP_RELAY_HOLDOFF ||
+      header.GetCommand () == CSR_SNMP_RELAY_CLEAR)
+    {
+      auto neighbor = m_nwkNeighbors.find (source);
+
+      // br_SNMP bypasses update_neighbor() in the legacy HOP process.  A
+      // relay-control source must consequently exist before this record is
+      // received; the control itself must not create or refresh a neighbor.
+      if (neighbor == m_nwkNeighbors.end ())
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Ignore relay control from unknown neighbor="
+                    << source
+                    << " command="
+                    << unsigned (static_cast<uint8_t> (header.GetCommand ()))
+                    << std::endl;
+          return;
+        }
+
+      bool holdoff =
+        header.GetCommand () == CSR_SNMP_RELAY_HOLDOFF;
+
+      neighbor->second.relayHoldoff = holdoff;
+
+      if (holdoff)
+        {
+          m_relayHoldoffReceivedCount++;
+        }
+      else
+        {
+          m_relayClearReceivedCount++;
+        }
+
+      std::cout << "[NWK " << m_nodeId
+                << "] RX "
+                << (holdoff
+                      ? "SNMP_RELAY_HOLDOFF"
+                      : "SNMP_RELAY_CLEAR")
+                << " source=" << source
+                << " hopSource=" << hopSource
+                << " storedState=" << (holdoff ? 1 : 0)
+                << " transitGate=0"
+                << std::endl;
       return;
     }
 
