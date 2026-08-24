@@ -93,6 +93,7 @@ public:
       m_hasAckWindow (false),
       m_hasLinkControl (false),
       m_hasSecurityCount (false),
+      m_hasGroupSecurity (false),
       m_ackBitmap (0),
       m_dackBitmap (0),
       m_type (CSR_PKT_DATA),
@@ -115,6 +116,7 @@ public:
       m_hasAckWindow (false),
       m_hasLinkControl (false),
       m_hasSecurityCount (false),
+      m_hasGroupSecurity (false),
       m_ackBitmap (0),
       m_dackBitmap (0),
       m_type (isAck ? CSR_PKT_ACK : CSR_PKT_DATA),
@@ -177,6 +179,7 @@ public:
     if (!m_destinationSequences.empty ()) { flags |= 0x10; }
     if (m_hasLinkControl) { flags |= 0x20; }
     if (m_hasSecurityCount) { flags |= 0x40; }
+    if (m_hasGroupSecurity) { flags |= 0x80; }
 
     CsrWriteNodeId (start, m_src);
     CsrWriteNodeId (start, m_dst);
@@ -233,6 +236,7 @@ public:
     bool hasDestinationSequences = (flags & 0x10) != 0;
     m_hasLinkControl = (flags & 0x20) != 0;
     m_hasSecurityCount = (flags & 0x40) != 0;
+    m_hasGroupSecurity = (flags & 0x80) != 0;
 
     // Always read the extended fields (Serialize always writes them)
     m_type     = start.ReadU8 ();
@@ -316,6 +320,7 @@ public:
        << " hasAckWindow=" << m_hasAckWindow
        << " hasLinkControl=" << m_hasLinkControl
        << " hasSecurityCount=" << m_hasSecurityCount
+       << " hasGroupSecurity=" << m_hasGroupSecurity
        << " type=" << unsigned(m_type)
        << " destType=" << unsigned(m_destType)
        << " speedKey=" << unsigned(m_speedKey);
@@ -410,14 +415,15 @@ public:
 
   void SetSecurityCount (uint16_t value)
   {
-    NS_ABORT_MSG_IF (value > 0x0fff,
-                     "CSR security count exceeds the legacy 12-bit field");
     m_securityCount = value;
     m_hasSecurityCount = true;
   }
 
   bool HasSecurityCount () const { return m_hasSecurityCount; }
   uint16_t GetSecurityCount () const { return m_securityCount; }
+
+  void SetHasGroupSecurity (bool value) { m_hasGroupSecurity = value; }
+  bool HasGroupSecurity () const { return m_hasGroupSecurity; }
 
   void SetLinkControl (uint8_t speedKey,
                        double txPowerDbm,
@@ -526,6 +532,7 @@ private:
   bool     m_hasAckWindow;
   bool     m_hasLinkControl;
   bool     m_hasSecurityCount;
+  bool     m_hasGroupSecurity;
   uint64_t m_ackBitmap;
   uint64_t m_dackBitmap;
   uint8_t  m_type;

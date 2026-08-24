@@ -99,6 +99,20 @@ public:
     uint16_t keyId);
 
   /**
+   * Apply the legacy one-way group-key evolution function.
+   *
+   * The source invokes this when its 12-bit group sequence wraps and the new
+   * key identifier is not a GROUP_KEY_ID_STEP_SIZE boundary.  Receivers use
+   * the same transform to catch up to a future key inside the same epoch.
+   */
+  static GroupKeyMaterial DeriveNextGroupKeyMaterial (
+    const MissionKey &missionKey,
+    const GroupKeyMaterial &currentGroupKey,
+    CsrNodeId sourceId,
+    uint16_t securityCount,
+    uint16_t nextGroupKeyId);
+
+  /**
    * Derive the AES-256 wrapping key used by KeyUpdate.
    *
    * @param missionKey Thirty-two-byte mission key.
@@ -135,6 +149,38 @@ public:
     uint8_t packetType,
     std::span<const uint8_t> data,
     std::size_t authLength);
+
+  /**
+   * Compute a legacy Group16 or Group32Encrypt tag.
+   *
+   * Group traffic uses the generic authentication input with destination ID
+   * zero.  The authenticated data is the packed three-byte group key/sequence
+   * field followed by the plaintext (Group16) or ciphertext (Group32Encrypt).
+   */
+  static std::vector<uint8_t> ComputeGroupAuthTag (
+    const AuthenticationKey &authenticationKey,
+    CsrNodeId sourceId,
+    uint8_t packetType,
+    std::span<const uint8_t> data,
+    std::size_t authLength);
+
+  /**
+   * Compute the four-byte GroupEstablish/Discover tag.
+   *
+   * Bytes 0-1 authenticate with the first twenty bytes of the mission key;
+   * bytes 2-3 authenticate with the sender's derived group authentication
+   * key.  A receiver without that group key can therefore authenticate the
+   * source while deferring payload decryption until KeyUpdate completes.
+   */
+  static std::array<uint8_t, 4> ComputeGroupEstablishAuthTag (
+    const MissionKey &missionKey,
+    const AuthenticationKey *groupAuthenticationKey,
+    uint8_t packetType,
+    CsrNodeId sourceId,
+    uint16_t securityCount,
+    uint16_t groupKeyId,
+    uint16_t groupSequence,
+    std::span<const uint8_t> encryptedPayload);
 
   /**
    * Compute the eight-byte KeyUpdate tag over the unwrapped group key.

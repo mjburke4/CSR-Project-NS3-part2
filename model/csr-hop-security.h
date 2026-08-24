@@ -12,6 +12,8 @@
 #include <map>
 #include <optional>
 #include <ostream>
+#include <span>
+#include <vector>
 
 namespace ns3 {
 
@@ -113,7 +115,39 @@ enum class CsrHopSecurityReceiveStatus : uint8_t
   AcceptedSecurityCountChanged,
   AuthenticatedDuplicate,
   DuplicateOrStale,
-  AuthenticationFailed
+  AuthenticationFailed,
+  AuthenticatedGroupKeyNeeded,
+  AuthenticatedGroupKeyNeededSecurityCountChanged,
+  GroupKeyUnavailable,
+  Malformed
+};
+
+/** Security modes that use the sender's rotating group-key stream. */
+enum class CsrGroupSecurityMode : uint8_t
+{
+  GroupEstablish,
+  Group16,
+  Group32Encrypt
+};
+
+/** Complete legacy HOP-security record produced for one group message. */
+struct CsrProtectedGroupMessage
+{
+  uint16_t groupKeyId {0};
+  uint16_t groupSequence {0};
+  bool generatedNewGroupKey {false};
+  std::vector<uint8_t> record;
+};
+
+/** Result of authenticating and, when applicable, decrypting a group record. */
+struct CsrReceivedGroupMessage
+{
+  CsrHopSecurityReceiveStatus status {
+    CsrHopSecurityReceiveStatus::Malformed
+  };
+  uint16_t groupKeyId {0};
+  uint16_t groupSequence {0};
+  std::vector<uint8_t> payload;
 };
 
 /**
@@ -144,6 +178,9 @@ public:
   void SetGroupKeyId (uint16_t groupKeyId);
   uint16_t GetGroupKeyId () const;
 
+  void SetGroupSequence (uint16_t groupSequence);
+  uint16_t GetGroupSequence () const;
+
   /** Set the synthetic or externally provisioned mission key. */
   void SetMissionKey (const MissionKey &missionKey);
 
@@ -161,6 +198,10 @@ public:
 
   /** Return this node's outbound group-key material. */
   const GroupKeyMaterial& GetGroupKeyMaterial () const;
+
+  /** Override the next newly generated epoch key for deterministic tests. */
+  void SetNextGeneratedGroupKeyMaterial (
+    const GroupKeyMaterial &groupKeyMaterial);
 
   /**
    * Return the current authenticated group key received from a neighbor.
@@ -192,6 +233,25 @@ public:
     CsrNodeId source,
     uint16_t securityCount,
     const CsrKeyUpdateHeader &header);
+
+  /**
+   * Protect one GroupEstablish, Group16, or Group32Encrypt payload.
+   *
+   * The returned record is byte-for-byte in legacy order: packed 12-bit
+   * group key/sequence, payload, then the mode-specific authentication tag.
+   */
+  CsrProtectedGroupMessage ProtectGroupMessage (
+    CsrGroupSecurityMode mode,
+    uint8_t legacyPacketType,
+    std::span<const uint8_t> payload);
+
+  /** Authenticate and optionally decrypt one complete legacy group record. */
+  CsrReceivedGroupMessage ReceiveGroupMessage (
+    CsrNodeId source,
+    uint16_t securityCount,
+    CsrGroupSecurityMode mode,
+    uint8_t legacyPacketType,
+    std::span<const uint8_t> record);
 
   bool IsKeyUpdateSendActive (CsrNodeId neighbor) const;
   bool HasGroupKeySentTo (CsrNodeId neighbor) const;
@@ -225,6 +285,8 @@ private:
     bool securityCountValid {false};
     uint16_t securityCount {0};
 
+    ReplayWindow inboundGroup;
+
     bool keyUpdateSendActive {false};
     bool groupKeySent {false};
     Time groupKeySentWhen {Seconds (0.0)};
@@ -245,6 +307,9 @@ private:
     NeighborState &neighbor,
     uint16_t &keyId,
     uint16_t &sequence);
+
+  bool NextGroupKeySequence ();
+  GroupKeyMaterial GenerateNewGroupKeyMaterial ();
 
   CsrHopSecurityReceiveStatus CommitAuthenticatedPairwise (
     NeighborState &neighbor,
@@ -269,12 +334,15 @@ private:
   CsrNodeId m_nodeId {0};
   uint16_t m_ownSecurityCount {1};
   uint16_t m_groupKeyId {1};
+  uint16_t m_groupSequence {1};
   MissionKey m_missionKey {};
   PairwiseKeyMaterial m_defaultPairwiseKeyMaterial {};
   GroupKeyMaterial m_groupKeyMaterial {};
   std::map<CsrNodeId, PairwiseKeyMaterial> m_pairwiseKeyMaterial;
   std::optional<CryptoPrn> m_nextDataPrn;
+  std::optional<GroupKeyMaterial> m_nextGeneratedGroupKeyMaterial;
   uint64_t m_prnCounter {0};
+  uint64_t m_groupKeyGenerationCounter {0};
   std::map<CsrNodeId, NeighborState> m_neighbors;
 };
 
