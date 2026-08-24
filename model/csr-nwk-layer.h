@@ -2329,6 +2329,7 @@ private:
 
   uint8_t m_discoveryBroadcastsRemaining {0};
   bool m_repeatDiscoveryHello {true};
+  bool m_discoveryCompletionQuietTickObserved {false};
 
   uint32_t m_discoveryStartCount {0};
   uint32_t m_discoveryBroadcastCount {0};
@@ -6126,6 +6127,7 @@ CsrNetLayer::DiscoveryStart ()
   // the production default reproduces all three legacy broadcasts.
   m_discoveryBroadcastsRemaining =
     m_repeatDiscoveryHello ? 3 : 1;
+  m_discoveryCompletionQuietTickObserved = false;
 
   ++m_discoverySequence;
 
@@ -6339,6 +6341,32 @@ CsrNetLayer::DiscoveryHelloTick ()
               ScheduleDiscoveryHello ();
               return;
             }
+        }
+
+      // The broadcaster timer can reach its fourth invocation while the
+      // final long-preamble Discover is still in the MAC or while its peer's
+      // response is about to start.  Wait for the local radio to clear and
+      // then observe one complete quiet discovery interval.  This preserves
+      // the legacy response/admission ordering without removing the explicit
+      // DiscoveryStop bound.
+      if (m_hop != nullptr && m_hop->IsMacBusyOrQueued ())
+        {
+          m_discoveryCompletionQuietTickObserved = false;
+          std::cout << "[NWK " << m_nodeId
+                    << "] Discovery completion waiting for MAC control"
+                    << std::endl;
+          ScheduleDiscoveryHello ();
+          return;
+        }
+
+      if (!m_discoveryCompletionQuietTickObserved)
+        {
+          m_discoveryCompletionQuietTickObserved = true;
+          std::cout << "[NWK " << m_nodeId
+                    << "] Discovery completion observing response interval"
+                    << std::endl;
+          ScheduleDiscoveryHello ();
+          return;
         }
 
       DiscoveryStop ();

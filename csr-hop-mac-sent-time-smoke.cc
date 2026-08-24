@@ -174,21 +174,21 @@ main ()
                        &CheckBeforeFirstRetry,
                        device,
                        hop);
-  Simulator::Schedule (Seconds (7.3),
+  Simulator::Schedule (Seconds (7.6),
                        &CheckFirstRetry,
                        device);
-  Simulator::Schedule (Seconds (9.9),
+  Simulator::Schedule (Seconds (10.2),
                        &CheckSecondRetry,
                        device);
   Simulator::Schedule (Seconds (12.2),
                        &CheckFinalGraceStillHeld,
                        hop);
-  Simulator::Schedule (Seconds (13.9),
+  Simulator::Schedule (Seconds (14.3),
                        &CheckFinalTimeout,
                        device,
                        hop);
 
-  Simulator::Stop (Seconds (14.2));
+  Simulator::Stop (Seconds (14.6));
   Simulator::Run ();
   Simulator::Destroy ();
 

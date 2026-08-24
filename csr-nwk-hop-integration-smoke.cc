@@ -209,7 +209,7 @@ main ()
                        nwk0,
                        hop0);
 
-  Simulator::Schedule (Seconds (1.7),
+  Simulator::Schedule (Seconds (1.9),
                        &CheckRelayAdmission,
                        nwk1,
                        hop1);

@@ -4,6 +4,8 @@
 #include "csr-opnet-envelope.h"
 #include "csr-phy-model.h"
 
+#include <limits>
+
 class CsrNetDevice : public Object
 {
 public:
@@ -52,16 +54,36 @@ public:
         // De-sync nodes so they don't all wake at same instant
         m_wakePhaseSec = m_rng->GetValue (0.0, m_wakeCycleSec);
       }
+    RefreshDutyState ();
   }
 
   bool IsDutyCyclingEnabled () const { return m_dutyCycleEnabled; }
 
-  double m_forceAwakeUntilSec { 0.0 };
+  /** Set a deterministic wake phase, primarily for repeatable scenarios. */
+  void SetDutyCyclePhase (Time phase)
+  {
+    double seconds = std::fmod (phase.GetSeconds (), m_wakeCycleSec);
+    m_wakePhaseSec = seconds < 0.0 ? seconds + m_wakeCycleSec : seconds;
+    RefreshDutyState ();
+  }
 
   void ForceAwakeFor (double seconds)
   {
-    double now = Simulator::Now().GetSeconds();
-    m_forceAwakeUntilSec = std::max(m_forceAwakeUntilSec, now + seconds);
+    double now = Simulator::Now ().GetSeconds ();
+    m_forceAwakeUntilSec = std::max (m_forceAwakeUntilSec, now + seconds);
+    if (m_mac.GetState () == CsrMacCore::State::IDLE)
+      {
+        m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
+      }
+
+    if (m_forceAwakeEndEvent.IsPending ())
+      {
+        Simulator::Cancel (m_forceAwakeEndEvent);
+      }
+    m_forceAwakeEndEvent = Simulator::Schedule (
+      Seconds (std::max (0.0, m_forceAwakeUntilSec - now)),
+      &CsrNetDevice::RefreshDutyState,
+      this);
   }
 
   CsrMacCore& GetMac ()
@@ -72,6 +94,36 @@ public:
   CsrPhyModel& GetPhy() { return m_phy; }
 
   CsrNodeId GetId () const { return m_id; }
+
+  /** Return the current OPNET Idle/Search/Track/Tx state. */
+  CsrMacCore::State GetMacState () const
+  {
+    return m_mac.GetState ();
+  }
+
+  /** Return the number of overlapping acceptable preambles observed. */
+  uint64_t GetRxCollisionCount () const
+  {
+    return m_rxCollisionCount;
+  }
+
+  /** Return the number of tracked frames that captured weaker interference. */
+  uint64_t GetRxCaptureCount () const
+  {
+    return m_rxCaptureCount;
+  }
+
+  /** Return the number of frames missed while asleep or transmitting. */
+  uint64_t GetRxMissCount () const
+  {
+    return m_rxMissCount;
+  }
+
+  /** Configure the source-backed JSR boundary used before PHY calibration. */
+  void SetCaptureMarginDb (double marginDb)
+  {
+    m_captureMarginDb = marginDb;
+  }
 
   void SetActiveNodesForPostTx (uint32_t n)
   {
@@ -113,11 +165,70 @@ public:
                           bool ackable);
 
 private:
+  friend class CsrMacCore;
+
+  struct RxSignal
+  {
+    uint64_t id {0};
+    uint64_t arrivalOrder {0};
+    CsrNodeId txId {0};
+    uint16_t sequence {0};
+    std::vector<Ptr<Packet>> frames;
+    int rateKbps {8};
+    double txPowerDbm {0.0};
+    PreambleType preamble {PREAMBLE_LONG};
+    int reservedSlot {-1};
+    bool ackable {false};
+    uint32_t payloadBytes {0};
+    uint32_t packetBits {0};
+    double startSec {0.0};
+    double endSec {0.0};
+    double preambleEndSec {0.0};
+    double pathlossDb {0.0};
+    double rxPowerDbm {0.0};
+    double snrDb {0.0};
+    bool syncEligible {false};
+    bool preambleActive {true};
+    bool rejected {false};
+    bool tracked {false};
+    bool collided {false};
+    bool missedByState {false};
+  };
+
+  void BeginReceiveSignal (RxSignal signal);
+  void EndReceivePreamble (uint64_t signalId);
+  void EndReceiveSignal (uint64_t signalId);
+  void AcquireSignal ();
+  void ScheduleAcquisition ();
+  void ApplyTrackedInterference (RxSignal &interferer);
+  void DeliverTrackedSignal (const RxSignal &signal,
+                             const CsrRxDecision &decision);
+  void UpdateSyncPresence ();
+  void RefreshDutyState ();
+  void WakeForSignal ();
+  void SleepReceiver ();
+  void ScheduleSignalWake ();
+  bool IsPeriodicAwakeAt (double timeSec) const;
+  double GetPeriodicWindowEnd (double timeSec) const;
+  double GetNextPeriodicWake (double timeSec) const;
+  void OnMacTxFinished ();
+
   CsrNodeId                       m_id {0};
   CsrMacCore                     m_mac;
   std::vector< Ptr<CsrNetDevice> > m_peers;   // multiple peers on shared channel
   Ptr<UniformRandomVariable>     m_rng;
   CsrPhyModel                    m_phy;
+  std::map<uint64_t, RxSignal>   m_rxSignals;
+  uint64_t                       m_nextTxSignalId {0};
+  uint64_t                       m_nextRxArrivalOrder {0};
+  uint64_t                       m_trackedSignalId {0};
+  uint64_t                       m_rxCollisionCount {0};
+  uint64_t                       m_rxCaptureCount {0};
+  uint64_t                       m_rxMissCount {0};
+  EventId                        m_acquisitionEvent;
+  EventId                        m_signalWakeEvent;
+  EventId                        m_sleepEvent;
+  EventId                        m_forceAwakeEndEvent;
 
   // --- Duty cycling (OPNET-inspired) ---
   bool   m_dutyCycleEnabled { false };
@@ -129,6 +240,12 @@ private:
   double m_wakeCycleSec     { 0.988 };
   double m_awakeWindowSec   { 0.0011 + 0.0078 }; // ~0.0089 s
   double m_wakePhaseSec     { 0.0 };             // randomized per node
+  double m_forceAwakeUntilSec { 0.0 };
+  double m_syncToTrackSec { 0.00663 };
+  double m_syncSnrThresholdDb {-11.0};
+  // br_ber buckets JSR values at -12 dB when jammer power is at least
+  // 10.5 dB below the desired signal.  Full table-driven BER is deferred.
+  double m_captureMarginDb {10.5};
   // OPNET br_mac.pr.c:
   // POST_TX_WAIT_TIME = STAY_AWAKE_BASE_TIME + 1.5*active_nodes + STAY_AWAKE_GUARD_TIME
   double m_stayAwakeBaseSec  { 15.0 };
@@ -156,42 +273,6 @@ private:
         + m_stayAwakeGuardSec;
   }
 
-  bool CanReceiveDuring (double tStart, double tEnd) const
-  {
-    if (!m_dutyCycleEnabled)
-      {
-        return true;
-      }
-      
-    // If we are in an "active exchange" window, treat as awake
-    if (m_forceAwakeUntilSec >= tStart)
-      {
-        return true;
-      }
-
-    // Periodic awake windows: [phase + k*cycle, phase + k*cycle + window]
-    const double phase  = m_wakePhaseSec;
-    const double cycle  = m_wakeCycleSec;
-    const double win    = m_awakeWindowSec;
-
-    // Find a nearby k to test; only a few candidates are needed
-    double k0_real = std::floor ((tStart - phase) / cycle);
-    int64_t k0 = static_cast<int64_t> (k0_real);
-
-    for (int64_t dk = -2; dk <= 2; ++dk)
-      {
-        double ws = phase + (k0 + dk) * cycle;
-        double we = ws + win;
-
-        // overlap test: [ws,we] with [tStart,tEnd]
-        if (we >= tStart && ws <= tEnd)
-          {
-            return true;
-          }
-      }
-
-    return false;
-  }
 };
 
 // Keep MAC-local active_nodes and device post-TX active_nodes synchronized.
@@ -365,14 +446,19 @@ CsrNetDevice::SendFramesToPeers (
       frameCopies.push_back (segment->Copy ());
     }
 
-  double sizeBits  = payloadBytes * 8.0;
-  double rbps      = CsrRateKeyToBps (rateKbps);   // exact CSNW rate from Table 1
-  //double duration  = sizeBits / rbps;
-  // Simple preamble timing model (we will refine later)
-  double preambleSec = (preamble == PREAMBLE_LONG) ? 0.9 : 0.1;
-  double duration    = preambleSec + (sizeBits / rbps);
+  // br_txdel.ps.c sends the preamble, SOF, speed, and length at S0, then
+  // sends the inherited payload and 32-bit FCS at the selected payload rate.
+  static constexpr double s0DurationSec = 0.00051;
+  uint32_t preambleBits = preamble == PREAMBLE_LONG ? 7888 : 104;
+  uint32_t s0HeaderBits = preambleBits + 16 + 16 + 16;
+  uint32_t payloadAndFcsBits = payloadBytes * 8 + 32;
+  uint32_t packetBits = s0HeaderBits + payloadAndFcsBits;
+  double rbps = CsrRateKeyToBps (rateKbps);
+  double preambleSec = preambleBits / 4.0 * s0DurationSec;
+  double duration = s0HeaderBits / 4.0 * s0DurationSec
+                  + payloadAndFcsBits / rbps;
 
-  double txTime    = Simulator::Now ().GetSeconds ();
+  double txTime = Simulator::Now ().GetSeconds ();
   double propDelay = 0.001;
 
   // For log: peek header
@@ -394,15 +480,6 @@ CsrNetDevice::SendFramesToPeers (
               << " duration " << duration << " s"
               << std::endl;
 
-  Ptr<CsrNetDevice> self = this;
-
-  /*if (ackable)
-  {
-    // Stay awake through TX + propagation + some ACK turnaround margin.
-    // Keep this conservative for now; we can tune later.
-    double ackMarginSec = 0.35;   // small “transaction” window
-    this->ForceAwakeFor(duration + propDelay + ackMarginSec);
-  }*/
   // OPNET br_mac.post_tx(): after the last transmission, MAC remains in
   // receive/search for POST_TX_WAIT_TIME. This is not limited to ACKable data;
   // HELLO/control transmissions also keep the node awake long enough to hear
@@ -410,158 +487,571 @@ CsrNetDevice::SendFramesToPeers (
   double postTxWaitSec = GetPostTxWaitSeconds ();
   this->ForceAwakeFor (duration + propDelay + postTxWaitSec);
 
-std::cout << "[MAC " << m_id
-          << "] Post-TX force-awake for "
-          << (duration + propDelay + postTxWaitSec)
-          << " s"
-          << " (POST_TX_WAIT=" << postTxWaitSec << " s)"
-          << std::endl;
+  std::cout << "[MAC " << m_id
+            << "] Post-TX force-awake for "
+            << (duration + propDelay + postTxWaitSec)
+            << " s"
+            << " (POST_TX_WAIT=" << postTxWaitSec << " s)"
+            << std::endl;
 
   // Peek header once to know src/dst/seq
   CsrHeader hdrOnTx;
   frameCopies.front ()->PeekHeader (hdrOnTx);
-  CsrNodeId txId   = hdrOnTx.GetSrc ();
-  uint16_t seq    = hdrOnTx.GetSeq ();
+  CsrNodeId txId = hdrOnTx.GetSrc ();
+  uint16_t sequence = hdrOnTx.GetSeq ();
+  uint64_t signalId = (static_cast<uint64_t> (m_id) << 32)
+                    | (++m_nextTxSignalId & 0xffffffffULL);
 
-  Simulator::Schedule (Seconds (propDelay + duration),
-                     [self, frameCopies, rateKbps, txPowerDbm,
-                      preamble, slot, ackable,
-                      txId, seq, txTime, propDelay, duration, payloadBytes]() {
-    if (self->m_peers.empty ())
-      {
-        return;
-      }
+  // A direct SendToPeer call and a queued MAC transmission both occupy the
+  // local half-duplex radio for the complete OTA duration.
+  m_mac.NotifyPhyTxStart (Seconds (duration));
 
-    double tRx = Simulator::Now ().GetSeconds ();
-    uint32_t packetBits = payloadBytes * 8;
+  for (const auto &peer : m_peers)
+    {
+      if (peer == nullptr || peer->GetId () == txId)
+        {
+          continue;
+        }
 
-    // A CSR transmission occupies the shared wireless medium.  Every awake
-    // peer in range therefore attempts to decode the aggregate, even when no
-    // segment names that peer as a destination.  OPNET forwards every decoded
-    // MAC payload to HOP and lets HOP discard traffic addressed elsewhere.
-    for (auto const &peer : self->m_peers)
-      {
-        if (peer == nullptr) { continue; }
-        if (peer->GetId () == txId) { continue; }
+      RxSignal signal;
+      signal.id = signalId;
+      signal.txId = txId;
+      signal.sequence = sequence;
+      signal.rateKbps = rateKbps;
+      signal.txPowerDbm = txPowerDbm;
+      signal.preamble = preamble;
+      signal.reservedSlot = slot;
+      signal.ackable = ackable;
+      signal.payloadBytes = payloadBytes;
+      signal.packetBits = packetBits;
+      signal.startSec = txTime + propDelay;
+      signal.endSec = signal.startSec + duration;
+      signal.preambleEndSec = signal.startSec + preambleSec;
+      signal.frames.reserve (frameCopies.size ());
+      for (const auto &segment : frameCopies)
+        {
+          signal.frames.push_back (segment->Copy ());
+        }
 
-        bool addressedFrame = false;
-        bool ackableForPeer = false;
-        for (const auto &segment : frameCopies)
-          {
-            CsrHeader segmentHeader;
-            segment->PeekHeader (segmentHeader);
-            bool matches =
-              segmentHeader.IsForDestination (peer->GetId ());
-            if (matches)
-              {
-                addressedFrame = true;
-                ackableForPeer = ackableForPeer ||
-                                 segmentHeader.IsAckable ();
-              }
-          }
-
-        double rxStart = txTime + propDelay;
-        double rxEnd   = rxStart + duration;
-
-        if (!peer->CanReceiveDuring (rxStart, rxEnd))
-          {
-            std::cout << "[t=" << tRx << "] RX MISS (ASLEEP) at node " << peer->GetId ()
-                      << " from node " << txId
-                      << " seq " << seq
-                      << " interval=[" << rxStart << "," << rxEnd << "]"
-                      << std::endl;
-            continue;
-          }
-
-        // PHY/pipeline decision
-        CsrRxDecision d = peer->m_phy.EvaluateRx (txId,
-                                                peer->GetId (),
-                                                rateKbps,
-                                                txPowerDbm,
-                                                packetBits,
-                                                peer->m_rng);
-
-
-        if (g_rxCsv.is_open ())
-          {
-            double dist = peer->m_phy.GetDistanceMeters (txId, peer->GetId ());
-            g_rxCsv << tRx << ","
-                    << txId << ","
-                    << peer->GetId () << ","
-                    << seq << ","
-                    << rateKbps << ","
-                    << packetBits << ","
-                    << dist << ","
-                    << d.pathlossDb << ","
-                    << d.snrDb << ","
-                    << d.per << ","
-                    << (d.success ? 1 : 0)
-                    << "\n";
-          }
-
-        if (!d.success)
-          {
-            std::cout << "[t=" << tRx << "] RX DROP at node " << peer->GetId ()
-                      << " from node " << txId
-                      << " seq " << seq
-                      << " (pathloss " << d.pathlossDb << " dB"
-                      << ", snr " << d.snrDb << " dB"
-                      << ", per=" << d.per << ")"
-                      << std::endl;
-            continue;
-          }
-
-        std::cout << "[t=" << tRx << "] "
-                  << (addressedFrame ? "RX" : "RX OVERHEARD")
-                  << " at node " << peer->GetId ()
-                  << " from node " << txId
-                  << " seq " << seq
-                  << " rate " << rateKbps << " kbps"
-                  << " txPower " << txPowerDbm << " dBm"
-                  << " preamble " << (preamble == PREAMBLE_LONG ? "LONG" : "SHORT")
-                  << " pathloss " << d.pathlossDb << " dB"
-                  << " snr " << d.snrDb << " dB"
-                  << " (slot " << slot
-                  << ", len " << payloadBytes << "B"
-                  << ", ackable=" << (ackable ? 1 : 0) << ")"
-                  << std::endl;
-
-        if (ackableForPeer)
-          {
-            // We just decoded a unicast that needs an ACK.
-            // Stay awake long enough to send ACK + any immediate follow-on.
-            peer->ForceAwakeFor(0.35);
-          }
-
-        // Update neighbor info (both ends) in MAC
-        /*peer->m_mac.NoteHeardFrom (txId, tRx);
-        peer->m_mac.SetNeighborPathloss (txId, d.pathlossDb);
-
-        self->m_mac.NoteHeardFrom (destId, tRx);
-        self->m_mac.SetNeighborPathloss (destId, d.pathlossDb);
-
-        // Remember which slot this neighbor used
-        peer->m_mac.NoteNeighborReservedSlot (txId, slot);
-        self->m_mac.NoteNeighborReservedSlot (destId, slot);*/
-
-        // Update neighbor info at the RECEIVER based on what it actually observed.
-        // (OPNET update_neighbor() happens on RX.)
-        peer->m_mac.NoteHeardFrom (txId, tRx);
-        peer->m_mac.SetNeighborPathloss (txId, d.pathlossDb);
-        peer->m_mac.NoteNeighborReservedSlot (txId, slot);
-
-        // Forward every decoded segment to HOP.  HOP first updates its
-        // source-neighbor observation and then applies destination filtering,
-        // matching OPNET's MAC_TO_HOP processing order.
-        for (const auto &segment : frameCopies)
-          {
-            peer->m_mac.DeliverRxFrameToUp (
-              segment->Copy (), d.pathlossDb, d.snrDb);
-          }
-      }
-  });
+      Simulator::Schedule (Seconds (propDelay), [peer, signal] () {
+        peer->BeginReceiveSignal (signal);
+      });
+    }
 
   return Seconds (duration);
+}
+
+bool
+CsrNetDevice::IsPeriodicAwakeAt (double timeSec) const
+{
+  double offset = std::fmod (timeSec - m_wakePhaseSec, m_wakeCycleSec);
+  if (offset < 0.0)
+    {
+      offset += m_wakeCycleSec;
+    }
+  return offset < m_awakeWindowSec;
+}
+
+double
+CsrNetDevice::GetPeriodicWindowEnd (double timeSec) const
+{
+  double offset = std::fmod (timeSec - m_wakePhaseSec, m_wakeCycleSec);
+  if (offset < 0.0)
+    {
+      offset += m_wakeCycleSec;
+    }
+  return IsPeriodicAwakeAt (timeSec)
+    ? timeSec + m_awakeWindowSec - offset
+    : timeSec;
+}
+
+double
+CsrNetDevice::GetNextPeriodicWake (double timeSec) const
+{
+  double offset = std::fmod (timeSec - m_wakePhaseSec, m_wakeCycleSec);
+  if (offset < 0.0)
+    {
+      offset += m_wakeCycleSec;
+    }
+  if (offset < m_awakeWindowSec)
+    {
+      return timeSec;
+    }
+  return timeSec + m_wakeCycleSec - offset;
+}
+
+void
+CsrNetDevice::RefreshDutyState ()
+{
+  CsrMacCore::State state = m_mac.GetState ();
+  if (state == CsrMacCore::State::TRACK ||
+      state == CsrMacCore::State::TX)
+    {
+      return;
+    }
+
+  if (!m_dutyCycleEnabled)
+    {
+      m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
+      return;
+    }
+
+  double now = Simulator::Now ().GetSeconds ();
+  bool shouldSearch = m_mac.HasPendingFrames () ||
+                      m_forceAwakeUntilSec > now ||
+                      IsPeriodicAwakeAt (now);
+  m_mac.SetReceiveState (shouldSearch
+                           ? CsrMacCore::State::SEARCH
+                           : CsrMacCore::State::IDLE);
+}
+
+void
+CsrNetDevice::SleepReceiver ()
+{
+  if (m_mac.GetState () == CsrMacCore::State::TRACK ||
+      m_mac.GetState () == CsrMacCore::State::TX)
+    {
+      return;
+    }
+  RefreshDutyState ();
+}
+
+void
+CsrNetDevice::WakeForSignal ()
+{
+  m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
+
+  double now = Simulator::Now ().GetSeconds ();
+  double windowEnd = GetPeriodicWindowEnd (now);
+  if (windowEnd > now)
+    {
+      if (m_sleepEvent.IsPending ())
+        {
+          Simulator::Cancel (m_sleepEvent);
+        }
+      m_sleepEvent = Simulator::Schedule (Seconds (windowEnd - now),
+                                          &CsrNetDevice::SleepReceiver,
+                                          this);
+    }
+  ScheduleAcquisition ();
+}
+
+void
+CsrNetDevice::ScheduleSignalWake ()
+{
+  if (!m_dutyCycleEnabled ||
+      m_mac.GetState () != CsrMacCore::State::IDLE ||
+      m_signalWakeEvent.IsPending ())
+    {
+      return;
+    }
+
+  double now = Simulator::Now ().GetSeconds ();
+  double wakeTime = GetNextPeriodicWake (now);
+  bool canAcquire = false;
+  for (const auto &[id, signal] : m_rxSignals)
+    {
+      (void) id;
+      if (signal.syncEligible &&
+          signal.preambleActive &&
+          !signal.rejected &&
+          wakeTime + m_syncToTrackSec < signal.preambleEndSec)
+        {
+          canAcquire = true;
+          break;
+        }
+    }
+
+  if (canAcquire)
+    {
+      m_signalWakeEvent = Simulator::Schedule (
+        Seconds (std::max (0.0, wakeTime - now)),
+        &CsrNetDevice::WakeForSignal,
+        this);
+    }
+}
+
+void
+CsrNetDevice::UpdateSyncPresence ()
+{
+  bool present = false;
+  for (const auto &[id, signal] : m_rxSignals)
+    {
+      (void) id;
+      if (signal.syncEligible && signal.preambleActive)
+        {
+          present = true;
+          break;
+        }
+    }
+  m_mac.SetSyncPresent (present);
+}
+
+void
+CsrNetDevice::ScheduleAcquisition ()
+{
+  if (m_mac.GetState () != CsrMacCore::State::SEARCH ||
+      !m_mac.IsSyncPresent () ||
+      m_acquisitionEvent.IsPending ())
+    {
+      return;
+    }
+
+  m_acquisitionEvent = Simulator::Schedule (Seconds (m_syncToTrackSec),
+                                             &CsrNetDevice::AcquireSignal,
+                                             this);
+}
+
+void
+CsrNetDevice::ApplyTrackedInterference (RxSignal &interferer)
+{
+  auto trackedIt = m_rxSignals.find (m_trackedSignalId);
+  if (trackedIt == m_rxSignals.end ())
+    {
+      return;
+    }
+
+  RxSignal &tracked = trackedIt->second;
+  interferer.rejected = true;
+  double desiredMarginDb = tracked.rxPowerDbm - interferer.rxPowerDbm;
+  if (desiredMarginDb >= m_captureMarginDb)
+    {
+      m_rxCaptureCount++;
+    }
+  else
+    {
+      tracked.collided = true;
+    }
+}
+
+void
+CsrNetDevice::BeginReceiveSignal (RxSignal signal)
+{
+  double now = Simulator::Now ().GetSeconds ();
+  signal.arrivalOrder = ++m_nextRxArrivalOrder;
+  signal.pathlossDb = m_phy.ComputePathlossDb (
+    m_phy.GetDistanceMeters (signal.txId, m_id));
+  signal.rxPowerDbm = signal.txPowerDbm - signal.pathlossDb;
+  signal.snrDb = signal.rxPowerDbm - m_phy.profile.noiseFloorDbm;
+  signal.syncEligible = signal.snrDb >= m_syncSnrThresholdDb;
+
+  bool hadSync = m_mac.IsSyncPresent ();
+  auto [it, inserted] = m_rxSignals.emplace (signal.id, std::move (signal));
+  NS_ASSERT_MSG (inserted, "duplicate CSR receive signal identifier");
+  RxSignal &incoming = it->second;
+
+  Simulator::Schedule (
+    Seconds (std::max (0.0, incoming.preambleEndSec - now)),
+    &CsrNetDevice::EndReceivePreamble,
+    this,
+    incoming.id);
+  Simulator::Schedule (
+    Seconds (std::max (0.0, incoming.endSec - now)),
+    &CsrNetDevice::EndReceiveSignal,
+    this,
+    incoming.id);
+
+  CsrMacCore::State state = m_mac.GetState ();
+  if (state == CsrMacCore::State::TX)
+    {
+      incoming.missedByState = true;
+      if (incoming.syncEligible)
+        {
+          m_rxCollisionCount++;
+        }
+    }
+  else if (state == CsrMacCore::State::TRACK)
+    {
+      if (incoming.syncEligible)
+        {
+          m_rxCollisionCount++;
+        }
+      ApplyTrackedInterference (incoming);
+    }
+  else if (incoming.syncEligible && hadSync)
+    {
+      m_rxCollisionCount++;
+    }
+
+  UpdateSyncPresence ();
+  RefreshDutyState ();
+
+  if (m_mac.GetState () == CsrMacCore::State::SEARCH)
+    {
+      ScheduleAcquisition ();
+    }
+  else if (m_mac.GetState () == CsrMacCore::State::IDLE)
+    {
+      incoming.missedByState = true;
+      ScheduleSignalWake ();
+    }
+
+  std::cout << "[t=" << now << "] RX SYNC at node " << m_id
+            << " from node " << incoming.txId
+            << " seq " << incoming.sequence
+            << " power " << incoming.rxPowerDbm << " dBm"
+            << " snr " << incoming.snrDb << " dB"
+            << " state=" << static_cast<int> (m_mac.GetState ())
+            << (incoming.syncEligible ? "" : " below-threshold")
+            << std::endl;
+}
+
+void
+CsrNetDevice::EndReceivePreamble (uint64_t signalId)
+{
+  auto it = m_rxSignals.find (signalId);
+  if (it == m_rxSignals.end ())
+    {
+      return;
+    }
+
+  it->second.preambleActive = false;
+
+  // clear_sync() cancels the outstanding RX_SIG_FOUND event whenever any
+  // preamble expires.  Preserve that ordering, including the multi-signal
+  // behavior of the supplied process model.
+  if (m_acquisitionEvent.IsPending ())
+    {
+      Simulator::Cancel (m_acquisitionEvent);
+    }
+  UpdateSyncPresence ();
+}
+
+void
+CsrNetDevice::AcquireSignal ()
+{
+  if (m_mac.GetState () != CsrMacCore::State::SEARCH)
+    {
+      return;
+    }
+
+  double now = Simulator::Now ().GetSeconds ();
+  std::vector<RxSignal *> candidates;
+  for (auto &[id, signal] : m_rxSignals)
+    {
+      (void) id;
+      if (signal.syncEligible &&
+          signal.preambleActive &&
+          !signal.rejected)
+        {
+          candidates.push_back (&signal);
+        }
+    }
+
+  if (candidates.empty ())
+    {
+      return;
+    }
+
+  std::sort (candidates.begin (),
+             candidates.end (),
+             [] (const RxSignal *left, const RxSignal *right) {
+               if (left->startSec != right->startSec)
+                 {
+                   return left->startSec < right->startSec;
+                 }
+               return left->arrivalOrder < right->arrivalOrder;
+             });
+
+  RxSignal *selected = candidates.front ();
+  for (std::size_t index = 1; index < candidates.size (); ++index)
+    {
+      RxSignal *candidate = candidates[index];
+      if (now - candidate->startSec > m_syncToTrackSec &&
+          candidate->rxPowerDbm > selected->rxPowerDbm)
+        {
+          selected = candidate;
+        }
+    }
+
+  selected->tracked = true;
+  selected->missedByState = false;
+  m_trackedSignalId = selected->id;
+
+  double strongestJammerDbm = -std::numeric_limits<double>::infinity ();
+  for (auto &[id, other] : m_rxSignals)
+    {
+      if (id == selected->id || other.endSec <= now)
+        {
+          continue;
+        }
+      if (other.syncEligible && other.preambleActive)
+        {
+          other.rejected = true;
+        }
+      strongestJammerDbm = std::max (strongestJammerDbm,
+                                     other.rxPowerDbm);
+    }
+
+  if (std::isfinite (strongestJammerDbm))
+    {
+      if (selected->rxPowerDbm - strongestJammerDbm >= m_captureMarginDb)
+        {
+          m_rxCaptureCount++;
+        }
+      else
+        {
+          selected->collided = true;
+        }
+    }
+
+  if (m_sleepEvent.IsPending ())
+    {
+      Simulator::Cancel (m_sleepEvent);
+    }
+  m_mac.SetReceiveState (CsrMacCore::State::TRACK);
+
+  std::cout << "[t=" << now << "] MAC " << m_id
+            << " enters Track on node " << selected->txId
+            << " seq " << selected->sequence
+            << " power " << selected->rxPowerDbm << " dBm"
+            << (selected->collided ? " collided" : "")
+            << std::endl;
+}
+
+void
+CsrNetDevice::DeliverTrackedSignal (const RxSignal &signal,
+                                    const CsrRxDecision &decision)
+{
+  bool addressedFrame = false;
+  bool ackableForPeer = false;
+  for (const auto &segment : signal.frames)
+    {
+      CsrHeader header;
+      segment->PeekHeader (header);
+      if (header.IsForDestination (m_id))
+        {
+          addressedFrame = true;
+          ackableForPeer = ackableForPeer || header.IsAckable ();
+        }
+    }
+
+  double now = Simulator::Now ().GetSeconds ();
+  std::cout << "[t=" << now << "] "
+            << (addressedFrame ? "RX" : "RX OVERHEARD")
+            << " at node " << m_id
+            << " from node " << signal.txId
+            << " seq " << signal.sequence
+            << " rate " << signal.rateKbps << " kbps"
+            << " txPower " << signal.txPowerDbm << " dBm"
+            << " preamble "
+            << (signal.preamble == PREAMBLE_LONG ? "LONG" : "SHORT")
+            << " pathloss " << decision.pathlossDb << " dB"
+            << " snr " << decision.snrDb << " dB"
+            << " (slot " << signal.reservedSlot
+            << ", len " << signal.payloadBytes << "B"
+            << ", ackable=" << (signal.ackable ? 1 : 0) << ")"
+            << std::endl;
+
+  if (ackableForPeer)
+    {
+      ForceAwakeFor (0.35);
+    }
+
+  m_mac.NoteHeardFrom (signal.txId, now);
+  m_mac.SetNeighborPathloss (signal.txId, decision.pathlossDb);
+  if (signal.reservedSlot >= 0)
+    {
+      m_mac.NoteNeighborReservedSlot (signal.txId,
+                                      signal.reservedSlot);
+    }
+
+  // OPNET MAC forwards every decoded segment to HOP and lets HOP perform
+  // destination filtering after recording the source-neighbor observation.
+  for (const auto &segment : signal.frames)
+    {
+      m_mac.DeliverRxFrameToUp (segment->Copy (),
+                                decision.pathlossDb,
+                                decision.snrDb);
+    }
+}
+
+void
+CsrNetDevice::EndReceiveSignal (uint64_t signalId)
+{
+  auto it = m_rxSignals.find (signalId);
+  if (it == m_rxSignals.end ())
+    {
+      return;
+    }
+
+  RxSignal signal = it->second;
+  bool wasTracked = signalId == m_trackedSignalId;
+  if (wasTracked)
+    {
+      CsrRxDecision decision = m_phy.EvaluateRx (signal.txId,
+                                                 m_id,
+                                                 signal.rateKbps,
+                                                 signal.txPowerDbm,
+                                                 signal.packetBits,
+                                                 m_rng);
+      bool stateAllowsDelivery =
+        m_mac.GetState () == CsrMacCore::State::TRACK;
+      decision.success = decision.success &&
+                         stateAllowsDelivery &&
+                         !signal.rejected &&
+                         !signal.collided;
+
+      if (g_rxCsv.is_open ())
+        {
+          double distance = m_phy.GetDistanceMeters (signal.txId, m_id);
+          g_rxCsv << Simulator::Now ().GetSeconds () << ","
+                  << signal.txId << ","
+                  << m_id << ","
+                  << signal.sequence << ","
+                  << signal.rateKbps << ","
+                  << signal.packetBits << ","
+                  << distance << ","
+                  << decision.pathlossDb << ","
+                  << decision.snrDb << ","
+                  << decision.per << ","
+                  << (decision.success ? 1 : 0)
+                  << "\n";
+        }
+
+      if (decision.success)
+        {
+          DeliverTrackedSignal (signal, decision);
+        }
+      else
+        {
+          std::cout << "[t=" << Simulator::Now ().GetSeconds ()
+                    << "] RX DROP at node " << m_id
+                    << " from node " << signal.txId
+                    << " seq " << signal.sequence
+                    << (signal.collided ? " (collision)" : " (PHY/state)")
+                    << std::endl;
+        }
+
+      m_trackedSignalId = 0;
+    }
+  else if (signal.missedByState)
+    {
+      m_rxMissCount++;
+      std::cout << "[t=" << Simulator::Now ().GetSeconds ()
+                << "] RX MISS at node " << m_id
+                << " from node " << signal.txId
+                << " seq " << signal.sequence
+                << std::endl;
+    }
+
+  m_rxSignals.erase (it);
+  UpdateSyncPresence ();
+
+  if (wasTracked && m_mac.GetState () != CsrMacCore::State::TX)
+    {
+      m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
+      ScheduleAcquisition ();
+    }
+  RefreshDutyState ();
+}
+
+void
+CsrNetDevice::OnMacTxFinished ()
+{
+  UpdateSyncPresence ();
+  ScheduleAcquisition ();
+  RefreshDutyState ();
 }
 
 // ------------------------------------------------------------
@@ -833,6 +1323,18 @@ CsrMacCore::MaybeScheduleNextTx ()
       return;
     }
 
+  // A frame queued during Tx is picked up by FinishTx().  OPNET returns to
+  // Search before resuming the already-cleared holdoff/countdown process.
+  if (m_txInProgress)
+    {
+      return;
+    }
+
+  if (m_state == State::IDLE)
+    {
+      m_state = State::SEARCH;
+    }
+
   // OPNET prep_tx(): a newly active transmitter waits through the 300-ms
   // radio holdoff, then decrements its selected counter once per 13-ms slot.
   // Transmission occurs only after the counter moves from zero to -1.
@@ -849,29 +1351,89 @@ CsrMacCore::ScheduleTxOpportunity (int slot,
                                    bool initialHoldoff)
 {
   m_scheduledTxSlot = slot;
+  m_txCountdownCounter = slot;
 
   Time holdoff = initialHoldoff
     ? Seconds (TS_HOLDOFF_SECONDS)
     : Seconds (0.0);
   Time countdown = m_slotTickPeriod * static_cast<uint64_t> (slot + 1);
-  Time delay = notBefore + holdoff + countdown;
+  Time delay = notBefore + holdoff + m_slotTickPeriod;
 
   std::cout << "[MAC " << m_nodeId
             << "] scheduled TX opportunity"
             << " slot=" << slot
             << " holdoff=" << holdoff.GetSeconds ()
             << " countdown=" << countdown.GetSeconds ()
-            << " tx_in=" << delay.GetSeconds ()
+            << " first_tick_in=" << delay.GetSeconds ()
             << "s"
             << std::endl;
 
-  m_txEvent = Simulator::Schedule (delay, &CsrMacCore::DoTx, this);
+  m_txEvent = Simulator::Schedule (delay,
+                                   &CsrMacCore::AdvanceTxCountdown,
+                                   this);
+}
+
+void
+CsrMacCore::AdvanceTxCountdown ()
+{
+  if (!HasPendingFrame () || m_dev == nullptr)
+    {
+      m_scheduledTxSlot = -1;
+      m_txCountdownCounter = -1;
+      return;
+    }
+
+  if (m_state == State::SEARCH && !m_syncPresent)
+    {
+      m_txCountdownCounter--;
+    }
+
+  if (m_txCountdownCounter < 0)
+    {
+      DoTx ();
+      return;
+    }
+
+  m_txEvent = Simulator::Schedule (m_slotTickPeriod,
+                                   &CsrMacCore::AdvanceTxCountdown,
+                                   this);
+}
+
+void
+CsrMacCore::NotifyPhyTxStart (Time duration)
+{
+  m_txInProgress = true;
+  m_state = State::TX;
+
+  if (m_finishTxEvent.IsPending ())
+    {
+      Simulator::Cancel (m_finishTxEvent);
+    }
+  m_finishTxEvent = Simulator::Schedule (duration,
+                                         &CsrMacCore::FinishTx,
+                                         this);
 }
 
 void
 CsrMacCore::FinishTx ()
 {
   m_txInProgress = false;
+  m_state = State::SEARCH;
+
+  if (m_dev != nullptr)
+    {
+      m_dev->OnMacTxFinished ();
+    }
+
+  if (!m_txEvent.IsPending () && HasPendingFrame ())
+    {
+      CsrNodeId destination = !m_ackQueue.empty ()
+        ? m_ackQueue.front ().dest
+        : m_queue.front ().dest;
+      ScheduleTxOpportunity (PickTxSlot (destination),
+                             Seconds (0.0),
+                             false);
+    }
 }
 
 int
@@ -1267,9 +1829,6 @@ CsrMacCore::DoTx ()
 
   m_lastTxRateKbps = aggregateRateKbps;
   m_lastTxPowerDbm = aggregateTxPowerDbm;
-
-  m_txInProgress = true;
-  Simulator::Schedule (txDuration, &CsrMacCore::FinishTx, this);
 
   m_transmittedFrameCount++;
 

@@ -16,6 +16,15 @@ class CsrMacCore
   static constexpr uint32_t MAX_ACK_RESEND = 4;
   static constexpr uint32_t MAX_CONCAT_SEGMENTS = 16;
 
+  /** Operational states used by the legacy br_mac process model. */
+  enum class State
+  {
+    IDLE,
+    SEARCH,
+    TRACK,
+    TX
+  };
+
   void SetNodeId (CsrNodeId id)
   {
     NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
@@ -35,6 +44,48 @@ class CsrMacCore
   {
     return m_lastTxPowerDbm;
   }
+
+  /** Return the current OPNET-compatible MAC state. */
+  State GetState () const
+  {
+    return m_state;
+  }
+
+  /** Return whether at least one acceptable preamble is currently present. */
+  bool IsSyncPresent () const
+  {
+    return m_syncPresent;
+  }
+
+  /**
+   * Update receiver state after an Idle/Search/Track transition.
+   *
+   * The device owns signal acquisition; the MAC owns Tx transitions.
+   */
+  void SetReceiveState (State state)
+  {
+    NS_ASSERT_MSG (state != State::TX,
+                   "receiver transition cannot enter the Tx state");
+    if (!m_txInProgress)
+      {
+        m_state = state;
+      }
+  }
+
+  /** Update the legacy SYNC_PRES input used by slot processing. */
+  void SetSyncPresent (bool present)
+  {
+    m_syncPresent = present;
+  }
+
+  /** Return whether either OPNET transmit queue contains a frame. */
+  bool HasPendingFrames () const
+  {
+    return HasPendingFrame ();
+  }
+
+  /** Mark the radio busy for a complete over-the-air transmission. */
+  void NotifyPhyTxStart (Time duration);
 
   void NoteReportedActiveNodes (uint32_t n)
   {
@@ -365,6 +416,7 @@ private:
   void EnqueueAckFrame (Ptr<Packet> frame, const CsrHeader &header);
   bool HasPendingFrame () const;
   void ScheduleTxOpportunity (int slot, Time notBefore, bool initialHoldoff);
+  void AdvanceTxCountdown ();
   void FinishTx ();
   void DoTx ();
   int SelectQueuedFrameRate (Ptr<Packet> frame,
@@ -398,7 +450,11 @@ private:
   int                                 m_lastTxRateKbps {0};
   double                              m_lastTxPowerDbm {0.0};
   int                                 m_scheduledTxSlot {-1};
+  int                                 m_txCountdownCounter {-1};
   bool                                m_txInProgress {false};
+  bool                                m_syncPresent {false};
+  State                               m_state {State::SEARCH};
+  EventId                             m_finishTxEvent;
   std::map<CsrNodeId, NeighborInfo>    m_neighbors;
   Time                                m_neighborTimeout { Seconds (6.0) };   // default: 3x hello interval (if hello=2s)
   EventId                             m_neighborAgingEvent;
@@ -648,9 +704,10 @@ CsrMacCore::SlotTick ()
       return;
     }
 
-  // OPNET tslot_tasks() keeps the timer running in Tx_st but does not advance
-  // any reservation counters until the MAC returns to Search_st.
-  if (!m_txInProgress)
+  // OPNET tslot_tasks() advances reservation counters only in Search_st and
+  // only while no SYNC preamble is present.  Idle, Track, Tx, and Search with
+  // SYNC all keep the 13-ms timer running without changing the counters.
+  if (m_state == State::SEARCH && !m_syncPresent)
     {
       for (auto &kv : m_neighbors)
         {

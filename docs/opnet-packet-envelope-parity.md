@@ -96,8 +96,11 @@ silently choosing one source for both purposes.
 - complete DATA, ACK/DACK, routed-SNMP, HELLO/Discover, NeighborCheck, ARL
   routing-section, KeyRequest, and KeyUpdate compatibility-envelope inference.
 
-The exact OTA serializer does not make the current PHY source-faithful.  The
-MAC still uses its existing placeholder preamble timing, and the receive
-pipeline still lacks OPNET acquisition, collision/capture, BER, ECC, and
-closure behavior.  This increment corrects payload packet length while leaving
-that PHY work explicitly deferred.
+The exact serializer now also drives source-derived OTA duration: the preamble,
+SOF, speed, and length fields use the S0 chip duration from `br_txdel.ps.c`,
+while the inherited payload and 32-bit FCS use the selected payload rate. The
+MAC receive model now covers acquisition, collision/capture, half duplex,
+slot-counter freezing, and duty-cycle wake behavior. This still does not make
+the PHY source-faithful: received power, receiver grouping, accumulated
+interference, BER, ECC, closure, and the 500/1000-kbps modes remain explicitly
+deferred to the calibrated PHY step.
