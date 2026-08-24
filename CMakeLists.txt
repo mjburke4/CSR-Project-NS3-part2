@@ -6,6 +6,7 @@ build_lib(
     model/csr-hello-header.cc
     model/csr-legacy-crypto.cc
     model/csr-hop-security.cc
+    model/csr-opnet-packet-model.cc
   HEADER_FILES
     model/csr-arl-routing-message.h
     model/csr-common.h
@@ -13,6 +14,8 @@ build_lib(
     model/csr-hello-header.h
     model/csr-legacy-crypto.h
     model/csr-hop-security.h
+    model/csr-opnet-envelope.h
+    model/csr-opnet-packet-model.h
     model/csr-phy-model.h
     model/csr-mac-core.h
     model/csr-net-device.h
