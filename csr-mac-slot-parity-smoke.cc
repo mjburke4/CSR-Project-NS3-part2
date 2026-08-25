@@ -164,7 +164,9 @@ main ()
   Simulator::Schedule (Seconds (1.0),
                        &CheckReservationPausedInTx,
                        device);
-  Simulator::Schedule (Seconds (1.53),
+  // Exact br_OTA airtime keeps this long-preamble aggregate in Tx until
+  // roughly 1.55 seconds; five Search ticks then expire the reservation.
+  Simulator::Schedule (Seconds (1.65),
                        &CheckReservationResumedAfterTx,
                        device);
   Simulator::Schedule (Seconds (1.8),

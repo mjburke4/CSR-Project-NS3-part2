@@ -105,6 +105,8 @@ CsrAnnotateOpnetEnvelope (Ptr<Packet> packet)
   switch (header.GetType ())
     {
     case CSR_PKT_DATA:
+    case CSR_PKT_PAIRWISE32_DATA:
+    case CSR_PKT_NEIGHBORCAST:
       rootFormat = CsrOpnetPacketFormat::Mac;
       modeledSize =
         CsrOpnetPacketModel::GetFixedSizeBytes (CsrOpnetPacketFormat::Mac) +

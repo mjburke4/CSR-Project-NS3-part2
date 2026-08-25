@@ -130,6 +130,33 @@ enum class CsrGroupSecurityMode : uint8_t
   Group32Encrypt
 };
 
+/** Security modes that use a destination-specific pairwise key stream. */
+enum class CsrPairwiseSecurityMode : uint8_t
+{
+  Pairwise16,
+  Pairwise32,
+  Pairwise32Encrypt
+};
+
+/** Complete legacy HOP-security record produced for one pairwise message. */
+struct CsrProtectedPairwiseMessage
+{
+  uint16_t keyId {0};
+  uint16_t sequence {0};
+  std::vector<uint8_t> record;
+};
+
+/** Result of authenticating and optionally decrypting a pairwise record. */
+struct CsrReceivedPairwiseMessage
+{
+  CsrHopSecurityReceiveStatus status {
+    CsrHopSecurityReceiveStatus::Malformed
+  };
+  uint16_t keyId {0};
+  uint16_t sequence {0};
+  std::vector<uint8_t> payload;
+};
+
 /** Complete legacy HOP-security record produced for one group message. */
 struct CsrProtectedGroupMessage
 {
@@ -233,6 +260,27 @@ public:
     CsrNodeId source,
     uint16_t securityCount,
     const CsrKeyUpdateHeader &header);
+
+  /**
+   * Protect one Pairwise16, Pairwise32, or Pairwise32Encrypt payload.
+   *
+   * The returned record follows the legacy layout: packed 12-bit pairwise
+   * key identifier and sequence, plaintext or ciphertext payload, and the
+   * mode-specific truncated authentication tag.
+   */
+  CsrProtectedPairwiseMessage ProtectPairwiseMessage (
+    CsrNodeId destination,
+    CsrPairwiseSecurityMode mode,
+    uint8_t legacyPacketType,
+    std::span<const uint8_t> payload);
+
+  /** Authenticate and optionally decrypt one complete pairwise record. */
+  CsrReceivedPairwiseMessage ReceivePairwiseMessage (
+    CsrNodeId source,
+    uint16_t securityCount,
+    CsrPairwiseSecurityMode mode,
+    uint8_t legacyPacketType,
+    std::span<const uint8_t> record);
 
   /**
    * Protect one GroupEstablish, Group16, or Group32Encrypt payload.

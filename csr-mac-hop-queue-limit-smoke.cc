@@ -85,7 +85,7 @@ TestMacLimitAndNoDisplacement ()
   Require (sender->GetMac ().GetDataQueueDropCount () == 1,
            "MAC did not count exactly one queue-limit drop");
 
-  Simulator::Stop (Seconds (1.75));
+  Simulator::Stop (Seconds (2.0));
   Simulator::Run ();
 
   Require (g_firstReceivedSequence == 1,
