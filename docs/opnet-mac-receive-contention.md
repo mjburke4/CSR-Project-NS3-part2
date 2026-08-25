@@ -11,7 +11,8 @@ explicit signal lifetime at each receiver.
 
 The boundary is deliberate: MAC acquisition, state, overlap, capture/collision,
 half duplex, slot freezing, and duty-cycle behavior are implemented here. The
-exact probabilistic radio pipeline remains a separate PHY calibration step.
+received-power/noise front end is now source-backed separately; exact
+modulation-table BER and ECC remain PHY work.
 
 ## State and timing mapping
 
@@ -35,11 +36,12 @@ the initial selection. A later candidate replaces it only when it has existed
 longer than 6.63 ms and is stronger, matching the strict comparison in the
 legacy process.
 
-At acquisition, all other active preambles are rejected. The tracked signal is
-marked collided when its power margin over the strongest overlap is below
-10.5 dB. That boundary corresponds to the `br_ber` transition into the
--12-dB JSR bucket. It is intentionally deterministic for now; the complete
-JSR/time-offset BER table has not yet been ported.
+At acquisition, all other active preambles are rejected. Same-rate overlaps
+retain exact JSR and time offset for the future modulation-table lookup. The
+tracked signal remains deterministically collided when its power margin over
+the strongest same-rate overlap is below 10.5 dB. Different-rate overlaps are
+now accumulated in linear watts and affect SNR instead of entering this hard
+collision path.
 
 After Track begins, a later signal can never capture the receiver. It can be
 weak enough for the tracked signal to survive, or strong enough to corrupt it.
@@ -86,16 +88,14 @@ recorded as a miss.
 - long-preamble wake versus short-preamble sleep miss;
 - half-duplex loss during Tx.
 
-The complete regression baseline is 25 focused smoke tests plus
-`csr-mac-demo-split`, all passing (26/26).
+The complete regression baseline is 26 focused smoke tests plus
+`csr-mac-demo-split`, all passing (27/27).
 
 ## Remaining PHY boundary
 
 The following behavior is not claimed by this increment:
 
 - stochastic synchronization threshold variance;
-- receiver-group qualification and received-power calibration;
-- accumulated noise from multiple or different-rate interferers;
 - exact JSR/time-offset BER tables and header-versus-payload treatment;
 - ECC, closure, and error-statistics pipelines;
-- calibrated propagation and the 500/1000-kbps modes.
+- promoted scenario attributes and the 500/1000-kbps modes.

@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-08-24
+Updated: 2026-08-25
 
 ## Scope and confidence limits
 
@@ -22,8 +22,11 @@ source-backed routing audit. The later-supplied `arlSecurity.c`,
 KeyRequest/KeyUpdate security records, exact enabled cryptographic transforms,
 millisecond timer units, the ACK-driven group-key lifecycle, all three
 pairwise and all three group security modes, and the source's key-evolution
-rules. Exact end-to-end certification still requires authoritative
-OPNET/ns-3 trace comparison.
+rules. The later-supplied node/network models, DES configurations, modulation
+tables, and output-vector files additionally establish radio defaults,
+scenario overrides, the BER-table inventory, and aggregate receiver-drop
+baselines. Exact end-to-end certification still requires authoritative
+OPNET/ns-3 event-trace comparison.
 
 ## Current status
 
@@ -35,14 +38,14 @@ OPNET/ns-3 trace comparison.
 | HOP | 93-96% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
 | Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
-| Full MAC including receive contention | 82-90% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, capture/collision, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in the stochastic synchronization threshold and the exact interference/BER tables delegated to the OPNET radio pipelines. |
-| PHY | 20-35% | Exact OPNET header/preamble/payload airtime now feeds the channel, but the current log-distance/PER model still does not reproduce the supplied power, receiver-group, interference, BER, ECC, and closure pipelines. |
+| Full MAC including receive contention | 85-91% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, capture/collision, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and modulation-table outcomes. |
+| PHY | 48-62% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, antenna gains, bandwidth-scaled noise, different-rate accumulation, same-rate JSR/time offset, SNR, and propagation delay are live. BER interval integration, ECC, closure, and stochastic synchronization remain. |
 
 Overall estimates:
 
 - NWK/HOP/MAC protocol-control behavior excluding PHY: 92-96% complete.
 - Whole in-scope radio behavior including PHY, excluding battery and BBN:
-  72-80%
+  77-84%
   complete.
 
 These ranges reflect confidence in observable behavior, not code-volume
@@ -136,6 +139,16 @@ completion.
   followed by exact envelope payload and FCS at the selected data rate.
 - Periodic Idle/Search duty-cycle behavior in which a long preamble can bridge
   sleep to the next wake window while an expired short preamble is missed.
+- Exact non-TMM `br_power` minimum-gain selection across free-space,
+  flat-earth, and ad-hoc WLAN equations, including fractional passband power,
+  configurable antenna gains/heights, and zero-overlap rejection.
+- Source-backed receiver noise and `br_snr` in linear watts, with the
+  -106.975-dBm 1-MHz reference scaling with receiver bandwidth.
+- `br_inoise` rate split: different-rate received powers accumulate as noise,
+  while same-rate overlaps preserve strongest JSR and signed time offset for
+  the modulation-table path.
+- Distance-derived propagation delay and expanded receive diagnostics for
+  power, noise, SNR, band overlap, path model, JSR, and accept/drop.
 
 ## Steps 1-3: admission and enabled hop-security crypto
 
@@ -236,27 +249,46 @@ quiet response interval, while the independently scheduled stop event remains
 the hard bound. The autonomous no-static-route convergence scenario covers
 this ordering.
 
+## Step 7: deterministic PHY front end
+
+The supplied `br_rxgroup`, `br_power`, `br_inoise`, and `br_snr` stages now
+drive live reception. The default profile maps the node-model 30-MHz base
+frequency, 1-MHz bandwidth, one-meter height, and source -106.975-dBm noise
+reference. Promoted validation-scenario values such as 400 MHz and per-node
+altitude remain configurable.
+
+| Legacy source behavior | ns-3 implementation | Verification |
+| --- | --- | --- |
+| Receiver group excludes the transmitting node and channel match requires overlap | Peer self-exclusion plus explicit Tx/Rx passband intersection | Runtime mismatch never enters Track or payload delivery. |
+| `br_power` selects the smallest of three linear path gains | `CsrPhyModel::ComputeFrontEnd()` exact free-space, flat-earth, and ad-hoc WLAN equations | Independent 30.5-MHz and 2.4-GHz model-selection vectors. |
+| In-band power is proportional to overlap/Tx bandwidth before antenna/path gain | Linear-watt band, antenna, and propagation pipeline | Full/half/zero-overlap golden vectors and +6/+3-dB gain vector. |
+| Different payload speeds add received watts to `NOISE_ACCUM` | Per-signal active and peak interference power | Live 128/64-rate overlap produces exact -99.205734-dBm noise and 19.205734-dB SNR. |
+| Same payload speeds use JSR and start-time offset instead of additive noise | Strongest same-rate metadata retained per tracked signal | Live -6-dB jammer at +20 ms preserves background noise and records both values exactly. |
+| `br_snr` divides received watts by background plus accumulated noise | Source-backed linear ratio at every interference boundary | Golden baseline and interfered SNR vectors. |
+
+The complete equations, recovered project attributes, runtime diagnostics, and
+explicit BER boundary are documented in `docs/opnet-phy-front-end.md`.
+
 ## Highest-priority remaining work
 
-1. Audit extra NWK queue wakeups and route/security edge cases with differential
-   traces from identical OPNET/ns-3 topologies, seeds, and loss schedules.
-2. Close exact security-wrapper gaps for remaining HOP control packets and the
-   distinct network-security modes once authoritative packet-type mapping or
-   trace evidence is available.
-3. Port and calibrate the supplied OPNET PHY pipeline, beginning with received
-   power/SNR and receiver-group qualification, then interference, BER, ECC,
-   closure, and error statistics.
+1. Load the supplied modulation tables and port `br_ber`,
+   `br_error_all_stats`, `br_ecc`, and `br_closure`, including separate header
+   and payload intervals.
+2. Build differential traces for identical OPNET/ns-3 topologies, seeds, and
+   traffic, using the recovered `.ov` drop totals as aggregate checkpoints.
+3. Close exact security-wrapper gaps for remaining HOP control packets and the
+   distinct network-security modes once authoritative mapping or trace
+   evidence is available.
 
 ## Deferred PHY/calibration work
 
 - Stochastic synchronization threshold variance around the implemented
-  -11-dB mean and receiver-group qualification beyond state admission.
-- Exact time-offset/JSR modulation tables, accumulated interference from
-  multiple and different-rate signals, and probabilistic capture outcomes.
-- Header versus payload BER, ECC, and closure/error
-  statistics from `br_snr`, `br_inoise`, `br_ber`, `br_rxgroup`, `br_power`,
-  `br_txdel`, `br_ecc`, `br_closure`, and `br_error_all_stats`.
-- Calibrated propagation/power behavior and the missing 500/1000-kbps cases.
+  -11-dB mean.
+- Exact time-offset/JSR modulation-table BER and interval-weighted outcomes.
+- Header versus payload errors, ECC, closure, and error statistics from
+  `br_ber`, `br_error_all_stats`, `br_ecc`, and `br_closure`.
+- Promoted scenario-attribute import, TMM path-gain injection, and the missing
+  500/1000-kbps table cases.
 
 ## Missing high-value scenarios
 
@@ -264,8 +296,8 @@ this ordering.
 2. Route loss and recovery while mixed-DSCP traffic is held in NWK.
 3. Sequence wraparound and cumulative windows older than 64 packets.
 4. Sustained lossy overload across all queue limits with counter invariants.
-5. Three-or-more-signal, different-rate, and time-offset interference cases
-   after the table-driven PHY pipeline is ported.
+5. Three-or-more-signal mixed-rate intervals and multiple competing same-rate
+   JSR records after the table-driven PHY pipeline is ported.
 6. Differential traces using identical OPNET/ns-3 topology, traffic, and seed.
 7. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
    during admission. Focused tests now cover authenticated security-count
@@ -273,8 +305,8 @@ this ordering.
 
 ## Current regression baseline
 
-The complete ns-3 build, all 25 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision (26/26). The packet-envelope
+The complete ns-3 build, all 26 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision (27/27). The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
 size tags. The relay-holdoff test covers command bytes, one-hop no-ACK
@@ -293,6 +325,9 @@ AppNeighborcast, malformed-envelope rejection, and all three live send paths.
 The receive-contention test covers Search/Track timing, simultaneous collision,
 strongest-preamble capture, post-lock interference, RX-induced slot freezing,
 long- versus short-preamble duty-cycle behavior, and half-duplex loss.
+The PHY-front-end test adds independent propagation, overlap, gain, noise, and
+SNR vectors plus live channel-mismatch, different-rate additive-noise, and
+same-rate JSR/time-offset paths.
 The admission test still covers pre-admission DATA
 rejection, reciprocal key exchange,
 ACK-driven outbound-key completion, NeighborCheck activation, route selection,

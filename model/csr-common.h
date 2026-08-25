@@ -28,7 +28,9 @@ static void
 OpenRxCsv (const std::string& path)
 {
   g_rxCsv.open (path, std::ios::out | std::ios::trunc);
-  g_rxCsv << "t,tx,rx,seq,rateKbps,bits,dist_m,pathloss_db,snr_db,per,success\n";
+  g_rxCsv << "t,tx,rx,seq,rateKbps,bits,dist_m,path_model,"
+          << "band_overlap_hz,pathloss_db,rx_power_dbm,noise_dbm,snr_db,"
+          << "same_rate_interference,jsr_db,time_offset_s,per,success\n";
 }
 
 static void

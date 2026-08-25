@@ -161,7 +161,7 @@ class CsrMacCore
   {
     m_discoveryActive = true;
 
-    // Jitter so nodes don’t all HELLO at the exact same instant
+    // Jitter so nodes do not all HELLO at the exact same instant.
     Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
     double jitter = rng->GetValue (0.05, 0.20);
 
@@ -319,7 +319,7 @@ class CsrMacCore
   {
     NeighborInfo &info = m_neighbors[neighbor];
     info.reserveSlot = slot;
-    info.rtCounter   = 20; //4;   // simple “hold” window, tune later if you want
+    info.rtCounter = 20; // Simple hold window; tune later if needed.
 
     std::cout << "[MAC " << m_nodeId << "] Learned neighbor " << neighbor
           << " uses slot " << slot
@@ -351,7 +351,7 @@ class CsrMacCore
   void AgeNeighbors ()
   {
     // Keep neighbor entries; OPNET uses last_rcvd_time as metadata,
-    // not as a hard delete trigger (in the files we’re porting).
+    // not as a hard delete trigger in the supplied source files.
     PrintNeighbors ();
     m_neighborAgingEvent = Simulator::Schedule (Seconds (2.0),
                                               &CsrMacCore::AgeNeighbors, this);
@@ -737,71 +737,3 @@ CsrMacCore::SlotTick ()
 }
 
 // SendHello() moved after CsrNetDevice definition (see below)
-
-// ------------------------------------------------------------
-// PHY model for link quality
-// ------------------------------------------------------------
-
-struct CsrRxDecision
-{
-  bool   success;
-  double pathlossDb;
-  double snrDb;
-  double per;   // packet error rate (0..1)
-};
-
-struct CsrPhyProfile
-{
-  double txPowerDbm      = 0.0;
-  double noiseFloorDbm   = -100.0;
-  double rxBwHz          = 1e6;   // start at 1 MHz (matches the report’s receiver BW usage in MATLAB appendix)
-
-  // PL(d) = refLossDb + 10*n*log10(d/1m)
-  double refLossDb       = 60.0;   // placeholder, tune later
-  double pathlossExp     = 2.0;    // placeholder, tune later
-
-  // Optional: lets you scale your toy distances to "km-ish" without changing topology
-  double distanceScale   = 1.0;
-
-  // Default DACK/ACK/perf-friendly behavior at short range.
-};
-
-// A BER/PER model hook: return PER in [0,1] given (rate, snr, bits).
-using CsrPerModelFn = std::function<double(int /*rateKbps*/, double /*snrDb*/, uint32_t /*nBits*/)>;
-
-// Default placeholder PER model (what you have today, just factored out)
-static double
-CsrPerModelPlaceholder (int rateKbps, double snrDb, uint32_t nBits)
-{
-  double snrThresh;
-  if      (rateKbps <= 8)   snrThresh = -6.0;
-  else if (rateKbps <= 16)  snrThresh = -3.0;
-  else if (rateKbps <= 32)  snrThresh =  0.0;
-  else if (rateKbps <= 64)  snrThresh =  3.0;
-  else                      snrThresh =  6.0;
-
-  double x = (snrDb - snrThresh);
-  double per = 1.0 / (1.0 + std::exp (3.0 * x));
-
-  // crude packet-size effect
-  double sizeFactor = std::min (5.0, std::max (1.0, nBits / 800.0));
-  per = 1.0 - std::pow (1.0 - per, sizeFactor);
-
-  if (per < 0.0) per = 0.0;
-  if (per > 1.0) per = 1.0;
-  return per;
-}
-
-static double
-CsrRateKeyToBps (int rateKbpsKey)
-{
-  switch (rateKbpsKey)
-    {
-    case 8:   return 7812.5;    // 64-chip
-    case 16:  return 15625.0;   // 32-chip
-    case 32:  return 31250.0;   // 16-chip
-    case 64:  return 62500.0;   // 8-chip
-    case 128: return 125000.0;  // 4-chip
-    default:  return rateKbpsKey * 1000.0; // fallback
-    }
-}
