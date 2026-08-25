@@ -52,6 +52,7 @@ main (int argc, char *argv[])
   csnw.refLossDb   = 70.0;
   csnw.pathlossExp = 2.2;
   csnw.distanceScale = 1.0;
+  csnw.propagationModel = CsrPropagationModel::LOG_DISTANCE;
 
   // Apply to all nodes
   dev0->GetPhy().SetProfile(csnw);

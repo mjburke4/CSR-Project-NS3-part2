@@ -119,6 +119,20 @@ public:
     return m_rxMissCount;
   }
 
+  /** Return whether a tracked signal has completed a PHY decision. */
+  bool HasLastRxDecision () const
+  {
+    return m_hasLastRxDecision;
+  }
+
+  /** Return the most recent tracked receive decision and PHY diagnostics. */
+  const CsrRxDecision &GetLastRxDecision () const
+  {
+    NS_ABORT_MSG_IF (!m_hasLastRxDecision,
+                     "CSR receiver has no completed PHY decision");
+    return m_lastRxDecision;
+  }
+
   /** Configure the source-backed JSR boundary used before PHY calibration. */
   void SetCaptureMarginDb (double marginDb)
   {
@@ -181,13 +195,20 @@ private:
     bool ackable {false};
     uint32_t payloadBytes {0};
     uint32_t packetBits {0};
+    CsrTxRadioProfile txRadio;
+    CsrPhyFrontEndResult frontEnd;
     double startSec {0.0};
     double endSec {0.0};
     double preambleEndSec {0.0};
     double pathlossDb {0.0};
     double rxPowerDbm {0.0};
     double snrDb {0.0};
+    double currentInterferenceWatts {0.0};
+    double peakNoiseWatts {0.0};
+    double jsrDb {-std::numeric_limits<double>::infinity ()};
+    double timeOffsetSeconds {0.0};
     bool syncEligible {false};
+    bool sameRateInterference {false};
     bool preambleActive {true};
     bool rejected {false};
     bool tracked {false};
@@ -201,6 +222,11 @@ private:
   void AcquireSignal ();
   void ScheduleAcquisition ();
   void ApplyTrackedInterference (RxSignal &interferer);
+  void ApplyInterferencePair (RxSignal &first, RxSignal &second);
+  void RemoveEndedInterference (const RxSignal &ended);
+  void UpdateSignalNoise (RxSignal &signal);
+  void RecordSameRateInterference (RxSignal &desired,
+                                   const RxSignal &jammer);
   void DeliverTrackedSignal (const RxSignal &signal,
                              const CsrRxDecision &decision);
   void UpdateSyncPresence ();
@@ -225,6 +251,8 @@ private:
   uint64_t                       m_rxCollisionCount {0};
   uint64_t                       m_rxCaptureCount {0};
   uint64_t                       m_rxMissCount {0};
+  bool                           m_hasLastRxDecision {false};
+  CsrRxDecision                  m_lastRxDecision;
   EventId                        m_acquisitionEvent;
   EventId                        m_signalWakeEvent;
   EventId                        m_sleepEvent;
@@ -242,7 +270,6 @@ private:
   double m_wakePhaseSec     { 0.0 };             // randomized per node
   double m_forceAwakeUntilSec { 0.0 };
   double m_syncToTrackSec { 0.00663 };
-  double m_syncSnrThresholdDb {-11.0};
   // br_ber buckets JSR values at -12 dB when jammer power is at least
   // 10.5 dB below the desired signal.  Full table-driven BER is deferred.
   double m_captureMarginDb {10.5};
@@ -459,7 +486,21 @@ CsrNetDevice::SendFramesToPeers (
                   + payloadAndFcsBits / rbps;
 
   double txTime = Simulator::Now ().GetSeconds ();
-  double propDelay = 0.001;
+  double maxPropagationDelaySec = 0.0;
+  for (const auto &peer : m_peers)
+    {
+      if (peer == nullptr || peer->GetId () == m_id)
+        {
+          continue;
+        }
+      double distanceMeters = peer->m_phy.GetDistanceMeters (
+        m_id,
+        peer->GetId ());
+      maxPropagationDelaySec = std::max (
+        maxPropagationDelaySec,
+        distanceMeters /
+          CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
+    }
 
   // For log: peek header
   CsrHeader hdr;
@@ -485,11 +526,13 @@ CsrNetDevice::SendFramesToPeers (
   // HELLO/control transmissions also keep the node awake long enough to hear
   // follow-on traffic.
   double postTxWaitSec = GetPostTxWaitSeconds ();
-  this->ForceAwakeFor (duration + propDelay + postTxWaitSec);
+  this->ForceAwakeFor (duration +
+                       maxPropagationDelaySec +
+                       postTxWaitSec);
 
   std::cout << "[MAC " << m_id
             << "] Post-TX force-awake for "
-            << (duration + propDelay + postTxWaitSec)
+            << (duration + maxPropagationDelaySec + postTxWaitSec)
             << " s"
             << " (POST_TX_WAIT=" << postTxWaitSec << " s)"
             << std::endl;
@@ -513,6 +556,12 @@ CsrNetDevice::SendFramesToPeers (
           continue;
         }
 
+      double distanceMeters = peer->m_phy.GetDistanceMeters (
+        txId,
+        peer->GetId ());
+      double propagationDelaySec = distanceMeters /
+        CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND;
+
       RxSignal signal;
       signal.id = signalId;
       signal.txId = txId;
@@ -524,7 +573,8 @@ CsrNetDevice::SendFramesToPeers (
       signal.ackable = ackable;
       signal.payloadBytes = payloadBytes;
       signal.packetBits = packetBits;
-      signal.startSec = txTime + propDelay;
+      signal.txRadio = m_phy.GetTxRadioProfile ();
+      signal.startSec = txTime + propagationDelaySec;
       signal.endSec = signal.startSec + duration;
       signal.preambleEndSec = signal.startSec + preambleSec;
       signal.frames.reserve (frameCopies.size ());
@@ -533,7 +583,7 @@ CsrNetDevice::SendFramesToPeers (
           signal.frames.push_back (segment->Copy ());
         }
 
-      Simulator::Schedule (Seconds (propDelay), [peer, signal] () {
+      Simulator::Schedule (Seconds (propagationDelaySec), [peer, signal] () {
         peer->BeginReceiveSignal (signal);
       });
     }
@@ -703,6 +753,75 @@ CsrNetDevice::ScheduleAcquisition ()
 }
 
 void
+CsrNetDevice::UpdateSignalNoise (RxSignal &signal)
+{
+  double totalNoiseWatts = signal.frontEnd.backgroundNoiseWatts +
+    signal.currentInterferenceWatts;
+  signal.peakNoiseWatts = std::max (signal.peakNoiseWatts,
+                                    totalNoiseWatts);
+  signal.snrDb = CsrPhyModel::ComputeSnrDb (
+    signal.frontEnd.receivedPowerWatts,
+    totalNoiseWatts);
+}
+
+void
+CsrNetDevice::RecordSameRateInterference (RxSignal &desired,
+                                           const RxSignal &jammer)
+{
+  if (!desired.frontEnd.channelMatched ||
+      !jammer.frontEnd.channelMatched ||
+      desired.frontEnd.receivedPowerWatts <= 0.0 ||
+      jammer.frontEnd.receivedPowerWatts <= 0.0)
+    {
+      return;
+    }
+
+  double jsrDb = jammer.rxPowerDbm - desired.rxPowerDbm;
+  if (!desired.sameRateInterference || jsrDb > desired.jsrDb)
+    {
+      desired.sameRateInterference = true;
+      desired.jsrDb = jsrDb;
+      desired.timeOffsetSeconds = jammer.startSec - desired.startSec;
+    }
+}
+
+void
+CsrNetDevice::ApplyInterferencePair (RxSignal &first,
+                                      RxSignal &second)
+{
+  if (first.rateKbps == second.rateKbps)
+    {
+      RecordSameRateInterference (first, second);
+      RecordSameRateInterference (second, first);
+      return;
+    }
+
+  first.currentInterferenceWatts +=
+    second.frontEnd.receivedPowerWatts;
+  second.currentInterferenceWatts +=
+    first.frontEnd.receivedPowerWatts;
+  UpdateSignalNoise (first);
+  UpdateSignalNoise (second);
+}
+
+void
+CsrNetDevice::RemoveEndedInterference (const RxSignal &ended)
+{
+  for (auto &[signalId, signal] : m_rxSignals)
+    {
+      if (signalId == ended.id || signal.rateKbps == ended.rateKbps)
+        {
+          continue;
+        }
+      signal.currentInterferenceWatts = std::max (
+        0.0,
+        signal.currentInterferenceWatts -
+          ended.frontEnd.receivedPowerWatts);
+      UpdateSignalNoise (signal);
+    }
+}
+
+void
 CsrNetDevice::ApplyTrackedInterference (RxSignal &interferer)
 {
   auto trackedIt = m_rxSignals.find (m_trackedSignalId);
@@ -713,6 +832,12 @@ CsrNetDevice::ApplyTrackedInterference (RxSignal &interferer)
 
   RxSignal &tracked = trackedIt->second;
   interferer.rejected = true;
+  if (!interferer.frontEnd.channelMatched ||
+      tracked.rateKbps != interferer.rateKbps)
+    {
+      return;
+    }
+
   double desiredMarginDb = tracked.rxPowerDbm - interferer.rxPowerDbm;
   if (desiredMarginDb >= m_captureMarginDb)
     {
@@ -729,16 +854,28 @@ CsrNetDevice::BeginReceiveSignal (RxSignal signal)
 {
   double now = Simulator::Now ().GetSeconds ();
   signal.arrivalOrder = ++m_nextRxArrivalOrder;
-  signal.pathlossDb = m_phy.ComputePathlossDb (
-    m_phy.GetDistanceMeters (signal.txId, m_id));
-  signal.rxPowerDbm = signal.txPowerDbm - signal.pathlossDb;
-  signal.snrDb = signal.rxPowerDbm - m_phy.profile.noiseFloorDbm;
-  signal.syncEligible = signal.snrDb >= m_syncSnrThresholdDb;
+  signal.frontEnd = m_phy.ComputeFrontEnd (
+    signal.txPowerDbm,
+    m_phy.GetDistanceMeters (signal.txId, m_id),
+    signal.txRadio);
+  signal.pathlossDb = signal.frontEnd.pathlossDb;
+  signal.rxPowerDbm = signal.frontEnd.receivedPowerDbm;
+  UpdateSignalNoise (signal);
 
   bool hadSync = m_mac.IsSyncPresent ();
   auto [it, inserted] = m_rxSignals.emplace (signal.id, std::move (signal));
   NS_ASSERT_MSG (inserted, "duplicate CSR receive signal identifier");
   RxSignal &incoming = it->second;
+
+  for (auto &[otherId, other] : m_rxSignals)
+    {
+      if (otherId != incoming.id)
+        {
+          ApplyInterferencePair (incoming, other);
+        }
+    }
+  incoming.syncEligible = incoming.frontEnd.channelMatched &&
+    incoming.snrDb >= m_phy.profile.syncSnrThresholdDb;
 
   Simulator::Schedule (
     Seconds (std::max (0.0, incoming.preambleEndSec - now)),
@@ -790,9 +927,16 @@ CsrNetDevice::BeginReceiveSignal (RxSignal signal)
             << " from node " << incoming.txId
             << " seq " << incoming.sequence
             << " power " << incoming.rxPowerDbm << " dBm"
+            << " noise "
+            << CsrPhyModel::WattsToDbm (
+                 incoming.frontEnd.backgroundNoiseWatts +
+                 incoming.currentInterferenceWatts)
+            << " dBm"
             << " snr " << incoming.snrDb << " dB"
             << " state=" << static_cast<int> (m_mac.GetState ())
-            << (incoming.syncEligible ? "" : " below-threshold")
+            << (incoming.frontEnd.channelMatched
+                  ? (incoming.syncEligible ? "" : " below-threshold")
+                  : " channel-mismatch")
             << std::endl;
 }
 
@@ -868,7 +1012,8 @@ CsrNetDevice::AcquireSignal ()
   selected->missedByState = false;
   m_trackedSignalId = selected->id;
 
-  double strongestJammerDbm = -std::numeric_limits<double>::infinity ();
+  double strongestSameRateJammerDbm =
+    -std::numeric_limits<double>::infinity ();
   for (auto &[id, other] : m_rxSignals)
     {
       if (id == selected->id || other.endSec <= now)
@@ -879,13 +1024,19 @@ CsrNetDevice::AcquireSignal ()
         {
           other.rejected = true;
         }
-      strongestJammerDbm = std::max (strongestJammerDbm,
-                                     other.rxPowerDbm);
+      if (other.rateKbps == selected->rateKbps &&
+          other.frontEnd.channelMatched)
+        {
+          strongestSameRateJammerDbm = std::max (
+            strongestSameRateJammerDbm,
+            other.rxPowerDbm);
+        }
     }
 
-  if (std::isfinite (strongestJammerDbm))
+  if (std::isfinite (strongestSameRateJammerDbm))
     {
-      if (selected->rxPowerDbm - strongestJammerDbm >= m_captureMarginDb)
+      if (selected->rxPowerDbm - strongestSameRateJammerDbm >=
+          m_captureMarginDb)
         {
           m_rxCaptureCount++;
         }
@@ -979,31 +1130,42 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
   bool wasTracked = signalId == m_trackedSignalId;
   if (wasTracked)
     {
-      CsrRxDecision decision = m_phy.EvaluateRx (signal.txId,
-                                                 m_id,
-                                                 signal.rateKbps,
-                                                 signal.txPowerDbm,
-                                                 signal.packetBits,
-                                                 m_rng);
+      CsrRxDecision decision = m_phy.EvaluateRx (
+        signal.frontEnd,
+        signal.rateKbps,
+        signal.packetBits,
+        signal.peakNoiseWatts,
+        signal.sameRateInterference,
+        signal.jsrDb,
+        signal.timeOffsetSeconds,
+        m_rng);
       bool stateAllowsDelivery =
         m_mac.GetState () == CsrMacCore::State::TRACK;
       decision.success = decision.success &&
                          stateAllowsDelivery &&
                          !signal.rejected &&
                          !signal.collided;
+      m_lastRxDecision = decision;
+      m_hasLastRxDecision = true;
 
       if (g_rxCsv.is_open ())
         {
-          double distance = m_phy.GetDistanceMeters (signal.txId, m_id);
           g_rxCsv << Simulator::Now ().GetSeconds () << ","
                   << signal.txId << ","
                   << m_id << ","
                   << signal.sequence << ","
                   << signal.rateKbps << ","
                   << signal.packetBits << ","
-                  << distance << ","
+                  << signal.frontEnd.distanceMeters << ","
+                  << static_cast<int> (decision.pathModel) << ","
+                  << signal.frontEnd.bandOverlapHz << ","
                   << decision.pathlossDb << ","
+                  << decision.receivedPowerDbm << ","
+                  << decision.noisePowerDbm << ","
                   << decision.snrDb << ","
+                  << (decision.sameRateInterference ? 1 : 0) << ","
+                  << decision.jsrDb << ","
+                  << decision.timeOffsetSeconds << ","
                   << decision.per << ","
                   << (decision.success ? 1 : 0)
                   << "\n";
@@ -1035,6 +1197,7 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
                 << std::endl;
     }
 
+  RemoveEndedInterference (signal);
   m_rxSignals.erase (it);
   UpdateSyncPresence ();
 
