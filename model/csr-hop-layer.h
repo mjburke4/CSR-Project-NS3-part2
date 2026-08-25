@@ -406,6 +406,21 @@ public:
     return m_resendQueueOverflowCount;
   }
 
+  /** Return whether the local MAC still has discovery/control radio work. */
+  bool IsMacBusyOrQueued () const
+  {
+    if (m_mac == nullptr)
+      {
+        return false;
+      }
+
+    CsrMacCore::State state = m_mac->GetState ();
+    return m_mac->GetQueuedFrameCount () > 0 ||
+           state == CsrMacCore::State::TRACK ||
+           state == CsrMacCore::State::TX ||
+           m_mac->IsSyncPresent ();
+  }
+
   void NotifyMacFrameSent (
     CsrNodeId dest,
     uint16_t seq,
