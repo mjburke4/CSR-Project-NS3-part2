@@ -81,6 +81,38 @@ public:
     return static_cast<CsrRateKey> (m_maxCfgSpeedKbps);
   }
 
+  /** Apply promoted route/link-control limits and propagate them to HOP/MAC. */
+  void ConfigureLinkControl (CsrRateKey minSpeedKbps,
+                             CsrRateKey maxSpeedKbps,
+                             double minPowerDbm,
+                             double maxPowerDbm,
+                             double linkMarginDb)
+  {
+    NS_ABORT_MSG_IF (!CsrIsOperationalRateKey (minSpeedKbps) ||
+                     !CsrIsOperationalRateKey (maxSpeedKbps) ||
+                     minSpeedKbps > maxSpeedKbps,
+                     "CSR NWK link-control speed range is invalid");
+    NS_ABORT_MSG_IF (!std::isfinite (minPowerDbm) ||
+                     !std::isfinite (maxPowerDbm) ||
+                     !std::isfinite (linkMarginDb) ||
+                     minPowerDbm > maxPowerDbm,
+                     "CSR NWK link-control power range is invalid");
+    m_minSpeedKey = minSpeedKbps;
+    m_minCfgSpeedKbps = minSpeedKbps;
+    m_maxCfgSpeedKbps = maxSpeedKbps;
+    m_minTxPowerDbm = minPowerDbm;
+    m_maxTxPowerDbm = maxPowerDbm;
+    m_linkMarginDb = linkMarginDb;
+    if (m_hop != nullptr)
+      {
+        m_hop->ConfigureLinkControl (minSpeedKbps,
+                                     maxSpeedKbps,
+                                     minPowerDbm,
+                                     maxPowerDbm,
+                                     linkMarginDb);
+      }
+  }
+
   void StartDiscovery (Time startDelay, Time duration);
   void ScheduleGatewayStartupDiscovery (
     Time delay = Seconds (10.0),
@@ -944,6 +976,18 @@ public:
       {
         // Final destination: strip header and deliver payload to App
         packetFromHop->RemoveHeader (nh);
+
+        CsrDifferentialTraceEvent event;
+        event.event = "nwk_delivery";
+        event.node = CsrTraceInteger (m_nodeId);
+        event.peer = CsrTraceInteger (hopSrc);
+        event.packetType = "data";
+        event.source = CsrTraceInteger (nwkSrc);
+        event.destination = CsrTraceInteger (nwkDst);
+        event.sizeBytes = CsrTraceInteger (packetFromHop->GetSize ());
+        event.success = "1";
+        event.reason = "delivered";
+        WriteDifferentialTrace (event);
 
         if (!m_rxFromNetCb.IsNull ())
           {
@@ -8418,6 +8462,19 @@ CsrNetLayer::MarkSelectedRouteChanged (
                 << " reason=no-valid-route"
                 << std::endl;
     }
+
+  CsrDifferentialTraceEvent traceEvent;
+  traceEvent.event = "route_change";
+  traceEvent.node = CsrTraceInteger (m_nodeId);
+  traceEvent.destination = CsrTraceInteger (destination);
+  traceEvent.success = selectedRoute != nullptr ? "1" : "0";
+  traceEvent.reason = reason;
+  if (selectedRoute != nullptr)
+    {
+      traceEvent.nextHop = CsrTraceInteger (selectedRoute->nextHop);
+      traceEvent.routeCost = CsrTraceInteger (selectedRoute->cost);
+    }
+  WriteDifferentialTrace (traceEvent);
 
   m_pendingSelectedRouteChanges.insert (
     destination);

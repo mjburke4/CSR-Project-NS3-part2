@@ -11,6 +11,7 @@ build_lib(
   HEADER_FILES
     model/csr-arl-routing-message.h
     model/csr-common.h
+    model/csr-differential-trace.h
     model/csr-wire-format.h
     model/csr-hello-header.h
     model/csr-legacy-crypto.h

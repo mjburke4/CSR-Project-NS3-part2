@@ -124,3 +124,11 @@ Exact 24-bit node-ID wire serialization test:
 4. Expected: PASS: exact CSR 24-bit wire serialization test
 
 The demo includes headers via "ns3/csr-*.h" which resolves to the module.
+
+OPNET scenario import and differential comparison:
+1. Copy csr-opnet-scenario-runner.cc to ns-3-dev/scratch/.
+2. Build: ./ns3 build csr-opnet-scenario-runner
+3. Import a *.nt.m file or project ZIP with utils/import-opnet-scenario.py.
+4. Run and compare with utils/run-opnet-differential.py.
+5. See docs/opnet-scenario-differential-harness.md for schemas, commands,
+   tolerances, artifacts, and the OPNET CSV export boundary.
