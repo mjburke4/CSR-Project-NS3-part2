@@ -1,6 +1,7 @@
 #pragma once
 
 #include "csr-common.h"
+#include "csr-opnet-ber-tables.h"
 
 #include <limits>
 
@@ -19,6 +20,14 @@ enum class CsrPathGainModel
   FLAT_EARTH,
   AD_HOC_WLAN,
   LOG_DISTANCE
+};
+
+/** Visibility gate executed before the remaining receive pipeline. */
+enum class CsrClosureMode
+{
+  NEVER_OCCLUDED,
+  EARTH_LINE_OF_SIGHT,
+  DELEGATE
 };
 
 /** Configurable transmitter values carried with an over-the-air signal. */
@@ -53,6 +62,11 @@ struct CsrPhyProfile
   double txHeightMeters {1.0}; ///< Transmitter altitude/height.
   double rxHeightMeters {1.0}; ///< Receiver altitude/height.
   double syncSnrThresholdDb {-11.0}; ///< Deterministic SYNC threshold mean.
+  double eccThreshold {0.1}; ///< Correctable fraction of non-preamble bits.
+  CsrClosureMode closureMode {
+    CsrClosureMode::EARTH_LINE_OF_SIGHT
+  }; ///< Visibility rule applied before channel matching.
+  double earthRadiusMeters {6371000.0}; ///< Radius used by the LOS fallback.
   CsrPropagationModel propagationModel {
     CsrPropagationModel::OPNET_THREE_PATH
   }; ///< Active propagation equation.
@@ -61,6 +75,57 @@ struct CsrPhyProfile
   double refLossDb {60.0}; ///< Legacy one-meter log-distance loss.
   double pathlossExp {2.0}; ///< Legacy log-distance exponent.
   double distanceScale {1.0}; ///< Scale applied to configured distances.
+};
+
+/** Interference state that remains constant over one receive interval. */
+struct CsrBerInterval
+{
+  double startSec {0.0}; ///< Absolute interval start time.
+  double endSec {0.0}; ///< Absolute interval end time.
+  double noisePowerWatts {0.0}; ///< Background plus different-rate noise.
+  uint32_t collisionCount {0}; ///< Cumulative OPNET collision count.
+  bool sameRateInterference {false}; ///< Select the payload collision table.
+  double jsrDb {-1000.0}; ///< Receiver-global jammer-to-signal ratio.
+  double timeOffsetSeconds {0.0}; ///< Receiver-global signed time offset.
+};
+
+/** Header and payload BER values selected for one interval. */
+struct CsrBerValues
+{
+  double snrDb {-std::numeric_limits<double>::infinity ()}; ///< Raw SNR.
+  double headerEffectiveSnrDb {
+    -std::numeric_limits<double>::infinity ()
+  }; ///< Header SNR after processing gain.
+  double payloadEffectiveSnrDb {
+    -std::numeric_limits<double>::infinity ()
+  }; ///< Payload SNR after processing gain.
+  double headerBer {1.0}; ///< SOF/speed/length BER.
+  double payloadBer {1.0}; ///< Payload/FCS BER.
+};
+
+/** Realized source-style error counts across all receive intervals. */
+struct CsrErrorAllocation
+{
+  uint32_t headerBits {0}; ///< Tested SOF/speed/length bits.
+  uint32_t payloadBits {0}; ///< Tested payload and FCS bits.
+  uint32_t headerErrors {0}; ///< Realized header errors.
+  uint32_t payloadErrors {0}; ///< Realized payload/FCS errors.
+  uint32_t totalErrors {0}; ///< Realized total protected errors.
+  double actualBer {0.0}; ///< Realized BER from the most recent interval.
+  double headerBer {0.0}; ///< Most recently selected header BER.
+  double payloadBer {0.0}; ///< Most recently selected payload BER.
+  double minimumSnrDb {std::numeric_limits<double>::infinity ()}; ///< Worst SNR.
+  double peakNoisePowerWatts {0.0}; ///< Largest interval noise power.
+  double packetErrorProbability {0.0}; ///< Probability of at least one error.
+};
+
+/** Final decision made by the full-packet br_ecc rule. */
+struct CsrEccResult
+{
+  bool accepted {false}; ///< Final packet accept flag.
+  bool eccDropped {false}; ///< Whether ECC, rather than an earlier stage, dropped it.
+  uint32_t protectedBits {0}; ///< Total packet bits excluding preamble.
+  uint32_t correctableBits {0}; ///< Inclusive integer correction limit.
 };
 
 /** Deterministic result of br_power followed by background br_snr. */
@@ -85,6 +150,7 @@ struct CsrPhyFrontEndResult
 struct CsrRxDecision
 {
   bool success {false}; ///< Final delivery decision.
+  bool closure {true}; ///< Whether the pre-channel visibility stage passed.
   bool channelMatched {false}; ///< Whether the channels overlap.
   bool sameRateInterference {false}; ///< Whether JSR lookup is required.
   CsrPathGainModel pathModel {CsrPathGainModel::UNIT_GAIN}; ///< Selected path model.
@@ -92,13 +158,25 @@ struct CsrRxDecision
   double receivedPowerDbm {-std::numeric_limits<double>::infinity ()}; ///< Signal power.
   double noisePowerDbm {-std::numeric_limits<double>::infinity ()}; ///< Peak noise.
   double snrDb {-std::numeric_limits<double>::infinity ()}; ///< Minimum observed SNR.
-  double per {1.0}; ///< Packet error probability.
+  double per {1.0}; ///< Probability of at least one protected-bit error.
   double jsrDb {-std::numeric_limits<double>::infinity ()}; ///< Strongest same-rate JSR.
   double timeOffsetSeconds {0.0}; ///< Same-rate jammer offset.
+  double headerBer {1.0}; ///< BER selected for the last header interval.
+  double payloadBer {1.0}; ///< BER selected for the last payload interval.
+  double actualBer {1.0}; ///< Realized BER over the final allocated interval.
+  uint32_t headerErrors {0}; ///< Allocated SOF/speed/length errors.
+  uint32_t payloadErrors {0}; ///< Allocated payload/FCS errors.
+  uint32_t totalErrors {0}; ///< Allocated protected errors.
+  uint32_t protectedBits {0}; ///< Total bits checked by ECC.
+  uint32_t correctableBits {0}; ///< Inclusive ECC error limit.
+  bool eccDropped {false}; ///< Whether the ECC threshold caused the drop.
 };
 
 /** BER model hook indexed by payload rate, effective SNR, and packet bits. */
 using CsrPerModelFn = std::function<double(int, double, uint32_t)>;
+
+/** Optional externally supplied visibility test. */
+using CsrClosureModelFn = std::function<bool(double, double, double)>;
 
 /** Return the pre-table placeholder error value. */
 inline double
@@ -135,25 +213,43 @@ CsrPerModelPlaceholder (int rateKbps, double snrDb, uint32_t nBits)
   return std::clamp (error, 0.0, 1.0);
 }
 
-/** Convert the legacy rate key to its exact payload bit rate. */
+/** Return the exact four-bit symbol duration used by the source model. */
 inline double
-CsrRateKeyToBps (int rateKbpsKey)
+CsrSymbolDurationSeconds (int rateKbpsKey)
 {
   switch (rateKbpsKey)
     {
     case 8:
-      return 7812.5;
+      return 0.00051;
     case 16:
-      return 15625.0;
+      return 0.000254;
     case 32:
-      return 31250.0;
+      return 0.000126;
     case 64:
-      return 62500.0;
+      return 0.000062;
     case 128:
-      return 125000.0;
+      return 0.000030;
+    case 500:
+      return 4.0 / 500000.0;
+    case 1000:
+      return 4.0 / 1000000.0;
     default:
-      return rateKbpsKey * 1000.0;
+      return 0.00051;
     }
+}
+
+/** Convert the legacy rate key to its exact payload bit rate. */
+inline double
+CsrRateKeyToBps (int rateKbpsKey)
+{
+  return 4.0 / CsrSymbolDurationSeconds (rateKbpsKey);
+}
+
+/** Return true for payload-rate keys that use the DQPSK BER curve. */
+inline bool
+CsrIsDqpskRate (int rateKbpsKey)
+{
+  return rateKbpsKey == 500 || rateKbpsKey == 1000;
 }
 
 /** Source-backed received-power, noise, SNR, and error front end. */
@@ -164,7 +260,7 @@ public:
   static constexpr double PI = 3.14159265358979323846;
 
   CsrPhyProfile profile; ///< Configurable local radio attributes.
-  CsrPerModelFn perModel = CsrPerModelPlaceholder; ///< Current error-model hook.
+  CsrPerModelFn perModel; ///< Optional compatibility BER-model hook.
 
   /** Replace every configurable radio attribute. */
   void SetProfile (const CsrPhyProfile &newProfile)
@@ -183,6 +279,50 @@ public:
   void SetBerModel (CsrPerModelFn function)
   {
     perModel = std::move (function);
+  }
+
+  /** Return whether a compatibility BER hook overrides the OPNET tables. */
+  bool UsesCustomErrorModel () const
+  {
+    return static_cast<bool> (perModel);
+  }
+
+  /** Install the terrain/visibility delegate used by DELEGATE closure. */
+  void SetClosureModel (CsrClosureModelFn function)
+  {
+    m_closureModel = std::move (function);
+  }
+
+  /**
+   * Execute br_closure before channel matching and received-power stages.
+   *
+   * The external OPNET spherical-Earth helper was not supplied.  The built-in
+   * mode therefore uses the standard geometric horizon, while DELEGATE lets a
+   * calibrated terrain or captured OPNET closure model replace it.
+   */
+  bool HasClosure (double distanceMeters,
+                   const CsrTxRadioProfile &transmitter) const
+  {
+    NS_ABORT_MSG_IF (!std::isfinite (distanceMeters) ||
+                     distanceMeters < 0.0,
+                     "CSR PHY closure distance must be finite and nonnegative");
+    if (profile.closureMode == CsrClosureMode::NEVER_OCCLUDED)
+      {
+        return true;
+      }
+    if (profile.closureMode == CsrClosureMode::DELEGATE && m_closureModel)
+      {
+        return m_closureModel (distanceMeters,
+                               transmitter.antennaHeightMeters,
+                               profile.rxHeightMeters);
+      }
+
+    double txHeight = std::max (0.0, transmitter.antennaHeightMeters);
+    double rxHeight = std::max (0.0, profile.rxHeightMeters);
+    double radius = profile.earthRadiusMeters;
+    double txHorizon = std::sqrt (txHeight * (2.0 * radius + txHeight));
+    double rxHorizon = std::sqrt (rxHeight * (2.0 * radius + rxHeight));
+    return distanceMeters <= txHorizon + rxHorizon;
   }
 
   /** Configure a symmetric distance for one node pair. */
@@ -335,6 +475,372 @@ public:
       : -std::numeric_limits<double>::infinity ();
   }
 
+  /** Select source-backed header and payload BER for one interval. */
+  CsrBerValues CalculateBer (
+    const CsrPhyFrontEndResult &frontEnd,
+    int rateKbps,
+    const CsrBerInterval &interval,
+    uint32_t packetBits = 0) const
+  {
+    CsrBerValues result;
+    result.snrDb = ComputeSnrDb (frontEnd.receivedPowerWatts,
+                                 interval.noisePowerWatts);
+    double headerRate = CsrRateKeyToBps (8);
+    double payloadRate = CsrRateKeyToBps (rateKbps);
+    result.headerEffectiveSnrDb = result.snrDb + 10.0 * std::log10 (
+      profile.rxBwHz / (2.0 * headerRate));
+    result.payloadEffectiveSnrDb = result.snrDb + 10.0 * std::log10 (
+      profile.rxBwHz / (2.0 * payloadRate));
+
+    if (perModel)
+      {
+        result.headerBer = std::clamp (
+          perModel (8, result.headerEffectiveSnrDb, 48),
+          0.0,
+          1.0);
+        result.payloadBer = std::clamp (
+          perModel (rateKbps,
+                    result.payloadEffectiveSnrDb,
+                    packetBits),
+          0.0,
+          1.0);
+        return result;
+      }
+
+    if (CsrIsDqpskRate (rateKbps) &&
+        interval.sameRateInterference)
+      {
+        // No DQPSK-specific JSR/offset curves were supplied.  Treat the
+        // recorded same-rate jammer as payload noise while leaving the S0
+        // header on its source collision-table path.
+        double jammerWatts = frontEnd.receivedPowerWatts * std::pow (
+          10.0,
+          interval.jsrDb / 10.0);
+        double payloadSnrDb = ComputeSnrDb (
+          frontEnd.receivedPowerWatts,
+          interval.noisePowerWatts + jammerWatts);
+        result.payloadEffectiveSnrDb = payloadSnrDb + 10.0 * std::log10 (
+          profile.rxBwHz / (2.0 * payloadRate));
+      }
+
+    if (interval.collisionCount == 0)
+      {
+        result.headerBer = CsrOpnetBerTables::GetStandardBer (
+          result.headerEffectiveSnrDb);
+        result.payloadBer = CsrIsDqpskRate (rateKbps)
+          ? CsrOpnetBerTables::GetDqpskBer (
+              result.payloadEffectiveSnrDb)
+          : CsrOpnetBerTables::GetStandardBer (
+              result.payloadEffectiveSnrDb);
+      }
+    else
+      {
+        result.headerBer = CsrOpnetBerTables::GetCollisionBer (
+          8,
+          interval.jsrDb,
+          interval.timeOffsetSeconds,
+          result.headerEffectiveSnrDb);
+        if (CsrIsDqpskRate (rateKbps))
+          {
+            result.payloadBer = CsrOpnetBerTables::GetDqpskBer (
+              result.payloadEffectiveSnrDb);
+          }
+        else
+          {
+            result.payloadBer = interval.sameRateInterference
+              ? CsrOpnetBerTables::GetCollisionBer (
+                  rateKbps,
+                  interval.jsrDb,
+                  interval.timeOffsetSeconds,
+                  result.payloadEffectiveSnrDb)
+              : CsrOpnetBerTables::GetStandardBer (
+                  result.payloadEffectiveSnrDb);
+          }
+      }
+    return result;
+  }
+
+  /** Invert the source binomial CDF using a caller-provided uniform value. */
+  static uint32_t SampleSourceBinomial (uint32_t bits,
+                                        double probability,
+                                        double uniform)
+  {
+    if (bits == 0 || probability <= 0.0)
+      {
+        return 0;
+      }
+    if (probability >= 1.0)
+      {
+        return bits;
+      }
+
+    bool inverted = probability > 0.5;
+    double p = inverted ? 1.0 - probability : probability;
+    double target = std::clamp (uniform,
+                                0.0,
+                                std::nextafter (1.0, 0.0));
+    double accumulated = 0.0;
+    uint32_t errors = 0;
+    for (; errors <= bits; ++errors)
+      {
+        double logProbability =
+          std::lgamma (static_cast<double> (bits) + 1.0) -
+          std::lgamma (static_cast<double> (errors) + 1.0) -
+          std::lgamma (static_cast<double> (bits - errors) + 1.0) +
+          static_cast<double> (errors) * std::log (p) +
+          static_cast<double> (bits - errors) * std::log (1.0 - p);
+        accumulated += std::exp (logProbability);
+        if (accumulated >= target)
+          {
+            break;
+          }
+      }
+    errors = std::min (errors, bits);
+    return inverted ? bits - errors : errors;
+  }
+
+  /** Sample one source-style binomial outcome from the ns-3 stream. */
+  static uint32_t SampleSourceBinomial (
+    uint32_t bits,
+    double probability,
+    const Ptr<UniformRandomVariable> &rng)
+  {
+    if (bits == 0 || probability <= 0.0)
+      {
+        return 0;
+      }
+    if (probability >= 1.0)
+      {
+        return bits;
+      }
+    double uniform = rng == nullptr ? 1.0 : rng->GetValue (0.0, 1.0);
+    return SampleSourceBinomial (bits, probability, uniform);
+  }
+
+  /** Allocate errors interval by interval using br_error_all_stats rules. */
+  CsrErrorAllocation AllocateErrors (
+    const CsrPhyFrontEndResult &frontEnd,
+    double signalStartSec,
+    uint32_t preambleBits,
+    uint32_t packetBits,
+    int rateKbps,
+    const std::vector<CsrBerInterval> &intervals,
+    const Ptr<UniformRandomVariable> &rng) const
+  {
+    CsrErrorAllocation result;
+    double headerRate = CsrRateKeyToBps (8);
+    double payloadRate = CsrRateKeyToBps (rateKbps);
+    double headerStartSec = signalStartSec +
+      static_cast<double> (preambleBits) / headerRate;
+    double payloadStartSec = signalStartSec +
+      static_cast<double> (preambleBits + 48) / headerRate;
+    uint32_t payloadRegionBits = packetBits > preambleBits + 48
+      ? packetBits - preambleBits - 48
+      : 0;
+    double packetEndSec = payloadStartSec +
+      static_cast<double> (payloadRegionBits) / payloadRate;
+    double noErrorProbability = 1.0;
+
+    std::vector<CsrBerInterval> ordered = intervals;
+    std::stable_sort (
+      ordered.begin (),
+      ordered.end (),
+      [] (const CsrBerInterval &left, const CsrBerInterval &right) {
+        return left.startSec < right.startSec;
+      });
+
+    for (const CsrBerInterval &interval : ordered)
+      {
+        double intervalEndSec = std::min (interval.endSec, packetEndSec);
+        if (intervalEndSec < interval.startSec ||
+            interval.startSec >= packetEndSec)
+          {
+            continue;
+          }
+        CsrBerValues ber = CalculateBer (frontEnd,
+                                        rateKbps,
+                                        interval,
+                                        packetBits);
+        result.headerBer = ber.headerBer;
+        result.payloadBer = ber.payloadBer;
+        result.minimumSnrDb = std::min (result.minimumSnrDb, ber.snrDb);
+        result.peakNoisePowerWatts = std::max (
+          result.peakNoisePowerWatts,
+          interval.noisePowerWatts);
+
+        if (intervalEndSec < headerStartSec)
+          {
+            result.actualBer = ber.headerBer;
+            continue;
+          }
+
+        double headerBeginSec = std::max (interval.startSec,
+                                          headerStartSec);
+        double headerEndSec = std::min (intervalEndSec,
+                                        payloadStartSec);
+        uint32_t headerBits = headerEndSec > headerBeginSec
+          ? static_cast<uint32_t> (
+              (headerEndSec - headerBeginSec) * headerRate)
+          : 0;
+        double payloadBeginSec = std::max (interval.startSec,
+                                           payloadStartSec);
+        uint32_t payloadBits = intervalEndSec > payloadBeginSec
+          ? static_cast<uint32_t> (
+              (intervalEndSec - payloadBeginSec) * payloadRate)
+          : 0;
+
+        uint32_t headerErrors = SampleSourceBinomial (
+          headerBits,
+          ber.headerBer,
+          rng);
+        uint32_t payloadErrors = SampleSourceBinomial (
+          payloadBits,
+          ber.payloadBer,
+          rng);
+        result.headerBits += headerBits;
+        result.payloadBits += payloadBits;
+        result.headerErrors += headerErrors;
+        result.payloadErrors += payloadErrors;
+        result.totalErrors += headerErrors + payloadErrors;
+        noErrorProbability *= std::pow (1.0 - ber.headerBer,
+                                        static_cast<double> (headerBits));
+        noErrorProbability *= std::pow (1.0 - ber.payloadBer,
+                                        static_cast<double> (payloadBits));
+
+        uint32_t testedBits = headerBits + payloadBits;
+        if (testedBits > 0)
+          {
+            result.actualBer = static_cast<double> (
+              headerErrors + payloadErrors) / testedBits;
+          }
+        else
+          {
+            result.actualBer = intervalEndSec < payloadStartSec
+              ? ber.headerBer
+              : ber.payloadBer;
+          }
+      }
+
+    if (!std::isfinite (result.minimumSnrDb))
+      {
+        result.minimumSnrDb = -std::numeric_limits<double>::infinity ();
+      }
+    result.packetErrorProbability = std::clamp (
+      1.0 - noErrorProbability,
+      0.0,
+      1.0);
+    return result;
+  }
+
+  /** Apply the exact inclusive, full-packet br_ecc acceptance rule. */
+  CsrEccResult EvaluateEcc (uint32_t packetBits,
+                            uint32_t preambleBits,
+                            uint32_t totalErrors,
+                            bool priorAccepted = true,
+                            bool signalLocked = false,
+                            bool nodeFailed = false) const
+  {
+    CsrEccResult result;
+    result.protectedBits = packetBits > preambleBits
+      ? packetBits - preambleBits
+      : 0;
+    result.correctableBits = static_cast<uint32_t> (
+      profile.eccThreshold * result.protectedBits);
+
+    if (!priorAccepted && !signalLocked)
+      {
+        return result;
+      }
+    if (nodeFailed || signalLocked)
+      {
+        return result;
+      }
+
+    result.accepted = result.protectedBits == 0 ||
+      totalErrors <= result.correctableBits;
+    result.eccDropped = !result.accepted;
+    return result;
+  }
+
+  /** Apply final ECC to an already allocated tracked-signal error record. */
+  CsrRxDecision EvaluateAllocatedRx (
+    const CsrPhyFrontEndResult &frontEnd,
+    uint32_t preambleBits,
+    uint32_t packetBits,
+    const CsrErrorAllocation &errors,
+    const std::vector<CsrBerInterval> &intervals,
+    bool priorAccepted,
+    bool signalLocked,
+    bool nodeFailed) const
+  {
+    CsrEccResult ecc = EvaluateEcc (packetBits,
+                                    preambleBits,
+                                    errors.totalErrors,
+                                    priorAccepted &&
+                                      frontEnd.channelMatched,
+                                    signalLocked,
+                                    nodeFailed);
+
+    CsrRxDecision result;
+    result.success = ecc.accepted;
+    result.channelMatched = frontEnd.channelMatched;
+    result.pathModel = frontEnd.pathModel;
+    result.pathlossDb = frontEnd.pathlossDb;
+    result.receivedPowerDbm = frontEnd.receivedPowerDbm;
+    result.noisePowerDbm = WattsToDbm (errors.peakNoisePowerWatts);
+    result.snrDb = errors.minimumSnrDb;
+    result.per = errors.packetErrorProbability;
+    result.headerBer = errors.headerBer;
+    result.payloadBer = errors.payloadBer;
+    result.actualBer = errors.actualBer;
+    result.headerErrors = errors.headerErrors;
+    result.payloadErrors = errors.payloadErrors;
+    result.totalErrors = errors.totalErrors;
+    result.protectedBits = ecc.protectedBits;
+    result.correctableBits = ecc.correctableBits;
+    result.eccDropped = ecc.eccDropped;
+    for (const CsrBerInterval &interval : intervals)
+      {
+        if (interval.sameRateInterference)
+          {
+            result.sameRateInterference = true;
+            result.jsrDb = interval.jsrDb;
+            result.timeOffsetSeconds = interval.timeOffsetSeconds;
+          }
+      }
+    return result;
+  }
+
+  /** Run interval error allocation and final ECC for a tracked signal. */
+  CsrRxDecision EvaluateRxIntervals (
+    const CsrPhyFrontEndResult &frontEnd,
+    double signalStartSec,
+    uint32_t preambleBits,
+    uint32_t packetBits,
+    int rateKbps,
+    const std::vector<CsrBerInterval> &intervals,
+    bool priorAccepted,
+    bool signalLocked,
+    bool nodeFailed,
+    const Ptr<UniformRandomVariable> &rng) const
+  {
+    CsrErrorAllocation errors = AllocateErrors (frontEnd,
+                                                signalStartSec,
+                                                preambleBits,
+                                                packetBits,
+                                                rateKbps,
+                                                intervals,
+                                                rng);
+    return EvaluateAllocatedRx (frontEnd,
+                                preambleBits,
+                                packetBits,
+                                errors,
+                                intervals,
+                                priorAccepted,
+                                signalLocked,
+                                nodeFailed);
+  }
+
   /** Return the direct model output before processing gain. */
   double EstimateBer (int rateKbps,
                       double snrDb,
@@ -342,7 +848,9 @@ public:
   {
     double ber = perModel
       ? perModel (rateKbps, snrDb, packetBits)
-      : 0.0;
+      : CsrIsDqpskRate (rateKbps)
+          ? CsrOpnetBerTables::GetDqpskBer (snrDb)
+          : CsrOpnetBerTables::GetStandardBer (snrDb);
     return std::clamp (ber, 0.0, 1.0);
   }
 
@@ -404,10 +912,18 @@ public:
     uint32_t packetBits,
     const Ptr<UniformRandomVariable> &rng) const
   {
+    double distanceMeters = GetDistanceMeters (txId, rxId);
+    CsrTxRadioProfile transmitter = GetTxRadioProfile ();
+    if (!HasClosure (distanceMeters, transmitter))
+      {
+        CsrRxDecision result;
+        result.closure = false;
+        return result;
+      }
     CsrPhyFrontEndResult frontEnd = ComputeFrontEnd (
       txPowerDbm,
-      GetDistanceMeters (txId, rxId),
-      GetTxRadioProfile ());
+      distanceMeters,
+      transmitter);
     return EvaluateRx (frontEnd,
                        rateKbps,
                        packetBits,
@@ -429,6 +945,11 @@ private:
                      candidate.rxBwHz <= 0.0 ||
                      candidate.txHeightMeters < 0.0 ||
                      candidate.rxHeightMeters < 0.0 ||
+                     !std::isfinite (candidate.eccThreshold) ||
+                     candidate.eccThreshold < 0.0 ||
+                     candidate.eccThreshold > 1.0 ||
+                     !std::isfinite (candidate.earthRadiusMeters) ||
+                     candidate.earthRadiusMeters <= 0.0 ||
                      candidate.distanceScale <= 0.0,
                      "CSR PHY profile contains an invalid radio attribute");
   }
@@ -499,6 +1020,7 @@ private:
   std::map<std::pair<CsrNodeId, CsrNodeId>, double>
     m_linkDistanceMeters;
   double m_defaultDistanceMeters {1.0};
+  CsrClosureModelFn m_closureModel;
 };
 
 /** One table of BER samples for a payload rate. */

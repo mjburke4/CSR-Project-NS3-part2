@@ -1481,7 +1481,7 @@ private:
     double lastHeardSec {-1.0};
     double lastPathlossDb {std::numeric_limits<double>::quiet_NaN ()};
     double lastSnrDb {std::numeric_limits<double>::quiet_NaN ()};
-    uint8_t speedKey {0};
+    CsrRateKey speedKey {0};
     int16_t rxPowerDbmX10 {0};
     uint8_t activeNodes {0};
     bool wasActiveBeforeLastHello {false};
@@ -2347,7 +2347,7 @@ private:
   uint32_t GetNeighborCount () const;
   uint32_t GetActiveNodeCount () const;
 
-  uint8_t m_minSpeedKey { 8 };  // temporary default; map to your actual rate table later
+  CsrRateKey m_minSpeedKey {8};
 
   // OPNET-ish link_calc configuration.
   // These mirror OPNET attributes: Link Margin, Max Power, Min Power,

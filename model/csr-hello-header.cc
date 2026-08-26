@@ -111,8 +111,14 @@ namespace ns3 {
   void CsrHelloHeader::SetHelloSeq (uint16_t s) { m_helloSeq = s; }
   uint16_t CsrHelloHeader::GetHelloSeq () const { return m_helloSeq; }
 
-  void CsrHelloHeader::SetSpeedKey (uint8_t k) { m_speedKey = k; }
-  uint8_t CsrHelloHeader::GetSpeedKey () const { return m_speedKey; }
+  void CsrHelloHeader::SetSpeedKey (CsrRateKey k)
+  {
+    m_speedKey = CsrEncodeRateKey (k);
+  }
+  CsrRateKey CsrHelloHeader::GetSpeedKey () const
+  {
+    return CsrDecodeRateKey (m_speedKey);
+  }
 
   void CsrHelloHeader::SetRxPowerDbmX10 (int16_t p) { m_rxPowerDbmX10 = p; }
   int16_t CsrHelloHeader::GetRxPowerDbmX10 () const { return m_rxPowerDbmX10; }
@@ -417,7 +423,7 @@ namespace ns3 {
   {
     os << "nodeId=" << m_nodeId
       << " helloSeq=" << m_helloSeq
-      << " speedKey=" << unsigned (m_speedKey)
+      << " speedKey=" << GetSpeedKey ()
       << " rxPwr(dBm*10)=" << m_rxPowerDbmX10
       << " activeNodes=" << unsigned (m_activeNodes)
       << " nodeType=" << unsigned (m_nodeType)

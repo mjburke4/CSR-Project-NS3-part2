@@ -119,6 +119,12 @@ public:
     return m_rxMissCount;
   }
 
+  /** Return the number of packets rejected specifically by br_ecc. */
+  uint64_t GetRxEccDropCount () const
+  {
+    return m_rxEccDropCount;
+  }
+
   /** Return whether a tracked signal has completed a PHY decision. */
   bool HasLastRxDecision () const
   {
@@ -205,8 +211,12 @@ private:
     double snrDb {0.0};
     double currentInterferenceWatts {0.0};
     double peakNoiseWatts {0.0};
+    double intervalStartSec {0.0};
     double jsrDb {-std::numeric_limits<double>::infinity ()};
     double timeOffsetSeconds {0.0};
+    uint32_t collisionCount {0};
+    std::vector<CsrBerInterval> berIntervals;
+    CsrErrorAllocation errorAllocation;
     bool syncEligible {false};
     bool sameRateInterference {false};
     bool preambleActive {true};
@@ -225,6 +235,9 @@ private:
   void ApplyInterferencePair (RxSignal &first, RxSignal &second);
   void RemoveEndedInterference (const RxSignal &ended);
   void UpdateSignalNoise (RxSignal &signal);
+  void CloseSignalInterval (RxSignal &signal, double endSec);
+  void CloseAllSignalIntervals (double endSec);
+  void StartAllSignalIntervals (double startSec);
   void RecordSameRateInterference (RxSignal &desired,
                                    const RxSignal &jammer);
   void DeliverTrackedSignal (const RxSignal &signal,
@@ -251,6 +264,7 @@ private:
   uint64_t                       m_rxCollisionCount {0};
   uint64_t                       m_rxCaptureCount {0};
   uint64_t                       m_rxMissCount {0};
+  uint64_t                       m_rxEccDropCount {0};
   bool                           m_hasLastRxDecision {false};
   CsrRxDecision                  m_lastRxDecision;
   EventId                        m_acquisitionEvent;
@@ -270,9 +284,12 @@ private:
   double m_wakePhaseSec     { 0.0 };             // randomized per node
   double m_forceAwakeUntilSec { 0.0 };
   double m_syncToTrackSec { 0.00663 };
-  // br_ber buckets JSR values at -12 dB when jammer power is at least
-  // 10.5 dB below the desired signal.  Full table-driven BER is deferred.
+  // Retained for explicit compatibility BER hooks.  The production path uses
+  // the source-derived JSR buckets, BER tables, interval errors, and ECC gate.
   double m_captureMarginDb {10.5};
+  bool m_rxSameSpeed {false};
+  double m_rxJsrDb {-1000.0};
+  double m_rxTimeOffsetSeconds {0.0};
   // OPNET br_mac.pr.c:
   // POST_TX_WAIT_TIME = STAY_AWAKE_BASE_TIME + 1.5*active_nodes + STAY_AWAKE_GUARD_TIME
   double m_stayAwakeBaseSec  { 15.0 };
@@ -559,6 +576,15 @@ CsrNetDevice::SendFramesToPeers (
       double distanceMeters = peer->m_phy.GetDistanceMeters (
         txId,
         peer->GetId ());
+      CsrTxRadioProfile txRadio = m_phy.GetTxRadioProfile ();
+      if (!peer->m_phy.HasClosure (distanceMeters, txRadio))
+        {
+          std::cout << "[t=" << txTime << "] RX OCCLUDED at node "
+                    << peer->GetId () << " from node " << txId
+                    << " seq " << sequence
+                    << std::endl;
+          continue;
+        }
       double propagationDelaySec = distanceMeters /
         CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND;
 
@@ -573,7 +599,7 @@ CsrNetDevice::SendFramesToPeers (
       signal.ackable = ackable;
       signal.payloadBytes = payloadBytes;
       signal.packetBits = packetBits;
-      signal.txRadio = m_phy.GetTxRadioProfile ();
+      signal.txRadio = txRadio;
       signal.startSec = txTime + propagationDelaySec;
       signal.endSec = signal.startSec + duration;
       signal.preambleEndSec = signal.startSec + preambleSec;
@@ -765,6 +791,74 @@ CsrNetDevice::UpdateSignalNoise (RxSignal &signal)
 }
 
 void
+CsrNetDevice::CloseSignalInterval (RxSignal &signal, double endSec)
+{
+  double boundedEndSec = std::min (endSec, signal.endSec);
+  if (boundedEndSec <= signal.intervalStartSec)
+    {
+      return;
+    }
+
+  CsrBerInterval interval;
+  interval.startSec = signal.intervalStartSec;
+  interval.endSec = boundedEndSec;
+  interval.noisePowerWatts = signal.frontEnd.backgroundNoiseWatts +
+    signal.currentInterferenceWatts;
+  interval.collisionCount = signal.collisionCount;
+  interval.sameRateInterference = m_rxSameSpeed;
+  interval.jsrDb = m_rxJsrDb;
+  interval.timeOffsetSeconds = m_rxTimeOffsetSeconds;
+  signal.berIntervals.push_back (interval);
+  uint32_t preambleBits = signal.preamble == PREAMBLE_LONG ? 7888 : 104;
+  CsrErrorAllocation allocated = m_phy.AllocateErrors (
+    signal.frontEnd,
+    signal.startSec,
+    preambleBits,
+    signal.packetBits,
+    signal.rateKbps,
+    {interval},
+    m_rng);
+  signal.errorAllocation.headerBits += allocated.headerBits;
+  signal.errorAllocation.payloadBits += allocated.payloadBits;
+  signal.errorAllocation.headerErrors += allocated.headerErrors;
+  signal.errorAllocation.payloadErrors += allocated.payloadErrors;
+  signal.errorAllocation.totalErrors += allocated.totalErrors;
+  signal.errorAllocation.actualBer = allocated.actualBer;
+  signal.errorAllocation.headerBer = allocated.headerBer;
+  signal.errorAllocation.payloadBer = allocated.payloadBer;
+  signal.errorAllocation.minimumSnrDb = std::min (
+    signal.errorAllocation.minimumSnrDb,
+    allocated.minimumSnrDb);
+  signal.errorAllocation.peakNoisePowerWatts = std::max (
+    signal.errorAllocation.peakNoisePowerWatts,
+    allocated.peakNoisePowerWatts);
+  signal.errorAllocation.packetErrorProbability = 1.0 -
+    (1.0 - signal.errorAllocation.packetErrorProbability) *
+    (1.0 - allocated.packetErrorProbability);
+  signal.intervalStartSec = boundedEndSec;
+}
+
+void
+CsrNetDevice::CloseAllSignalIntervals (double endSec)
+{
+  for (auto &[id, signal] : m_rxSignals)
+    {
+      (void) id;
+      CloseSignalInterval (signal, endSec);
+    }
+}
+
+void
+CsrNetDevice::StartAllSignalIntervals (double startSec)
+{
+  for (auto &[id, signal] : m_rxSignals)
+    {
+      (void) id;
+      signal.intervalStartSec = std::min (startSec, signal.endSec);
+    }
+}
+
+void
 CsrNetDevice::RecordSameRateInterference (RxSignal &desired,
                                            const RxSignal &jammer)
 {
@@ -789,13 +883,34 @@ void
 CsrNetDevice::ApplyInterferencePair (RxSignal &first,
                                       RxSignal &second)
 {
+  double now = Simulator::Now ().GetSeconds ();
+  if (!first.frontEnd.channelMatched ||
+      !second.frontEnd.channelMatched ||
+      first.endSec <= now ||
+      second.endSec <= now)
+    {
+      return;
+    }
+
+  first.collisionCount++;
+  second.collisionCount++;
   if (first.rateKbps == second.rateKbps)
     {
+      m_rxSameSpeed = true;
+      const RxSignal &stronger = first.rxPowerDbm > second.rxPowerDbm
+        ? first
+        : second;
+      const RxSignal &weaker = first.rxPowerDbm > second.rxPowerDbm
+        ? second
+        : first;
+      m_rxJsrDb = weaker.rxPowerDbm - stronger.rxPowerDbm;
+      m_rxTimeOffsetSeconds = weaker.startSec - stronger.startSec;
       RecordSameRateInterference (first, second);
       RecordSameRateInterference (second, first);
       return;
     }
 
+  m_rxSameSpeed = false;
   first.currentInterferenceWatts +=
     second.frontEnd.receivedPowerWatts;
   second.currentInterferenceWatts +=
@@ -854,15 +969,18 @@ CsrNetDevice::BeginReceiveSignal (RxSignal signal)
 {
   double now = Simulator::Now ().GetSeconds ();
   signal.arrivalOrder = ++m_nextRxArrivalOrder;
+  double distanceMeters = m_phy.GetDistanceMeters (signal.txId, m_id);
   signal.frontEnd = m_phy.ComputeFrontEnd (
     signal.txPowerDbm,
-    m_phy.GetDistanceMeters (signal.txId, m_id),
+    distanceMeters,
     signal.txRadio);
   signal.pathlossDb = signal.frontEnd.pathlossDb;
   signal.rxPowerDbm = signal.frontEnd.receivedPowerDbm;
+  signal.intervalStartSec = now;
   UpdateSignalNoise (signal);
 
   bool hadSync = m_mac.IsSyncPresent ();
+  CloseAllSignalIntervals (now);
   auto [it, inserted] = m_rxSignals.emplace (signal.id, std::move (signal));
   NS_ASSERT_MSG (inserted, "duplicate CSR receive signal identifier");
   RxSignal &incoming = it->second;
@@ -874,6 +992,7 @@ CsrNetDevice::BeginReceiveSignal (RxSignal signal)
           ApplyInterferencePair (incoming, other);
         }
     }
+  StartAllSignalIntervals (now);
   incoming.syncEligible = incoming.frontEnd.channelMatched &&
     incoming.snrDb >= m_phy.profile.syncSnrThresholdDb;
 
@@ -1126,31 +1245,44 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
       return;
     }
 
+  double now = Simulator::Now ().GetSeconds ();
+  CloseAllSignalIntervals (now);
   RxSignal signal = it->second;
   bool wasTracked = signalId == m_trackedSignalId;
   if (wasTracked)
     {
-      CsrRxDecision decision = m_phy.EvaluateRx (
-        signal.frontEnd,
-        signal.rateKbps,
-        signal.packetBits,
-        signal.peakNoiseWatts,
-        signal.sameRateInterference,
-        signal.jsrDb,
-        signal.timeOffsetSeconds,
-        m_rng);
+      uint32_t preambleBits = signal.preamble == PREAMBLE_LONG
+        ? 7888
+        : 104;
       bool stateAllowsDelivery =
         m_mac.GetState () == CsrMacCore::State::TRACK;
-      decision.success = decision.success &&
-                         stateAllowsDelivery &&
-                         !signal.rejected &&
-                         !signal.collided;
+      bool priorAccepted = stateAllowsDelivery && !signal.rejected;
+      CsrRxDecision decision = m_phy.EvaluateAllocatedRx (
+        signal.frontEnd,
+        preambleBits,
+        signal.packetBits,
+        signal.errorAllocation,
+        signal.berIntervals,
+        priorAccepted,
+        false,
+        false);
+      decision.closure = true;
+      if (m_phy.UsesCustomErrorModel ())
+        {
+          // Existing MAC-state tests use a zero-error hook to isolate the
+          // pre-table collision gate from stochastic PHY behavior.
+          decision.success = decision.success && !signal.collided;
+        }
       m_lastRxDecision = decision;
       m_hasLastRxDecision = true;
+      if (decision.eccDropped)
+        {
+          m_rxEccDropCount++;
+        }
 
       if (g_rxCsv.is_open ())
         {
-          g_rxCsv << Simulator::Now ().GetSeconds () << ","
+          g_rxCsv << now << ","
                   << signal.txId << ","
                   << m_id << ","
                   << signal.sequence << ","
@@ -1167,6 +1299,15 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
                   << decision.jsrDb << ","
                   << decision.timeOffsetSeconds << ","
                   << decision.per << ","
+                  << decision.headerBer << ","
+                  << decision.payloadBer << ","
+                  << decision.actualBer << ","
+                  << decision.headerErrors << ","
+                  << decision.payloadErrors << ","
+                  << decision.totalErrors << ","
+                  << decision.protectedBits << ","
+                  << decision.correctableBits << ","
+                  << (decision.eccDropped ? 1 : 0) << ","
                   << (decision.success ? 1 : 0)
                   << "\n";
         }
@@ -1199,6 +1340,7 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
 
   RemoveEndedInterference (signal);
   m_rxSignals.erase (it);
+  StartAllSignalIntervals (now);
   UpdateSyncPresence ();
 
   if (wasTracked && m_mac.GetState () != CsrMacCore::State::TX)
@@ -1663,6 +1805,8 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
             case 32:
             case 64:
             case 128:
+            case 500:
+            case 1000:
               return header.GetSpeedKey ();
             default:
               return 8;
@@ -1734,8 +1878,14 @@ CsrMacCore::FitsConcatFrame (Ptr<Packet> frame,
 {
   int aggregateRate = std::min (frameRateKbps, currentRateKbps);
   uint32_t limit = GetConcatByteLimit (aggregateRate);
-  return limit > 0 &&
-         byteCount + CsrGetOpnetWireSize (frame) < limit;
+  if (limit == 0)
+    {
+      // The source material does not provide high-rate concatenation limits.
+      // Transmit the queue head alone instead of inventing a capacity or
+      // repeatedly rescheduling an otherwise valid high-rate frame.
+      return byteCount == 0;
+    }
+  return byteCount + CsrGetOpnetWireSize (frame) < limit;
 }
 
 PreambleType
@@ -1787,7 +1937,7 @@ CsrMacCore::DoTx ()
 
   std::vector<SelectedTxFrame> selected;
   uint32_t byteCount = 0;
-  int aggregateRateKbps = 128;
+  int aggregateRateKbps = 1000;
   bool packingStopped = false;
   bool concatenate = m_ackQueue.size () + m_queue.size () > 1;
 
@@ -1933,7 +2083,7 @@ CsrMacCore::DoTx ()
       if (header.HasLinkControl ())
         {
           header.SetLinkControl (
-            static_cast<uint8_t> (aggregateRateKbps),
+            static_cast<CsrRateKey> (aggregateRateKbps),
             aggregateTxPowerDbm,
             header.GetRxPowerDbm ());
         }

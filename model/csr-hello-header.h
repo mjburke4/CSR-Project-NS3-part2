@@ -67,8 +67,8 @@ public:
   void SetHelloSeq (uint16_t s);
   uint16_t GetHelloSeq () const;
 
-  void SetSpeedKey (uint8_t k);
-  uint8_t GetSpeedKey () const;
+  void SetSpeedKey (CsrRateKey k);
+  CsrRateKey GetSpeedKey () const;
 
   void SetRxPowerDbmX10 (int16_t p);   // dBm * 10 to keep it integer
   int16_t GetRxPowerDbmX10 () const;
