@@ -38,14 +38,14 @@ OPNET/ns-3 event-trace comparison.
 | HOP | 93-96% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
 | Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
-| Full MAC including receive contention | 85-91% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, capture/collision, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and modulation-table outcomes. |
-| PHY | 48-62% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, antenna gains, bandwidth-scaled noise, different-rate accumulation, same-rate JSR/time offset, SNR, and propagation delay are live. BER interval integration, ECC, closure, and stochastic synchronization remain. |
+| Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and differential traces. |
+| PHY | 82-90% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, gains, bandwidth-scaled noise, mixed-/same-rate interference, exact modulation curves, interval errors, ECC, closure ordering, and final accept/drop are live. Remaining uncertainty is threshold variance, opaque off-grid interpolation, external LOS/TMM closure, scenario import, and trace calibration. |
 
 Overall estimates:
 
 - NWK/HOP/MAC protocol-control behavior excluding PHY: 92-96% complete.
 - Whole in-scope radio behavior including PHY, excluding battery and BBN:
-  77-84%
+  86-91%
   complete.
 
 These ranges reflect confidence in observable behavior, not code-volume
@@ -149,6 +149,17 @@ completion.
   the modulation-table path.
 - Distance-derived propagation delay and expanded receive diagnostics for
   power, noise, SNR, band overlap, path model, JSR, and accept/drop.
+- Exact standard CSR curve and all 4,910 supplied JSR/half-chip collision
+  curves, with a reproducible binary-table importer and exact sample storage.
+- Source-exact four-bit symbol rates, processing gain, header/payload table
+  selection, and receiver-global same-speed/JSR/offset behavior.
+- Old-state interval closure before interference changes, source inverse-CDF
+  binomial sampling, preamble exclusion, separate 48-bit header accounting,
+  and payload/FCS error allocation.
+- Full-packet ECC with the recovered 0.1 threshold, inclusive truncated error
+  limit, prior-rejection preservation, and ECC-specific drop counting.
+- Closure before propagation/channel/power/MAC effects, with never-occluded,
+  geometric Earth-LOS, and injectable terrain/reference modes.
 
 ## Steps 1-3: admission and enabled hop-security crypto
 
@@ -236,7 +247,7 @@ delivery events.
 | `SYNC2TRACK_MIN` is 0.00663 s and synchronization requires the source threshold | Scheduled acquisition over sync-eligible preambles with the deterministic -11-dB mean threshold | Acquisition cannot occur at 5 ms and has occurred by 10 ms. |
 | Search starts with the earliest signal; a later mature and stronger preamble may replace it | Per-receiver `RxSignal` registry ordered by start time and arrival order | Simultaneous strong/weak scenario delivers only the strongest mature candidate. |
 | Track rejects new synchronization attempts while the tracked packet remains exposed to interference | Fixed tracked-signal identity and post-lock jammer processing | A later, stronger signal cannot capture and corrupts the tracked packet. |
-| Comparable overlaps collide; sufficiently weak interference falls in the source's -12-dB JSR bucket | Deterministic 10.5-dB capture boundary pending table-driven BER | Equal-power signals collide; a 20-dB stronger signal captures. |
+| Comparable overlaps collide; sufficiently weak interference falls in the source's -12-dB JSR bucket | Selected overlaps proceed through exact JSR/offset BER and full-packet ECC; only explicit test hooks retain the old hard gate | Equal-power overlap is ECC-dropped while a weak selected jammer remains decodable. |
 | `tslot_tasks()` changes counters only in Search with no `SYNC_PRES` | Tick-by-tick local Tx countdown and neighbor reservation decay gates | A tracked reception freezes and later resumes a pending transmission. |
 | Tx is half duplex and returns to Search after OTA completion | `NotifyPhyTxStart()` / `FinishTx()` plus state-gated receive delivery | A receiver cannot decode an overlapping frame while transmitting. |
 | Long preamble supports duty-cycled discovery; short preamble must arrive during an awake window | Periodic wake phase, Idle/Search transitions, and preamble-survival check | Long preamble bridges a 500-ms sleep interval; short preamble records one miss. |
@@ -269,13 +280,34 @@ altitude remain configurable.
 The complete equations, recovered project attributes, runtime diagnostics, and
 explicit BER boundary are documented in `docs/opnet-phy-front-end.md`.
 
+## Step 8: modulation BER, interval errors, ECC, and closure
+
+The supplied binary modulation tables and final receive stages now drive live
+accept/drop behavior. The generated runtime data contains the standard CSR and
+DQPSK curves plus all 4,910 spread-rate collision curves without requiring
+OPNET at simulation time.
+
+| Legacy source behavior | ns-3 implementation | Verification |
+| --- | --- | --- |
+| `op_tbl_mod_ber()` selects `csr`, `dqpsk`, or a rate/JSR/half-chip curve | Exact embedded samples, source JSR thresholds, circular signed-offset quantization, endpoint clamp, and linear interpolation | Independent standard, DQPSK, and all-five-spread-rate collision goldens plus boundary tests. |
+| Header rate is S0; payload uses `4 / symbol_duration` | Exact non-rounded rate and processing-gain helpers shared by airtime and BER | All seven rates and gains match independent numeric vectors. |
+| `NUM_COLLS > 0` always selects a collision preamble; only same-speed payload selects a collision curve | Per-interval cumulative collision and shared receiver same-speed/JSR/offset state | Standard, same-rate, and different-rate selection vectors. |
+| `br_error_all_stats` closes the old BER interval before a change | Live per-signal intervals are sampled before interference state is modified | Split, truncation, boundary, cap, and short-jammer tests. |
+| One inverse-CDF binomial draw per nontrivial header/payload region | Log-gamma source sampler, including `p > 0.5` inversion | Independent uniform-to-error golden outcomes. |
+| Preamble excluded; 48-bit header separated; payload includes FCS | Explicit timing boundaries and source integer truncation | Preamble/FCS and combined header/payload assertions. |
+| `br_ecc` accepts at `errors <= int(0.1 * protected_bits)` | Full-packet inclusive ECC, prior reject/lock/failure preservation, and ECC-drop counter | At-limit/over-limit and side-effect matrix. |
+| Closure runs before channel, power, interference, synchronization, or MAC | Sender-side visibility gate with never, Earth-LOS, and delegated modes | Failed closure produces no receive decision or delivery effect. |
+| A selected collision is not intrinsically invalid | Exact BER/error/ECC outcome replaces the production hard-collision gate | Live weak collision succeeds and equal-power collision is rejected by ECC. |
+
+The complete table inventory, importer, equations, ordering, and explicit
+external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
+
 ## Highest-priority remaining work
 
-1. Load the supplied modulation tables and port `br_ber`,
-   `br_error_all_stats`, `br_ecc`, and `br_closure`, including separate header
-   and payload intervals.
-2. Build differential traces for identical OPNET/ns-3 topologies, seeds, and
+1. Build differential traces for identical OPNET/ns-3 topologies, seeds, and
    traffic, using the recovered `.ov` drop totals as aggregate checkpoints.
+2. Reproduce synchronization-threshold variance and import promoted scenario
+   radio/power/link-margin attributes for calibrated runs.
 3. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
@@ -284,11 +316,13 @@ explicit BER boundary are documented in `docs/opnet-phy-front-end.md`.
 
 - Stochastic synchronization threshold variance around the implemented
   -11-dB mean.
-- Exact time-offset/JSR modulation-table BER and interval-weighted outcomes.
-- Header versus payload errors, ECC, closure, and error statistics from
-  `br_ber`, `br_error_all_stats`, `br_ecc`, and `br_closure`.
-- Promoted scenario-attribute import, TMM path-gain injection, and the missing
-  500/1000-kbps table cases.
+- Authoritative off-grid `op_tbl_mod_ber()` behavior if an OPNET probe becomes
+  available; current lookups use endpoint clamp and arithmetic interpolation.
+- Promoted scenario-attribute import and exact external Earth-LOS/TMM
+  injection.
+- Authoritative same-rate DQPSK collision curves, if they exist outside the
+  supplied archive; current 500/1000-kbit/s overlaps treat the recorded jammer
+  as payload noise and retain the DQPSK curve.
 
 ## Missing high-value scenarios
 
@@ -297,7 +331,7 @@ explicit BER boundary are documented in `docs/opnet-phy-front-end.md`.
 3. Sequence wraparound and cumulative windows older than 64 packets.
 4. Sustained lossy overload across all queue limits with counter invariants.
 5. Three-or-more-signal mixed-rate intervals and multiple competing same-rate
-   JSR records after the table-driven PHY pipeline is ported.
+   JSR records under the recovered receiver-global last-collision state.
 6. Differential traces using identical OPNET/ns-3 topology, traffic, and seed.
 7. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
    during admission. Focused tests now cover authenticated security-count
@@ -305,8 +339,8 @@ explicit BER boundary are documented in `docs/opnet-phy-front-end.md`.
 
 ## Current regression baseline
 
-The complete ns-3 build, all 26 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision (27/27). The packet-envelope
+The CSR module build, all 27 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision (28/28). The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
 size tags. The relay-holdoff test covers command bytes, one-hop no-ACK
@@ -327,7 +361,10 @@ strongest-preamble capture, post-lock interference, RX-induced slot freezing,
 long- versus short-preamble duty-cycle behavior, and half-duplex loss.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and
-same-rate JSR/time-offset paths.
+same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table
+vectors, interpolation/quantization boundaries, source rates and processing
+gain, interval truncation, binomial outcomes, ECC ordering, closure modes, and
+live selected-collision acceptance and rejection.
 The admission test still covers pre-admission DATA
 rejection, reciprocal key exchange,
 ACK-driven outbound-key completion, NeighborCheck activation, route selection,

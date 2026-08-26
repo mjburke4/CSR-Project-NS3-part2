@@ -948,7 +948,7 @@ CsrHopLayer::ApplyLinkControl (
     }
 
   header.SetLinkControl (
-    static_cast<uint8_t> (selected.speedKbps),
+    static_cast<CsrRateKey> (selected.speedKbps),
     selected.txPowerDbm,
     selected.rxPowerDbm);
 }
@@ -1120,7 +1120,7 @@ CsrHopLayer::SendSnmp (CsrNodeId hopDestination, Ptr<Packet> payload)
   header.SetType (CSR_PKT_SNMP);
   header.SetDestType (CSR_DEST_UNICAST);
   header.SetLinkControl (
-    static_cast<uint8_t> (m_minSpeed),
+    static_cast<CsrRateKey> (m_minSpeed),
     m_maxPower,
     m_rxS0Base + m_linkMargin);
 

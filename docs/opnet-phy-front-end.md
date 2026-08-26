@@ -14,8 +14,9 @@ This increment ports the deterministic radio stages that precede BER and ECC:
 4. `br_snr.ps.c` linear-power noise accumulation and SNR;
 5. distance-based propagation delay feeding the existing MAC signal lifetime.
 
-The source's modulation-table BER, header/payload error accounting, ECC,
-closure, and final error statistics remain a separate increment.
+The subsequent BER/ECC increment now completes modulation-table lookup,
+header/payload interval errors, closure, and final acceptance. See
+`docs/opnet-phy-ber-ecc.md`.
 
 ## Recovered project configuration
 
@@ -86,16 +87,18 @@ signals are handled by payload rate:
 
 | Overlap | Runtime treatment | Downstream use |
 | --- | --- | --- |
-| Different rate | Add the other received power in watts to `NOISE_ACCUM`; track peak total noise and minimum SNR | Current error hook and future interval BER accounting |
-| Same rate | Do not add power to noise; retain strongest jammer-to-signal ratio and signed start-time offset | Future `csr_*dBJSR_*ChipOff` modulation-table lookup |
+| Different rate | Add the other received power in watts to `NOISE_ACCUM`; track peak total noise and minimum SNR | Interval SNR and standard payload BER |
+| Same spread rate (8-128 kbit/s) | Do not add power to noise; retain strongest jammer-to-signal ratio and signed start-time offset | Exact `csr_*dBJSR_*ChipOff` table lookup |
+| Same DQPSK rate (500/1000 kbit/s) | Retain the strongest jammer-to-signal ratio and derive its payload-noise contribution | `dqpsk` lookup at the interference-adjusted payload SNR |
 
 This preserves the otherwise surprising split in `br_inoise`: a same-rate
 jammer can corrupt a frame without changing the SNR reported by `br_snr`.
-
-Until the supplied modulation tables are connected, the MAC keeps its
-deterministic 10.5-dB same-rate collision/capture boundary. That boundary is
-an explicit compatibility approximation and is not counted as completed BER
-parity. Different-rate interference no longer enters that hard-collision path.
+The DQPSK adjustment is payload-local because the supplied archive contains no
+500/1000-kbit/s JSR/offset collision tables; the S0 header remains on its
+collision-table path.
+The live modulation-table and ECC path now decides whether a selected collided
+frame survives. The deterministic hard-collision boundary remains only when a
+test explicitly installs a compatibility BER hook.
 
 ## Runtime diagnostics
 
@@ -105,7 +108,8 @@ Every completed tracked signal now retains a `CsrRxDecision` with:
 - path loss and received power;
 - peak noise and minimum SNR;
 - same-rate classification, JSR, and time offset;
-- error probability and final delivery decision.
+- selected header/payload BER, realized interval errors, ECC capacity/drop,
+  error probability, and final delivery decision.
 
 The receive CSV contains the same fields, including band overlap and path-model
 identifier. This gives the later differential-trace tooling direct
@@ -128,11 +132,8 @@ only aggregate receiver-drop vectors rather than per-packet PHY intermediates.
 
 ## Remaining PHY boundary
 
-- Load all `csr` and `csr_<rate>_<JSR>_<chip-offset>` modulation tables.
-- Apply processing gain and separate preamble/header versus payload BER.
-- Integrate errors over each interference/SNR time interval rather than using
-  the current peak-noise compatibility value.
-- Port `br_error_all_stats`, `br_ecc`, and `br_closure` accept/drop ordering.
 - Reproduce the normal synchronization-threshold variance around -11 dB.
+- Probe the opaque OPNET off-grid BER-table interpolation behavior.
+- Supply exact external spherical-Earth/TMM closure when available.
 - Apply the promoted Min/Max Power, Link Margin, and ECC threshold through a
   scenario-level configuration importer or explicit ns-3 scenario setup.

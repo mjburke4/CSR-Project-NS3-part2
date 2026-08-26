@@ -30,7 +30,9 @@ OpenRxCsv (const std::string& path)
   g_rxCsv.open (path, std::ios::out | std::ios::trunc);
   g_rxCsv << "t,tx,rx,seq,rateKbps,bits,dist_m,path_model,"
           << "band_overlap_hz,pathloss_db,rx_power_dbm,noise_dbm,snr_db,"
-          << "same_rate_interference,jsr_db,time_offset_s,per,success\n";
+          << "same_rate_interference,jsr_db,time_offset_s,per,header_ber,"
+          << "payload_ber,actual_ber,header_errors,payload_errors,total_errors,"
+          << "protected_bits,correctable_bits,ecc_drop,success\n";
 }
 
 static void
@@ -335,7 +337,7 @@ public:
        << " hasGroupSecurity=" << m_hasGroupSecurity
        << " type=" << unsigned(m_type)
        << " destType=" << unsigned(m_destType)
-       << " speedKey=" << unsigned(m_speedKey);
+       << " speedKey=" << GetSpeedKey ();
 
     if (m_hasLinkControl)
       {
@@ -422,8 +424,8 @@ public:
   void SetDestType (uint8_t v)  { m_destType = v; }
   uint8_t GetDestType () const  { return m_destType; }
 
-  void SetSpeedKey (uint8_t v)  { m_speedKey = v; }
-  uint8_t GetSpeedKey () const  { return m_speedKey; }
+  void SetSpeedKey (CsrRateKey v) { m_speedKey = CsrEncodeRateKey (v); }
+  CsrRateKey GetSpeedKey () const { return CsrDecodeRateKey (m_speedKey); }
 
   void SetSecurityCount (uint16_t value)
   {
@@ -437,11 +439,11 @@ public:
   void SetHasGroupSecurity (bool value) { m_hasGroupSecurity = value; }
   bool HasGroupSecurity () const { return m_hasGroupSecurity; }
 
-  void SetLinkControl (uint8_t speedKey,
+  void SetLinkControl (CsrRateKey speedKey,
                        double txPowerDbm,
                        double rxPowerDbm)
   {
-    m_speedKey = speedKey;
+    m_speedKey = CsrEncodeRateKey (speedKey);
     m_txPowerDbmX10 = static_cast<int16_t> (
       std::round (txPowerDbm * 10.0));
     m_rxPowerDbmX10 = static_cast<int16_t> (
