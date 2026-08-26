@@ -13,6 +13,13 @@ using CsrNodeId = uint32_t;
 /** Legacy payload-rate key expressed in kbit/s. */
 using CsrRateKey = uint16_t;
 
+/** Runtime rate sets available to the CSR stack. */
+enum class CsrRateProfile
+{
+  LEGACY_SOURCE_EXACT, ///< Source-exact 8-128-kbit/s spread-rate set.
+  EXTENDED_DQPSK      ///< Add owner-confirmed 500/1000-kbit/s modes.
+};
+
 // These ns-3 headers are compact compatibility envelopes, not the OPNET
 // packet's 16-bit OTA Speed field.  Preserve their existing one-byte layout
 // by assigning otherwise-unused wire codes to the two high-rate keys.
@@ -22,6 +29,73 @@ static constexpr uint8_t CSR_RATE_CODE_1000_KBPS = 0x82;
 static constexpr CsrNodeId CSR_NODE_ID_MAX = 0x00ffffffu;
 static constexpr CsrNodeId CSR_BROADCAST_ID = CSR_NODE_ID_MAX;
 static constexpr uint32_t CSR_NODE_ID_WIRE_SIZE = 3;
+
+/**
+ * Check whether a rate key is valid for live radio operation.
+ *
+ * Arbitrary one-byte values remain serializable for packet-format tests and
+ * unknown legacy metadata, but only these seven values have defined airtime,
+ * link-control, and BER behavior.
+ *
+ * @param rateKbps Candidate payload rate in kbit/s.
+ * @return True when the live stack implements the rate.
+ */
+inline bool
+CsrIsOperationalRateKey (CsrRateKey rateKbps)
+{
+  switch (rateKbps)
+    {
+    case 8:
+    case 16:
+    case 32:
+    case 64:
+    case 128:
+    case 500:
+    case 1000:
+      return true;
+    default:
+      return false;
+    }
+}
+
+/**
+ * Return the default maximum rate for a runtime profile.
+ *
+ * @param profile Requested legacy or owner-confirmed extended profile.
+ * @return Maximum operational rate in kbit/s.
+ */
+inline CsrRateKey
+CsrGetProfileMaxRateKbps (CsrRateProfile profile)
+{
+  switch (profile)
+    {
+    case CsrRateProfile::LEGACY_SOURCE_EXACT:
+      return 128;
+    case CsrRateProfile::EXTENDED_DQPSK:
+      return 1000;
+    default:
+      NS_ABORT_MSG ("unknown CSR rate profile");
+      return 128;
+    }
+}
+
+/**
+ * Check whether a rate key has an unambiguous compact representation.
+ *
+ * @param rateKbps Candidate payload-rate key.
+ * @return True when CsrEncodeRateKey can encode the value.
+ */
+inline bool
+CsrCanEncodeRateKey (CsrRateKey rateKbps)
+{
+  if (rateKbps == 500 || rateKbps == 1000)
+    {
+      return true;
+    }
+  return rateKbps <= 255 &&
+         rateKbps != CSR_RATE_CODE_500_KBPS &&
+         rateKbps != CSR_RATE_CODE_1000_KBPS;
+}
 
 /**
  * Check whether a value can be represented by a legacy CSR node-ID field.
@@ -78,8 +152,8 @@ CsrEncodeRateKey (CsrRateKey rateKbps)
     {
       return CSR_RATE_CODE_1000_KBPS;
     }
-  NS_ABORT_MSG_IF (rateKbps > 255,
-                   "unsupported CSR payload-rate key");
+  NS_ABORT_MSG_IF (!CsrCanEncodeRateKey (rateKbps),
+                   "unsupported or ambiguous CSR payload-rate key");
   return static_cast<uint8_t> (rateKbps);
 }
 

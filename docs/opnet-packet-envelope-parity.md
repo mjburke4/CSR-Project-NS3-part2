@@ -1,6 +1,6 @@
 # OPNET packet and control-envelope parity
 
-Updated: 2026-08-24
+Updated: 2026-08-26
 
 ## Scope
 
@@ -61,7 +61,9 @@ The executable wrapper, not format names alone, determines the modeled size:
 `br_mac.pr.c` concatenates packet objects through an OPNET segmentation
 buffer.  There is no supplied extra segment header, so an aggregate is the
 strict sum of its member envelope sizes.  The 16-segment cap and per-rate byte
-limits are then applied to that sum.
+limits are then applied to that sum. The supplied code defines packing limits
+only for 8-128 kbit/s. The owner-confirmed extended 500/1000 profile therefore
+transmits one valid queue head at a time instead of inventing a capacity.
 
 Enabled security records are charged in addition to their fixed OPNET control
 wrapper:
@@ -100,7 +102,9 @@ The exact serializer now also drives source-derived OTA duration: the preamble,
 SOF, speed, and length fields use the S0 chip duration from `br_txdel.ps.c`,
 while the inherited payload and 32-bit FCS use the selected payload rate. The
 MAC receive model now covers acquisition, collision/capture, half duplex,
-slot-counter freezing, and duty-cycle wake behavior. This still does not make
-the PHY source-faithful: received power, receiver grouping, accumulated
-interference, BER, ECC, closure, and the 500/1000-kbps modes remain explicitly
-deferred to the calibrated PHY step.
+slot-counter freezing, and duty-cycle wake behavior. Received power, receiver
+qualification, interference, exact table samples, interval errors, ECC, and
+closure are now live. The default remains the source-exact 8-128-kbit/s rate
+set; the actual radio's 500/1000-kbit/s modes are available through the
+explicit owner-confirmed `EXTENDED_DQPSK` profile. Both automatic selection
+and explicit high-rate transmissions must be within that active profile.

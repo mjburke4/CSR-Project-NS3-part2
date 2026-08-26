@@ -1,6 +1,6 @@
 # OPNET PHY front-end parity
 
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 ## Scope
 
@@ -89,13 +89,15 @@ signals are handled by payload rate:
 | --- | --- | --- |
 | Different rate | Add the other received power in watts to `NOISE_ACCUM`; track peak total noise and minimum SNR | Interval SNR and standard payload BER |
 | Same spread rate (8-128 kbit/s) | Do not add power to noise; retain strongest jammer-to-signal ratio and signed start-time offset | Exact `csr_*dBJSR_*ChipOff` table lookup |
-| Same DQPSK rate (500/1000 kbit/s) | Retain the strongest jammer-to-signal ratio and derive its payload-noise contribution | `dqpsk` lookup at the interference-adjusted payload SNR |
+| Owner-confirmed extended DQPSK rate (500/1000 kbit/s) | Retain the strongest jammer-to-signal ratio and derive its payload-noise contribution | `dqpsk` lookup at the interference-adjusted payload SNR |
 
 This preserves the otherwise surprising split in `br_inoise`: a same-rate
 jammer can corrupt a frame without changing the SNR reported by `br_snr`.
 The DQPSK adjustment is payload-local because the supplied archive contains no
 500/1000-kbit/s JSR/offset collision tables; the S0 header remains on its
-collision-table path.
+collision-table path. This rule belongs to the opt-in owner-confirmed extended
+profile. It is not claimed as an exact branch of the supplied `br_inoise` or
+`br_ber` C files.
 The live modulation-table and ECC path now decides whether a selected collided
 frame survives. The deterministic hard-collision boundary remains only when a
 test explicitly installs a compatibility BER hook.

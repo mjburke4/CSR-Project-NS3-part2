@@ -39,6 +39,48 @@ public:
     m_nodeId = id;
   }
 
+  /**
+   * Select the legacy source-exact or owner-confirmed extended rate set.
+   *
+   * The setting propagates to HOP and MAC when those layers are attached.
+   *
+   * @param profile Runtime payload-rate profile.
+   */
+  void SetRateProfile (CsrRateProfile profile)
+  {
+    SetMaxSpeedKbps (CsrGetProfileMaxRateKbps (profile));
+  }
+
+  /** @return Active NWK/HOP/MAC payload-rate profile. */
+  CsrRateProfile GetRateProfile () const
+  {
+    return m_maxCfgSpeedKbps > 128
+      ? CsrRateProfile::EXTENDED_DQPSK
+      : CsrRateProfile::LEGACY_SOURCE_EXACT;
+  }
+
+  /**
+   * Set the configured legacy Max Speed attribute.
+   *
+   * @param rateKbps Maximum operational payload rate in kbit/s.
+   */
+  void SetMaxSpeedKbps (CsrRateKey rateKbps)
+  {
+    NS_ABORT_MSG_IF (!CsrIsOperationalRateKey (rateKbps),
+                     "CSR NWK maximum speed is not operationally defined");
+    m_maxCfgSpeedKbps = rateKbps;
+    if (m_hop != nullptr)
+      {
+        m_hop->SetMaxSpeedKbps (rateKbps);
+      }
+  }
+
+  /** @return Configured maximum route/link-control rate in kbit/s. */
+  CsrRateKey GetMaxSpeedKbps () const
+  {
+    return static_cast<CsrRateKey> (m_maxCfgSpeedKbps);
+  }
+
   void StartDiscovery (Time startDelay, Time duration);
   void ScheduleGatewayStartupDiscovery (
     Time delay = Seconds (10.0),
@@ -691,6 +733,8 @@ public:
 
     if (m_hop != nullptr)
       {
+        m_hop->SetMaxSpeedKbps (
+          static_cast<CsrRateKey> (m_maxCfgSpeedKbps));
         // Data/control payloads from HOP up to NWK
         m_hop->SetRxFromHopCallback (
           MakeCallback (&CsrNetLayer::ReceiveFromHop, this));

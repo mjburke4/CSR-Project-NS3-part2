@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 ## Scope and confidence limits
 
@@ -151,8 +151,9 @@ completion.
   power, noise, SNR, band overlap, path model, JSR, and accept/drop.
 - Exact standard CSR curve and all 4,910 supplied JSR/half-chip collision
   curves, with a reproducible binary-table importer and exact sample storage.
-- Source-exact four-bit symbol rates, processing gain, header/payload table
-  selection, and receiver-global same-speed/JSR/offset behavior.
+- Source-exact four-bit payload intervals, processing gain, and table selection
+  for 8-128 kbit/s, plus exact recovered DQPSK samples in an explicitly
+  owner-confirmed 500/1000-kbit/s extension profile.
 - Old-state interval closure before interference changes, source inverse-CDF
   binomial sampling, preamble exclusion, separate 48-bit header accounting,
   and payload/FCS error allocation.
@@ -285,12 +286,15 @@ explicit BER boundary are documented in `docs/opnet-phy-front-end.md`.
 The supplied binary modulation tables and final receive stages now drive live
 accept/drop behavior. The generated runtime data contains the standard CSR and
 DQPSK curves plus all 4,910 spread-rate collision curves without requiring
-OPNET at simulation time.
+OPNET at simulation time. The DQPSK samples are exact recovered data; their
+mapping to the actual radio's owner-confirmed 500/1000-kbit/s modes is an
+extension because the supplied C pipeline does not reference `dqpsk`.
 
-| Legacy source behavior | ns-3 implementation | Verification |
+| Source or extension behavior | ns-3 implementation | Verification |
 | --- | --- | --- |
-| `op_tbl_mod_ber()` selects `csr`, `dqpsk`, or a rate/JSR/half-chip curve | Exact embedded samples, source JSR thresholds, circular signed-offset quantization, endpoint clamp, and linear interpolation | Independent standard, DQPSK, and all-five-spread-rate collision goldens plus boundary tests. |
-| Header rate is S0; payload uses `4 / symbol_duration` | Exact non-rounded rate and processing-gain helpers shared by airtime and BER | All seven rates and gains match independent numeric vectors. |
+| `op_tbl_mod_ber()` selects `csr` or a spread-rate JSR/half-chip curve | Exact embedded samples, source JSR thresholds, circular signed-offset quantization, endpoint clamp, and linear interpolation | Independent standard and all-five-spread-rate collision goldens plus boundary tests. |
+| Owner-confirmed 500/1000-kbit/s hardware modes use the recovered `dqpsk` table | Opt-in `EXTENDED_DQPSK` profile, exact DQPSK samples, NWK-to-MAC propagation, compact wire codes, and live OTA/ECC path | DQPSK goldens plus live 500/1000 delivery, duration, low-SNR drop, and same-rate overlap. |
+| Header rate is S0; 8-128-kbit/s payload uses source `4 / payload_interval` timing | Exact non-rounded source rates and processing-gain helpers shared by airtime and BER; 500/1000 four-bit accounting intervals are derived from the owner-confirmed bit rates, and reuse of the processing-gain rule is explicit extension behavior | Five source rates plus two extension rates and gains match independent numeric vectors. |
 | `NUM_COLLS > 0` always selects a collision preamble; only same-speed payload selects a collision curve | Per-interval cumulative collision and shared receiver same-speed/JSR/offset state | Standard, same-rate, and different-rate selection vectors. |
 | `br_error_all_stats` closes the old BER interval before a change | Live per-signal intervals are sampled before interference state is modified | Split, truncation, boundary, cap, and short-jammer tests. |
 | One inverse-CDF binomial draw per nontrivial header/payload region | Log-gamma source sampler, including `p > 0.5` inversion | Independent uniform-to-error golden outcomes. |
@@ -321,8 +325,8 @@ external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
 - Promoted scenario-attribute import and exact external Earth-LOS/TMM
   injection.
 - Authoritative same-rate DQPSK collision curves, if they exist outside the
-  supplied archive; current 500/1000-kbit/s overlaps treat the recorded jammer
-  as payload noise and retain the DQPSK curve.
+  supplied archive; the extended 500/1000-kbit/s profile treats the recorded
+  jammer as payload noise and retains the DQPSK curve.
 
 ## Missing high-value scenarios
 
@@ -339,8 +343,8 @@ external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
 
 ## Current regression baseline
 
-The CSR module build, all 27 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision (28/28). The packet-envelope
+The CSR module build, all 28 focused parity smoke tests, and
+`csr-mac-demo-split` pass on this audit revision (29/29). The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
 size tags. The relay-holdoff test covers command bytes, one-hop no-ACK
@@ -365,6 +369,10 @@ same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table
 vectors, interpolation/quantization boundaries, source rates and processing
 gain, interval truncation, binomial outcomes, ECC ordering, closure modes, and
 live selected-collision acceptance and rejection.
+The live high-rate test adds default-profile preservation, NWK-to-MAC extended
+profile propagation, 500-kbit/s scenario caps, exact 500/1000 OTA durations,
+production DQPSK BER and ECC outcomes, same-rate jammer-as-noise ordering, and
+safe one-frame queue progress when no high-rate concat limit is available.
 The admission test still covers pre-admission DATA
 rejection, reciprocal key exchange,
 ACK-driven outbound-key completion, NeighborCheck activation, route selection,

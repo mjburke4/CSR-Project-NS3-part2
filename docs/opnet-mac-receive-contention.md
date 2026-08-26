@@ -1,6 +1,6 @@
 # OPNET MAC receive/contention parity
 
-Updated: 2026-08-24
+Updated: 2026-08-26
 
 ## Scope
 
@@ -11,8 +11,8 @@ explicit signal lifetime at each receiver.
 
 The boundary is deliberate: MAC acquisition, state, overlap, capture/collision,
 half duplex, slot freezing, and duty-cycle behavior are implemented here. The
-received-power/noise front end is now source-backed separately; exact
-modulation-table BER and ECC remain PHY work.
+received-power/noise front end, exact modulation-table BER, interval errors,
+ECC, closure, and final accept/drop ordering are now implemented separately.
 
 ## State and timing mapping
 
@@ -37,11 +37,13 @@ longer than 6.63 ms and is stronger, matching the strict comparison in the
 legacy process.
 
 At acquisition, all other active preambles are rejected. Same-rate overlaps
-retain exact JSR and time offset for the future modulation-table lookup. The
-tracked signal remains deterministically collided when its power margin over
-the strongest same-rate overlap is below 10.5 dB. Different-rate overlaps are
-now accumulated in linear watts and affect SNR instead of entering this hard
-collision path.
+retain exact JSR and time offset for modulation-table lookup. The tracked
+signal records a collision when its power margin over the strongest same-rate
+overlap is below 10.5 dB, but production delivery is decided later by
+BER/error allocation and ECC rather than a hard collision drop. Different-rate
+overlaps accumulate in linear watts and affect SNR. The old deterministic hard
+gate remains only for tests that explicitly install the compatibility error
+hook to isolate MAC state transitions.
 
 After Track begins, a later signal can never capture the receiver. It can be
 weak enough for the tracked signal to survive, or strong enough to corrupt it.
@@ -88,14 +90,15 @@ recorded as a miss.
 - long-preamble wake versus short-preamble sleep miss;
 - half-duplex loss during Tx.
 
-The complete regression baseline is 26 focused smoke tests plus
-`csr-mac-demo-split`, all passing (27/27).
+The complete regression baseline is 28 focused smoke tests plus
+`csr-mac-demo-split`, all passing (29/29).
 
 ## Remaining PHY boundary
 
 The following behavior is not claimed by this increment:
 
 - stochastic synchronization threshold variance;
-- exact JSR/time-offset BER tables and header-versus-payload treatment;
-- ECC, closure, and error-statistics pipelines;
-- promoted scenario attributes and the 500/1000-kbps modes.
+- promoted scenario-attribute import;
+- authoritative off-grid OPNET interpolation and external Earth-LOS/TMM;
+- authoritative DQPSK collision curves. The opt-in owner-confirmed 500/1000
+  kbit/s profile currently reconstructs the recorded jammer as payload noise.
