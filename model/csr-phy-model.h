@@ -213,10 +213,24 @@ CsrPerModelPlaceholder (int rateKbps, double snrDb, uint32_t nBits)
   return std::clamp (error, 0.0, 1.0);
 }
 
-/** Return the exact four-bit symbol duration used by the source model. */
+/**
+ * Return the four-bit payload interval for an operational rate key.
+ *
+ * The 8-128-kbit/s values are source-exact nibble durations. The 500/1000
+ * values are four-bit accounting intervals derived from the owner-confirmed
+ * bit rates; the recovered modem files do not establish their physical DQPSK
+ * symbol framing.
+ */
 inline double
 CsrSymbolDurationSeconds (int rateKbpsKey)
 {
+  NS_ABORT_MSG_IF (
+    rateKbpsKey < 0 ||
+    static_cast<uint64_t> (rateKbpsKey) >
+      std::numeric_limits<CsrRateKey>::max () ||
+    !CsrIsOperationalRateKey (
+      static_cast<CsrRateKey> (rateKbpsKey)),
+    "CSR payload-rate key has no defined interval");
   switch (rateKbpsKey)
     {
     case 8:
@@ -234,7 +248,8 @@ CsrSymbolDurationSeconds (int rateKbpsKey)
     case 1000:
       return 4.0 / 1000000.0;
     default:
-      return 0.00051;
+      NS_ABORT_MSG ("unreachable CSR payload-rate key");
+      return 0.0;
     }
 }
 
@@ -245,7 +260,7 @@ CsrRateKeyToBps (int rateKbpsKey)
   return 4.0 / CsrSymbolDurationSeconds (rateKbpsKey);
 }
 
-/** Return true for payload-rate keys that use the DQPSK BER curve. */
+/** Return true for owner-confirmed high-rate keys using the DQPSK curve. */
 inline bool
 CsrIsDqpskRate (int rateKbpsKey)
 {
@@ -487,6 +502,8 @@ public:
                                  interval.noisePowerWatts);
     double headerRate = CsrRateKeyToBps (8);
     double payloadRate = CsrRateKeyToBps (rateKbps);
+    // br_ber establishes this processing-gain equation for spread rates. The
+    // extended DQPSK path deliberately reuses it as an integration rule.
     result.headerEffectiveSnrDb = result.snrDb + 10.0 * std::log10 (
       profile.rxBwHz / (2.0 * headerRate));
     result.payloadEffectiveSnrDb = result.snrDb + 10.0 * std::log10 (

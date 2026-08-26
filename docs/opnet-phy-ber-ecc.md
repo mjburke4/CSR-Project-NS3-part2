@@ -1,6 +1,6 @@
 # OPNET PHY BER, ECC, and closure parity
 
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 ## Scope
 
@@ -20,9 +20,13 @@ an exact, compact C++ representation of the tables.
 ## Exact modulation tables
 
 The archive contains one standard `csr` curve, one `dqpsk` curve, and 4,910 CSR
-collision curves. `dqpsk` is used for the 500- and 1000-kbit/s payload rates.
-The collision inventory is complete for every supplied spread rate, JSR
-bucket, and half-chip offset:
+collision curves. The supplied C receive pipeline references `csr` and the
+collision family but does not reference `dqpsk`. The project owner confirmed
+that the actual radio has 500- and 1000-kbit/s modes, so the extended runtime
+profile maps those two rates to the exact recovered `dqpsk` curve. That mapping
+is intentional extension behavior, not a source-exact claim. The collision
+inventory is complete for every supplied spread rate, JSR bucket, and half-chip
+offset:
 
 | Rate key | Offset range | Curves per JSR | Total curves |
 | ---: | ---: | ---: | ---: |
@@ -34,6 +38,24 @@ bucket, and half-chip offset:
 
 The DQPSK table contains 161 samples from -20 through 20 dB in 0.25-dB
 increments. No DQPSK-specific JSR/offset collision tables were supplied.
+
+The DQPSK file passes the same binary-integrity checks as the remaining table
+family: its metadata, sample count, file length, and zero trailer are valid;
+all samples are finite and nonnegative; its 146 nonzero values decrease
+strictly and are followed by 15 trailing zeroes. It is less robust than `csr`
+at every shared positive grid point where the DQPSK curve remains nonzero;
+both curves are zero in the high-SNR tail. Representative DQPSK penalties
+relative to `csr` are 1.31 dB at BER 0.1, 2.68 dB at BER 1e-2, and 4.01 dB at
+BER 1e-5.
+Regenerating the C++ data from the supplied ZIP is byte-identical to the
+committed include.
+
+The DQPSK curve reaches 0.6585 at -20 dB and remains above 0.5 through about
+-7.88 dB. That is unusual for conventional bit BER, but it is smooth, the
+file's own display range extends to 0.7, and `br_error_all_stats` explicitly
+implements probabilities above 0.5. The table is therefore treated as an
+exact recovered OPNET table input for this extension, while its independent
+physical bit-error semantics remain unverified.
 
 `utils/import-opnet-modulation-tables.py` accepts either the original ZIP or
 an extracted directory. It validates the binary header, big-endian numeric
@@ -47,25 +69,48 @@ the strongest portable match: endpoint sample clamping and arithmetic linear
 interpolation. On-grid samples remain exact and are tested independently.
 The two display-range values in each OPNET file are not treated as BER clamps.
 
-## Rate and table selection
+## Rate profiles and table selection
 
-The source model derives bit rate from four-bit symbol duration rather than a
-rounded nominal key:
+The source model derives the five spread-rate bit rates from four-bit payload
+intervals rather than rounded nominal keys:
 
-| Key | Symbol duration | Exact payload bit rate | Processing gain at 1 MHz |
+| Key | Four-bit payload interval | Exact payload bit rate | Processing gain at 1 MHz |
 | ---: | ---: | ---: | ---: |
 | 8 | 510 us | 7,843.137255 bps | 18.044801891 dB |
 | 16 | 254 us | 15,748.031496 bps | 15.017437296 dB |
 | 32 | 126 us | 31,746.031746 bps | 11.972805581 dB |
 | 64 | 62 us | 64,516.129032 bps | 8.893017025 dB |
 | 128 | 30 us | 133,333.333333 bps | 5.740312677 dB |
+
+The owner-confirmed extended profile adds two bit rates. Their four-bit
+accounting intervals are derived from those rates:
+
+| Key | Four-bit payload interval | Exact payload bit rate | Processing gain at 1 MHz |
+| ---: | ---: | ---: | ---: |
 | 500 | 8 us | 500,000 bps | 0 dB |
 | 1000 | 4 us | 1,000,000 bps | -3.010299957 dB |
 
-The 500/1000 keys use four bits per 8/4-us DQPSK symbol. The compact ns-3
-compatibility headers still serialize speed in one byte; reserved codes encode
-these two keys without changing the established header size. The fixed OTA
-header continues to account for the source packet's 16-bit Speed field.
+The recovered files do not establish the physical DQPSK symbol framing, so the
+8/4-us values are described only as four-bit payload intervals. The compact
+ns-3 compatibility headers still serialize speed in one byte; reserved codes
+encode these two keys without changing the established header size. Raw
+operational keys 129 and 130 are rejected because they would alias those
+reserved codes. The fixed OTA header continues to account for the source
+packet's 16-bit Speed field.
+
+`LEGACY_SOURCE_EXACT` remains the default and caps both automatic and explicit
+transmission at 128 kbit/s. `EXTENDED_DQPSK` opts into both high rates and
+propagates from NWK through HOP to MAC:
+
+```cpp
+nwk->SetRateProfile (CsrRateProfile::EXTENDED_DQPSK);
+```
+
+Scenarios can retain the extended behavior while capping the advertised and
+selected maximum at 500 kbit/s with `SetMaxSpeedKbps(500)`. The MAC's automatic
+and explicit transmission paths, HOP link control, NWK link-cost calculation,
+routing INFO maximum, OTA duration, BER intervals, and ECC decision then use
+the same configured ceiling.
 
 For raw SNR `snr`, receive bandwidth `bw`, and selected bit rate `r`, the table
 input is:
@@ -74,22 +119,29 @@ input is:
 effective_snr = snr + 10*log10(bw/(2*r))
 ```
 
+This processing-gain equation is source-exact for the 8-128-kbit/s spread
+rates. Reusing it for the DQPSK extension is an explicit integration
+assumption, not an independently recovered high-rate modem equation.
+
 The header always uses the S0 rate. Table selection is:
 
 | Interval state | Header curve | Payload curve |
 | --- | --- | --- |
 | No collision, 8-128 kbit/s | `csr` | `csr` |
-| No collision, 500/1000 kbit/s | `csr` | `dqpsk` |
+| No collision, extended 500/1000 kbit/s | `csr` | `dqpsk` |
 | Same-rate collision, 8-128 kbit/s | 8-kbps JSR/offset curve | matching-rate JSR/offset curve |
-| Same-rate collision, 500/1000 kbit/s | 8-kbps JSR/offset curve | `dqpsk`, with the recorded jammer treated as payload noise |
+| Same-rate collision, extended 500/1000 kbit/s | 8-kbps JSR/offset curve | `dqpsk`, with the recorded jammer treated as payload noise |
 | Different-rate collision | 8-kbps JSR/offset curve | rate's standard curve, with jammer watts included in noise |
 
 JSR uses the asymmetric source boundaries at -10.5, -7.5, -4.5, and -1.5 dB.
-Signed timing is reduced modulo the applicable symbol duration and rounded to
-the nearest one-microsecond half-chip; the endpoint wraps to zero. Receiver
-`same_speed`, JSR, and timing state intentionally retain the source's shared,
-last-collision semantics. For DQPSK, the recorded JSR supplies the jammer power
-because the archive has no corresponding DQPSK collision family.
+For 8-128-kbit/s collision tables, signed timing is reduced modulo the
+applicable payload interval and rounded to the nearest one-microsecond
+half-chip; the endpoint wraps to zero. Receiver `same_speed`, JSR, and timing
+state intentionally retain the source's shared, last-collision semantics. The
+DQPSK payload fallback does not quantize or use that time offset. Instead, the
+recorded JSR supplies jammer power because the archive has no corresponding
+DQPSK collision family. This jammer-as-noise rule is a documented
+extended-profile fallback, not a recovered DQPSK collision equation.
 
 ## Interval error accounting
 
@@ -165,7 +217,8 @@ claiming an unrecovered TMM equation.
 
 `csr-phy-ber-ecc-smoke.cc` covers:
 
-- exact symbol rates and processing gains for all seven rate keys;
+- exact rates and processing gains for five source-exact keys plus two
+  owner-confirmed extension keys;
 - JSR and circular half-chip boundary cases;
 - independent standard, DQPSK, and all-five-rate collision golden values;
 - interpolation and endpoint behavior;
@@ -176,7 +229,18 @@ claiming an unrecovered TMM equation.
 - never, Earth-LOS, delegated, and pre-pipeline failed closure;
 - live selected-collision acceptance and ECC rejection.
 
-The full regression currently contains 27 focused CSR programs plus the demo.
+`csr-live-high-rate-dqpsk-smoke.cc` additionally covers:
+
+- default legacy and opt-in extended profile propagation from NWK to MAC;
+- explicit 500-kbit/s scenario ceilings;
+- live HOP link-control selection at 128, 500, and 1000 kbit/s;
+- exact 500/1000 OTA duration and production DQPSK receive decisions;
+- low-SNR DQPSK error allocation above probability 0.5 and final ECC drop;
+- live equal-power same-rate DQPSK overlap through jammer-as-noise BER/ECC;
+- safe one-frame progress when no high-rate concatenation limit is available;
+- reserved compact-code non-operational and non-encodable classification.
+
+The full regression currently contains 28 focused CSR programs plus the demo.
 
 ## Remaining PHY boundary
 

@@ -23,7 +23,11 @@ public:
   static double GetStandardBer (double effectiveSnrDb);
 
   /**
-   * Look up the DQPSK bit-error rate used by 500 and 1000 kbit/s payloads.
+   * Look up the recovered DQPSK curve used by the extended high-rate profile.
+   *
+   * The curve samples are exact. Their mapping to the owner-confirmed 500 and
+   * 1000-kbit/s hardware modes is an explicit extension because the supplied
+   * C receive pipeline does not reference dqpsk directly.
    *
    * @param effectiveSnrDb Effective Eb/N0-style input in decibels.
    * @return Interpolated BER from the dqpsk table.
@@ -66,10 +70,13 @@ public:
                                     double timeOffsetSeconds);
 
   /**
-   * Return the source-defined duration of one four-bit payload symbol.
+   * Return the four-bit payload interval used by runtime rate accounting.
+   *
+   * The spread-rate intervals are source-defined. The two DQPSK accounting
+   * intervals are derived from the owner-confirmed high-rate bit rates.
    *
    * @param rateKbps Legacy payload-rate key.
-   * @return Symbol duration in seconds.
+   * @return Four-bit payload interval in seconds.
    */
   static double SymbolDurationSeconds (int rateKbps);
 };

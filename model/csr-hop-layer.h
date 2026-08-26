@@ -2,6 +2,7 @@
 #include "csr-common.h"
 #include "csr-hello-header.h"
 #include "csr-hop-security.h"
+#include "csr-mac-core.h"
 #include <algorithm>
 
 class CsrHopLayer : public Object
@@ -28,11 +29,53 @@ public:
 
     if (m_mac != nullptr)
       {
+        m_mac->SetMaxRateKbps (
+          static_cast<CsrRateKey> (m_maxSpeed));
         m_mac->SetTxSentCallback (
           MakeCallback (
             &CsrHopLayer::NotifyMacFrameSent,
             this));
       }
+  }
+
+  /**
+   * Select the legacy source-exact or owner-confirmed extended rate set.
+   *
+   * @param profile Runtime payload-rate profile.
+   */
+  void SetRateProfile (CsrRateProfile profile)
+  {
+    SetMaxSpeedKbps (CsrGetProfileMaxRateKbps (profile));
+  }
+
+  /** @return Active HOP link-control rate profile. */
+  CsrRateProfile GetRateProfile () const
+  {
+    return m_maxSpeed > 128
+      ? CsrRateProfile::EXTENDED_DQPSK
+      : CsrRateProfile::LEGACY_SOURCE_EXACT;
+  }
+
+  /**
+   * Set the configured legacy Max Speed attribute.
+   *
+   * @param rateKbps Maximum operational payload rate in kbit/s.
+   */
+  void SetMaxSpeedKbps (CsrRateKey rateKbps)
+  {
+    NS_ABORT_MSG_IF (!CsrIsOperationalRateKey (rateKbps),
+                     "CSR HOP maximum speed is not operationally defined");
+    m_maxSpeed = rateKbps;
+    if (m_mac != nullptr)
+      {
+        m_mac->SetMaxRateKbps (rateKbps);
+      }
+  }
+
+  /** @return Configured maximum HOP link-control rate in kbit/s. */
+  CsrRateKey GetMaxSpeedKbps () const
+  {
+    return static_cast<CsrRateKey> (m_maxSpeed);
   }
   void SetNodeId (CsrNodeId id)
   {

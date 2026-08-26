@@ -40,6 +40,57 @@ class CsrMacCore
     return m_lastTxRateKbps;
   }
 
+  /**
+   * Select the legacy source-exact or owner-confirmed extended rate set.
+   *
+   * @param profile Runtime payload-rate profile.
+   */
+  void SetRateProfile (CsrRateProfile profile)
+  {
+    SetMaxRateKbps (CsrGetProfileMaxRateKbps (profile));
+  }
+
+  /** @return Active runtime payload-rate profile. */
+  CsrRateProfile GetRateProfile () const
+  {
+    return m_maxRateKbps > 128
+      ? CsrRateProfile::EXTENDED_DQPSK
+      : CsrRateProfile::LEGACY_SOURCE_EXACT;
+  }
+
+  /**
+   * Set the highest operational rate considered by automatic MAC selection.
+   *
+   * This accepts 500 as a scenario maximum even though the extended profile's
+   * default maximum is 1000 kbit/s.
+   *
+   * @param rateKbps Maximum operational rate in kbit/s.
+   */
+  void SetMaxRateKbps (CsrRateKey rateKbps)
+  {
+    NS_ABORT_MSG_IF (!CsrIsOperationalRateKey (rateKbps),
+                     "CSR MAC maximum rate is not operationally defined");
+    m_maxRateKbps = rateKbps;
+  }
+
+  /** @return Highest rate considered by automatic MAC selection. */
+  CsrRateKey GetMaxRateKbps () const
+  {
+    return static_cast<CsrRateKey> (m_maxRateKbps);
+  }
+
+  /**
+   * Check whether the active profile permits an operational rate.
+   *
+   * @param rateKbps Candidate payload rate in kbit/s.
+   * @return True when the rate is defined and does not exceed the ceiling.
+   */
+  bool IsRateEnabled (CsrRateKey rateKbps) const
+  {
+    return CsrIsOperationalRateKey (rateKbps) &&
+           rateKbps <= m_maxRateKbps;
+  }
+
   double GetLastTxPowerDbm () const
   {
     return m_lastTxPowerDbm;
@@ -447,6 +498,7 @@ private:
   uint64_t                            m_longPreambleTxCount {0};
   uint64_t                            m_shortPreambleTxCount {0};
   uint64_t                            m_dataQueueDropCount {0};
+  int                                 m_maxRateKbps {128}; ///< Transmit ceiling.
   int                                 m_lastTxRateKbps {0};
   double                              m_lastTxPowerDbm {0.0};
   int                                 m_scheduledTxSlot {-1};

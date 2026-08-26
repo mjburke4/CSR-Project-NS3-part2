@@ -91,6 +91,25 @@ public:
     return m_mac;
   }
 
+  /**
+   * Configure the MAC-only rate profile for direct device scenarios.
+   *
+   * Full NWK/HOP stacks should set the profile on CsrNetLayer so it propagates
+   * consistently through link control and MAC selection.
+   *
+   * @param profile Runtime payload-rate profile.
+   */
+  void SetRateProfile (CsrRateProfile profile)
+  {
+    m_mac.SetRateProfile (profile);
+  }
+
+  /** @return Active MAC-only payload-rate profile. */
+  CsrRateProfile GetRateProfile () const
+  {
+    return m_mac.GetRateProfile ();
+  }
+
   CsrPhyModel& GetPhy() { return m_phy; }
 
   CsrNodeId GetId () const { return m_id; }
@@ -432,7 +451,15 @@ CsrMacCore::SendHelloInternal (bool reschedule)
 int
 CsrMacCore::SelectRateByPerTarget (CsrNodeId destId, uint32_t nBits, double targetPer) const
 {
-  static const std::vector<int> kRates = { 8, 16, 32, 64, 128 }; // keep consistent with your supported set
+  static const std::vector<int> kRates = {
+    8,
+    16,
+    32,
+    64,
+    128,
+    500,
+    1000
+  };
 
   // Access PHY through the owning device (now safe because this definition is after CsrNetDevice is complete)
   const CsrPhyModel& phy = m_dev->GetPhy ();
@@ -443,6 +470,10 @@ CsrMacCore::SelectRateByPerTarget (CsrNodeId destId, uint32_t nBits, double targ
   int chosen = kRates.front (); // most robust default
   for (int r : kRates)
     {
+      if (r > m_maxRateKbps)
+        {
+          break;
+        }
       double per = phy.EstimatePer (r, snrDb, nBits);
       if (per <= targetPer)
         chosen = r;
@@ -480,6 +511,15 @@ CsrNetDevice::SendFramesToPeers (
   bool ackable)
 {
   NS_ASSERT_MSG (!frames.empty (), "cannot transmit an empty CSR aggregate");
+  NS_ABORT_MSG_IF (rateKbps < 0 ||
+                   static_cast<uint64_t> (rateKbps) >
+                     std::numeric_limits<CsrRateKey>::max () ||
+                   !CsrIsOperationalRateKey (
+                   static_cast<CsrRateKey> (rateKbps)),
+                   "CSR transmission rate has no defined airtime or BER model");
+  NS_ABORT_MSG_IF (!m_mac.IsRateEnabled (
+                     static_cast<CsrRateKey> (rateKbps)),
+                   "CSR transmission rate exceeds the active profile ceiling");
 
   uint32_t payloadBytes = 0;
   std::vector<Ptr<Packet>> frameCopies;
@@ -1818,7 +1858,7 @@ CsrMacCore::SelectQueuedFrameRate (Ptr<Packet> frame,
           return 8;
         }
 
-      int selectedRate = 128;
+      int selectedRate = m_maxRateKbps;
       for (CsrNodeId target : header.EnumerateDestinations ())
         {
           selectedRate = std::min (
