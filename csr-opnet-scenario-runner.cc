@@ -23,6 +23,27 @@ namespace
 
 constexpr const char *SCENARIO_SCHEMA = "csr-opnet-scenario-v1";
 
+// br_app's configured Packet Size is not the size handed to br_Network.
+// It creates a br_Network packet whose total size is configured_size * 8 - 64
+// bits.  Keep that eight-byte source-model exclusion in the modeled packet,
+// rather than compensating for an oversized packet when statistics are read.
+constexpr uint32_t OPNET_APP_SIZE_EXCLUSION_BYTES = 8;
+
+// RngStream's MRG32k3a state requires seed < m2 (4294944443).  The
+// RngSeedManager storage type is wider than the generator's runnable domain.
+constexpr uint32_t NS3_RNG_SEED_MAX = 4294944442U;
+
+class NullStreamBuffer : public std::streambuf
+{
+protected:
+  int overflow (int character) override
+  {
+    return traits_type::eq_int_type (character, traits_type::eof ())
+      ? traits_type::not_eof (character)
+      : character;
+  }
+};
+
 struct ImportedNode
 {
   CsrNodeId id {0};
@@ -195,7 +216,11 @@ LoadScenario (const std::string &path)
           sawRun = true;
           scenario.name = GetField (row, "scenario");
           scenario.durationSeconds = ParseDouble (row, "duration_s");
-          scenario.seed = static_cast<uint32_t> (ParseUnsigned (row, "seed"));
+          const uint64_t seed = ParseUnsigned (row, "seed");
+          NS_ABORT_MSG_IF (
+            seed < 1 || seed > NS3_RNG_SEED_MAX,
+            "scenario seed must be in 1..4294944442");
+          scenario.seed = static_cast<uint32_t> (seed);
           scenario.tmm = ParseUnsigned (row, "tmm") != 0;
           if (!GetField (row, "reservation_control_start_s").empty ())
             {
@@ -226,10 +251,21 @@ LoadScenario (const std::string &path)
           node.xMeters = ParseDouble (row, "x_m");
           node.yMeters = ParseDouble (row, "y_m");
           node.heightMeters = ParseDouble (row, "height_m");
-          node.minSpeedKbps = static_cast<CsrRateKey> (
-            ParseUnsigned (row, "min_speed_kbps"));
-          node.maxSpeedKbps = static_cast<CsrRateKey> (
-            ParseUnsigned (row, "max_speed_kbps"));
+          const uint64_t minSpeedKbps =
+            ParseUnsigned (row, "min_speed_kbps");
+          const uint64_t maxSpeedKbps =
+            ParseUnsigned (row, "max_speed_kbps");
+          NS_ABORT_MSG_IF (
+            minSpeedKbps > std::numeric_limits<CsrRateKey>::max () ||
+              maxSpeedKbps > std::numeric_limits<CsrRateKey>::max (),
+            "scenario link-control speed exceeds the wire-format range");
+          node.minSpeedKbps = static_cast<CsrRateKey> (minSpeedKbps);
+          node.maxSpeedKbps = static_cast<CsrRateKey> (maxSpeedKbps);
+          NS_ABORT_MSG_IF (
+            !CsrIsOperationalRateKey (node.minSpeedKbps) ||
+              !CsrIsOperationalRateKey (node.maxSpeedKbps) ||
+              node.minSpeedKbps > node.maxSpeedKbps,
+            "scenario link-control speed range is invalid");
           node.minPowerDbm = ParseDouble (row, "min_power_dbm");
           node.maxPowerDbm = ParseDouble (row, "max_power_dbm");
           node.linkMarginDb = ParseDouble (row, "link_margin_db");
@@ -250,13 +286,26 @@ LoadScenario (const std::string &path)
           flow.destination = static_cast<CsrNodeId> (destination);
           flow.startSeconds = ParseDouble (row, "flow_start_s");
           flow.intervalSeconds = ParseDouble (row, "flow_interval_s");
-          flow.packetBytes = static_cast<uint32_t> (
-            ParseUnsigned (row, "flow_packet_bytes"));
-          flow.dscp = static_cast<uint8_t> (ParseUnsigned (row, "flow_dscp"));
+          const uint64_t packetBytes =
+            ParseUnsigned (row, "flow_packet_bytes");
+          const uint64_t dscp = ParseUnsigned (row, "flow_dscp");
+          NS_ABORT_MSG_IF (
+            packetBytes > std::numeric_limits<uint32_t>::max (),
+            "scenario flow_packet_bytes exceeds the uint32 packet-size limit");
+          NS_ABORT_MSG_IF (dscp > 7,
+                           "scenario flow_dscp must be in 0..7");
+          const uint32_t minimumConfiguredBytes =
+            OPNET_APP_SIZE_EXCLUSION_BYTES +
+            CsrNetHeader ().GetSerializedSize ();
+          NS_ABORT_MSG_IF (
+            packetBytes < minimumConfiguredBytes,
+            "scenario flow_packet_bytes must be at least "
+              << minimumConfiguredBytes
+              << " bytes (8-byte br_app exclusion plus the CSR NWK header)");
+          flow.packetBytes = static_cast<uint32_t> (packetBytes);
+          flow.dscp = static_cast<uint8_t> (dscp);
           NS_ABORT_MSG_IF (flow.startSeconds < 0.0 ||
-                           flow.intervalSeconds <= 0.0 ||
-                           flow.packetBytes == 0 ||
-                           flow.dscp > 7,
+                           flow.intervalSeconds <= 0.0,
                            "scenario flow contains an invalid value");
           scenario.flows.push_back (flow);
         }
@@ -366,27 +415,57 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
                 ImportedFlow flow,
                 double stopSeconds,
                 uint64_t flowLimit,
+                bool opnetAppGating,
                 std::shared_ptr<uint64_t> sent)
 {
   if (flowLimit != 0 && *sent >= flowLimit)
     {
       return;
     }
-  ++(*sent);
-  CsrDifferentialTraceEvent event;
-  event.event = "app_send";
-  event.node = CsrTraceInteger (flow.source);
-  event.peer = CsrTraceInteger (flow.destination);
-  event.packetType = "data";
-  event.source = CsrTraceInteger (flow.source);
-  event.destination = CsrTraceInteger (flow.destination);
-  event.sizeBytes = CsrTraceInteger (flow.packetBytes);
-  event.detail = "dscp=" + CsrTraceInteger (flow.dscp);
-  WriteDifferentialTrace (event);
-  network->Send (flow.destination,
-                 flow.dscp,
-                 Create<Packet> (flow.packetBytes),
-                 true);
+
+  // br_app schedules its next generator interrupt before applying these
+  // gates.  A discovery/no-route attempt is therefore not traffic generated
+  // and does not stop later attempts from occurring.
+  bool admitted = !opnetAppGating ||
+    (!network->IsDiscoveryActive () &&
+     network->HasRelayRoute (flow.destination) &&
+     network->CanAdmitApplicationPacket (flow.destination));
+  if (admitted)
+    {
+      ++(*sent);
+      // The recovered br_app creates a total br_Network packet of
+      // configured_size * 8 - 64 bits.  CsrNetLayer::Send adds our seven-byte
+      // CsrNetHeader, so subtract both that header and br_app's eight-byte
+      // source-model exclusion from the configured size here.  This makes the
+      // packet carried by NWK exactly flow.packetBytes - 8 bytes on the wire.
+      const uint32_t networkPacketBytes =
+        flow.packetBytes - OPNET_APP_SIZE_EXCLUSION_BYTES;
+      const uint32_t networkHeaderBytes =
+        CsrNetHeader ().GetSerializedSize ();
+      NS_ABORT_MSG_IF (networkPacketBytes < networkHeaderBytes,
+                       "configured flow packet is too small for CSR NWK");
+      Ptr<Packet> payload =
+        Create<Packet> (networkPacketBytes - networkHeaderBytes);
+      CsrDifferentialAppTag appTag (payload->GetUid ());
+      payload->AddPacketTag (appTag);
+      CsrDifferentialTraceEvent event;
+      event.event = "app_send";
+      event.node = CsrTraceInteger (flow.source);
+      event.peer = CsrTraceInteger (flow.destination);
+      event.packetType = "data";
+      event.source = CsrTraceInteger (flow.source);
+      event.destination = CsrTraceInteger (flow.destination);
+      // Packet UIDs are observation-only correlation keys.  Packet::Copy()
+      // preserves them through the CSR stack, allowing exact delay matching
+      // without adding bytes to the modeled packet.
+      event.sequence = CsrTraceInteger (appTag.GetSequence ());
+      // app_send and nwk_delivery both report the actual total br_Network
+      // packet size, including the NWK header and excluding br_app's 64 bits.
+      event.sizeBytes = CsrTraceInteger (networkPacketBytes);
+      event.detail = "dscp=" + CsrTraceInteger (flow.dscp);
+      WriteDifferentialTrace (event);
+      network->Send (flow.destination, flow.dscp, payload, true);
+    }
 
   double next = Simulator::Now ().GetSeconds () + flow.intervalSeconds;
   if (next <= stopSeconds && (flowLimit == 0 || *sent < flowLimit))
@@ -397,6 +476,7 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
                            flow,
                            stopSeconds,
                            flowLimit,
+                           opnetAppGating,
                            sent);
     }
 }
@@ -412,6 +492,9 @@ main (int argc, char *argv[])
   double stopSeconds = 0.0;
   bool dutyCycling = true;
   bool gatewayDiscovery = true;
+  bool opnetAppGating = true;
+  bool aggregateTraceOnly = false;
+  bool quietModelLogs = false;
   uint64_t flowLimit = 0;
 
   CommandLine command (__FILE__);
@@ -420,6 +503,18 @@ main (int argc, char *argv[])
   command.AddValue ("stop", "Stop time in seconds (0 uses imported duration)", stopSeconds);
   command.AddValue ("dutyCycling", "Enable OPNET duty cycling", dutyCycling);
   command.AddValue ("gatewayDiscovery", "Schedule gateway startup discovery", gatewayDiscovery);
+  command.AddValue (
+    "opnetAppGating",
+    "Suppress generated traffic during discovery or without a route",
+    opnetAppGating);
+  command.AddValue (
+    "aggregateTraceOnly",
+    "Write only app/delivery/drop events needed for aggregate comparison",
+    aggregateTraceOnly);
+  command.AddValue (
+    "quietModelLogs",
+    "Suppress per-event model stdout while retaining the final summary",
+    quietModelLogs);
   command.AddValue ("flowLimit", "Maximum packets per flow (0 is unlimited)", flowLimit);
   command.Parse (argc, argv);
 
@@ -433,9 +528,17 @@ main (int argc, char *argv[])
     }
   NS_ABORT_MSG_IF (!std::isfinite (stopSeconds) || stopSeconds <= 0.0,
                    "scenario stop time must be positive");
-  RngSeedManager::SetSeed (scenario.seed == 0 ? 1 : scenario.seed);
+  RngSeedManager::SetSeed (scenario.seed);
   RngSeedManager::SetRun (1);
+  SetDifferentialTraceAggregateOnly (aggregateTraceOnly);
   OpenDifferentialTraceCsv (tracePath);
+
+  NullStreamBuffer nullStreamBuffer;
+  std::streambuf *originalCoutBuffer = nullptr;
+  if (quietModelLogs)
+    {
+      originalCoutBuffer = std::cout.rdbuf (&nullStreamBuffer);
+    }
 
   std::map<CsrNodeId, RuntimeNode> nodes;
   for (const ImportedNode &configuration : scenario.nodes)
@@ -516,6 +619,7 @@ main (int argc, char *argv[])
                            flow,
                            stopSeconds,
                            flowLimit,
+                           opnetAppGating,
                            sent);
     }
 
@@ -523,6 +627,10 @@ main (int argc, char *argv[])
   Simulator::Run ();
   Simulator::Destroy ();
   CloseDifferentialTraceCsv ();
+  if (originalCoutBuffer != nullptr)
+    {
+      std::cout.rdbuf (originalCoutBuffer);
+    }
   std::cout << "CSR differential scenario complete: " << scenario.name
             << " nodes=" << nodes.size ()
             << " flows=" << scenario.flows.size ()

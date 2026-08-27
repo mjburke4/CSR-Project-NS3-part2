@@ -311,10 +311,17 @@ external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
 ## Step 9: scenario import and differential traces
 
 The binary Modeler scenario boundary is now explicit and executable. The
-versioned importer recovers file-local promoted attribute IDs, so it handles
-both the normal CSR schema and the shifted one-node schema without hard-coded
-field numbers. All eight supplied validation `*.nt.m` models and their paired
-DES environments import successfully.
+versioned importer recovers the complete contiguous promoted-attribute schema
+and file-local IDs, so it handles normal, shifted one-node, and older/mobile
+campus records without hard-coded field numbers. All 12 recovered campus
+`*.nt.m` models and their paired DES environments import successfully.
+`--infer-gateway-flows` reproduces the recovered
+`SEND_ONLY_TO_GATEWAY=1` destination pattern by creating promoted-attribute
+flows from every non-gateway node to the single gateway. It fails if a sender
+lacks promoted application timing/size fields. The deterministic DSCP defaults
+to 5 but is an explicit modeling choice: recovered `br_app` uses process-level
+`DSCP`/`DSCP_pct` inputs probabilistically, so the importer exposes
+`--gateway-flow-dscp` and records the selected value.
 
 The ns-3 runner creates the corresponding node roles, coordinates, link
 distances, rate/power limits, link margin, ECC threshold, frequency, duration,
@@ -326,12 +333,31 @@ tolerances, and reports missing, extra, replaced, or field-mismatched events.
 Every run records normalized inputs, a JSON report, logs, hashes, and exact
 commands in a manifest.
 
-No historical result database is present in the supplied archives. If an
-`.ov` output-vector database is recovered, it can provide aggregate count/drop
-checkpoints rather than packet-level event ordering. An OPNET CSV event export
-is still required to populate the reference side of a full differential
-certification. Exact formats, commands, assumptions, and this boundary are
-documented in `docs/opnet-scenario-differential-harness.md`.
+Historical result databases are now available and executable evidence. The
+read-only extractor decoded 10 complete Modeler `*.ov` files containing 109
+vectors and 10,900 buckets, with exact paired-`*.pb.m` identity checks. Two
+partial fragments with zero-length vectors are rejected in strict mode rather
+than treated as results. The aggregate workflow runs an imported scenario,
+derives source-equivalent ns-3 buckets, compares exact statistic/unit/
+aggregation identities, and records all commands, hashes, and statuses.
+
+Full two-node, symmetrical hidden-node, and multihop comparisons align all 800
+selected points in each case without missing or extra timestamps. The
+recovered application packet size matches exactly with the source-backed
+`configured_bytes - 8` modeled network packet. Traffic and delay do not: the two-node and hidden-node
+runs each have 700 numeric mismatches, while the multihop run has 665 numeric
+mismatches plus 20 correctly skipped no-sample values. These are calibration
+failures at exact tolerance, not claimed parity. The hidden-node ECC-drop
+probe also exposes a deliberately unresolved identity mapping: Modeler records
+10.84105 dropped packets/s on average, while ns-3's narrow `reason=ecc` event
+classification records 0.0028833 packets/s. It is excluded from the default
+equivalence set until prior-stage rejection accounting is reconciled. The
+`*.ov` files contain bucket aggregates rather than packet-level ordering, so
+an instrumented OPNET CSV event export remains necessary for reservation/
+collision event certification. Exact formats, commands, measured results, and
+this evidence boundary are documented in
+`docs/opnet-scenario-differential-harness.md` and
+`docs/opnet-aggregate-comparison.md`.
 
 The first reference case is now fully specified and locally executable. It
 uses the recovered three-node validation geometry, two 600-byte sends at 60 s,
@@ -346,11 +372,17 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Execute the prepared reservation/collision case in licensed Modeler, retain
-   its CSV and provenance manifest, validate it, and run the real differential
-   comparison.
-2. Reproduce synchronization-threshold variance for calibrated runs.
-3. Close exact security-wrapper gaps for remaining HOP control packets and the
+1. Calibrate the source-backed application admission, reservation/ACK timing,
+   and traffic-generation boundary behavior against the consistent two-node
+   aggregate throughput and delay gaps, then re-run at exact tolerance.
+2. Isolate the additional multihop delay gap and reconcile aggregate ECC/drop
+   accounting without folding prior-stage rejections into an unsupported
+   statistic mapping.
+3. When licensed Modeler access is available, execute the prepared
+   reservation/collision case, retain its CSV and provenance manifest,
+   validate it, and run the event-order differential comparison.
+4. Reproduce synchronization-threshold variance for calibrated runs.
+5. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
 
@@ -378,8 +410,9 @@ the licensed Modeler export. The complete one-run handoff is documented in
 4. Sustained lossy overload across all queue limits with counter invariants.
 5. Three-or-more-signal mixed-rate intervals and multiple competing same-rate
    JSR records under the recovered receiver-global last-collision state.
-6. An authoritative OPNET CSV reference run using the now-identical imported
-   topology, explicit traffic, and seed.
+6. An authoritative OPNET CSV event reference using the now-identical imported
+   topology, explicit traffic, and seed. Historical aggregate results are
+   available but cannot substitute for chronological events.
 7. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
    during admission. Focused tests now cover authenticated security-count
    restart and wrap.
@@ -388,12 +421,14 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 All 31 CSR executable targets build on this audit revision. The 29 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (31/31), along with all nine focused Python importer, comparator,
-and instrumenter tests. The importer additionally decodes all eight supplied
-validation network models and paired DES environments. The end-to-end fixture
-produces five
-ordered events on each side with zero missing, extra, replaced, field-mismatch,
-or coverage-gap results. The packet-envelope
+workflow pass (31/31). The focused Python suite additionally covers the
+scenario importer, event comparator/instrumenter, conservative `*.ov`
+extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
+aggregate workflow. The importer decodes all 12 recovered campus network
+models and paired DES environments, while strict vector extraction accepts all
+10 complete historical results and rejects both partial fragments. The event
+end-to-end fixture produces five ordered events on each side with zero missing,
+extra, replaced, field-mismatch, or coverage-gap results. The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
 size tags. The relay-holdoff test covers command bytes, one-hop no-ACK

@@ -5,7 +5,7 @@ Updated: 2026-08-27
 ## Purpose
 
 This increment turns the recovered OPNET project media into repeatable ns-3
-comparison runs. It has three independent parts:
+comparison runs. The packet/event path has three independent parts:
 
 1. `utils/import-opnet-scenario.py` decodes a CSR `*.nt.m` network model and
    its paired DES `*.ef` file into a versioned rectangular CSV.
@@ -15,6 +15,15 @@ comparison runs. It has three independent parts:
    ns-3 trace, aligns their event identities, and reports ordering or field
    differences. `utils/run-opnet-differential.py` runs steps 2 and 3 together
    and records a reproducibility manifest.
+
+A separate historical-aggregate path decodes recovered `*.ov` vector
+databases with `utils/extract-opnet-ov.py`, derives equivalent bucket series
+from the ns-3 trace with `utils/aggregate-ns3-trace.py`, and compares them with
+`utils/compare-opnet-ns3-aggregates.py`. The fail-closed
+`utils/run-opnet-aggregate-differential.py` workflow connects those steps and
+records all inputs, commands, hashes, and exit statuses. Aggregate vectors and
+chronological event traces are different evidence classes; one is not used as
+a surrogate for the other.
 
 The deterministic reservation/collision reference additionally uses
 `utils/instrument-opnet-reservation-trace.py` and
@@ -27,12 +36,14 @@ be unpacked first.
 ## Supported source media
 
 The supplied CSR network models use the binary Modeler 17.1 tfile format,
-identified by `MIL_3_Tfile_Hdr_`. The importer recovers the file-local promoted
-attribute IDs from the length-prefixed schema rather than assuming that every
-scenario uses the same numeric IDs. This matters because the one-node model
-omits `Node Type`, shifting the later application fields.
+identified by `MIL_3_Tfile_Hdr_`. The importer recovers the complete contiguous
+length-prefixed promoted-attribute schema and its file-local IDs rather than
+assuming that every scenario uses the same numeric IDs. This handles both the
+shifted one-node schema and the additional fields present in older/mobile
+campus nodes without moving the node ID or application attributes.
 
-All eight supplied CSR validation scenarios import successfully. The following
+All 12 recovered campus `*.nt.m` scenarios and their paired DES environments
+import successfully. The following
 values are recovered when present:
 
 | Source | Imported values |
@@ -51,12 +62,19 @@ does not promote it per node. The runner therefore applies that source-backed
 node-model default. TMM terrain runs are rejected explicitly rather than
 silently falling back to the non-terrain propagation model.
 
-Historical Modeler runs commonly produce `*.ov` output-vector databases with
-aggregate statistics, but no result database is present in the supplied
-archives. If one is recovered, it can provide aggregate drop/count
-checkpoints; it will not expose the packet-level ordering needed by the
-differential event comparator. An OPNET event export in CSV form is still
-required for an event-by-event certification run.
+The recovered historical results include 10 complete Modeler `*.ov` databases:
+109 vectors and 10,900 time buckets in total. The conservative extractor
+validates vector offsets and extents, cross-checks identities and aggregation
+types against the paired `*.pb.m` definitions, and preserves Modeler's
+`2e+100` no-sample sentinel as a missing value. Two additional partial
+fragments contain zero-length vector records and are correctly rejected by
+strict extraction instead of being padded or guessed.
+
+An `*.ov` database contains bucketed aggregates, not a chronological protocol
+event stream. It can support historical traffic, delay, size, and drop
+comparisons, but it cannot expose packet-level MAC reservation ordering or
+same-time collision decisions. An instrumented OPNET event export in CSV form
+is still required for event-by-event certification.
 
 ## Canonical scenario schema
 
@@ -82,10 +100,31 @@ python3 utils/import-opnet-scenario.py \
   --flow 1:2:300:0.02:600:5
 ```
 
-For repeatable differential runs, explicit `--flow` records are preferred.
-`--infer-ring-flows` is available as a deterministic smoke-test surrogate when
-only promoted application attributes exist. It is not source-exact because the
-OPNET application obtains destinations from runtime route-table state.
+For repeatable differential runs, explicit `--flow` records remain available.
+For the recovered campus models, `--infer-gateway-flows` implements the
+source-backed `SEND_ONLY_TO_GATEWAY=1` destination pattern: it requires exactly
+one gateway, creates a flow from every non-gateway node to that gateway, and
+leaves the gateway itself silent. Every sender must provide promoted start,
+interval, and packet-size attributes; a missing value is an error rather than a
+silently omitted flow. For example:
+
+```bash
+python3 utils/import-opnet-scenario.py \
+  historical-campus.zip imported-campus.csv \
+  --scenario blue_radio_campus-2_nodes.nt.m \
+  --infer-gateway-flows \
+  --gateway-flow-dscp 5
+```
+
+The DSCP is a deterministic modeling choice, not a recovered per-packet fact.
+`br_app` uses process-level `DSCP` and `DSCP_pct` inputs to choose between that
+DSCP and zero probabilistically. The importer defaults the deterministic choice
+to 5 for these comparisons, exposes it through `--gateway-flow-dscp`, and
+records it in every canonical flow row.
+
+`--infer-ring-flows` remains a deterministic smoke-test surrogate. It is not
+source-exact for these runs because the OPNET application obtains destinations
+from runtime route-table state.
 
 ## Canonical event trace
 
@@ -172,17 +211,62 @@ The output directory contains:
   statuses.
 
 Focused repository fixtures exercise binary promoted-attribute decoding,
-shifted schemas, DES parsing, alias normalization, timestamp tolerance,
-missing-event reporting, and the complete runner/comparator workflow.
+shifted/mobile schemas, DES parsing, gateway-flow inference, alias
+normalization, timestamp tolerance, missing-event reporting, and both complete
+runner/comparator workflows.
+
+## Running the historical aggregate workflow
+
+The aggregate workflow accepts the same canonical scenario CSV and runner,
+plus a recovered OPNET vector database, its mandatory probe definition, and
+the expected SHA-256 identity of both historical inputs:
+
+```bash
+python3 utils/run-opnet-aggregate-differential.py \
+  --scenario imported-campus.csv \
+  --runner ../ns-3-dev/build/scratch/ns3-dev-csr-opnet-scenario-runner-default \
+  --opnet-ov blue_radio_campus-2_nodes-DES-1.ov \
+  --probe-definition blue_radio_campus-2_nodes.pb.m \
+  --expected-opnet-ov-sha256 dbbbd61759299e9a41aaed9d53acb983df653670843d5ae62f039b772dd989e5 \
+  --expected-probe-definition-sha256 8ed62d4c3bc1a11eb5639394c6ccea5b5d415c8afad138b3e493b413ee0a359e \
+  --output-dir aggregate-differential
+```
+
+The workflow verifies the mandatory PB/OV expected hashes before touching its
+output directory, extracts in strict mode, requires matching scenario name,
+seed, full duration, and complete consistent OPNET time axes, runs ns-3 with a
+compact exactly correlated aggregate trace, derives source-equivalent bucket
+series, and compares only exact statistic/unit/aggregation identities. A
+successful manifest says `selected_comparison_passed` within the historical
+aggregate evidence scope; it does not claim event-order or whole-model parity.
+The recovered application packet-size statistic is
+`configured_bytes * 8 - 64` bits. The runner reproduces that rule at packet
+creation: a configured 600-byte flow becomes a 592-byte total network packet,
+and a configured 200-byte flow becomes 192 bytes. The aggregator consumes
+those actual trace sizes with no default post-processing adjustment. A legacy
+trace adjustment is explicit and recorded in provenance.
+
+The first full-duration exact-tolerance comparisons are calibration evidence,
+not parity passes:
+
+| Scenario | Compared points | Exact packet size | Mean OPNET vs ns-3 | Exact-tolerance outcome |
+| --- | ---: | --- | --- | --- |
+| `blue_radio_campus-2_nodes` | 800 | All 100 buckets | Sent 16.4417 vs 12.9128 packet/s; received 16.4373 vs 12.9126 packet/s; delay 1.45125 vs 1.05710 s | 700 numeric mismatches; no missing or extra points |
+| `blue_radio_campus-hidden_nodes_symmetrical` | 800 | All 100 buckets | Sent 12.1707 vs 14.7748 packet/s; received 11.4370 vs 14.5755 packet/s; delay 9.17976 vs 3.29167 s | 700 numeric mismatches; no missing or extra points |
+| `blue_radio_campus-multihop` | 800 | All 95 measured buckets; 5 OPNET no-sample buckets preserved | Sent 2.0120 vs 2.39233 packet/s; received 1.90167 vs 2.27833 packet/s; delay 112.748 vs 47.0161 s | 665 numeric mismatches; no missing or extra points; 20 missing values skipped |
+
+These failures were not hidden by widening tolerances. The exact packet-size
+matches validate vector decoding and the source-level modeled size, while the
+traffic-rate and delay differences identify real model-calibration work.
 
 ## Remaining certification boundary
 
-This harness makes differences reproducible; it does not manufacture an
-OPNET reference trace. The source-checked instrumentation, deterministic
+These harnesses make differences reproducible; they do not manufacture missing
+evidence. The recovered `*.ov` files now provide authoritative historical
+bucket aggregates, and the measured comparisons above establish both exact
+size agreement and unresolved traffic/delay differences. They cannot establish
+same-time control ordering. The source-checked instrumentation, deterministic
 reservation/collision scenario, validator, and ns-3 side are complete, but
-exact certification still needs the CSV exported by a licensed Modeler run.
-Terrain
-closure also remains external because the supplied TMM database and callable
-terrain model were not recovered. Aggregate `*.ov` statistics can be compared
-separately once their vector identities are mapped, but they cannot establish
-same-time control ordering on their own.
+event-order certification still needs the CSV exported by a licensed Modeler
+run. Terrain closure also remains external because the supplied TMM database
+and callable terrain model were not recovered.

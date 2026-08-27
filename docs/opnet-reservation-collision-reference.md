@@ -9,6 +9,12 @@ lifecycle and an equal-slot collision. An authoritative reference is a CSV
 written by a licensed Modeler run of the recovered sources. A copied ns-3 trace
 or a hand-authored CSV can test the plumbing, but it is not reference evidence.
 
+Ten complete historical `*.ov` result databases are now decoded and compared
+by the separate aggregate workflow. They are authoritative for the bucketed
+statistics they contain, but they do not contain chronological reservation,
+transmit, receive, or ECC events. They therefore cannot satisfy this run's
+event-order evidence goal or replace the licensed Modeler CSV described below.
+
 The repository contains everything needed before that licensed run:
 
 - `utils/testdata/csr-reservation-collision-scenario.csv`, the canonical ns-3
@@ -173,4 +179,6 @@ with `collisions=1` at approximately 61.215304 s. A same-trace plumbing run
 through the differential harness selects 22 events and passes with no missing,
 extra, replaced, or field-mismatched rows. That plumbing check is not the
 authoritative OPNET comparison; the licensed Modeler CSV is the remaining
-input.
+input for this event-order case. Historical `*.ov` comparisons remain useful
+aggregate calibration evidence and are documented separately in
+`docs/opnet-aggregate-comparison.md`.

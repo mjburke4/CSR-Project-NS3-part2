@@ -293,6 +293,18 @@ public:
   }
 
   /**
+   * Apply br_app's ENABLE_NWK_FLOW_CTRL admission test.
+   *
+   * The application suppresses packet creation/statistics while the local
+   * source-destination pair has 16 outstanding packets.  NWK still retains
+   * its source behavior of scanning other queued destinations independently.
+   */
+  bool CanAdmitApplicationPacket (CsrNodeId destination) const
+  {
+    return GetNsdpCount (m_nodeId, destination) < NSDP_DACK_THRESHOLD;
+  }
+
+  /**
    * Get the cost of the currently selected route.
    *
    * @param destination Network destination.
@@ -974,7 +986,10 @@ public:
 
     if (nwkDst == m_nodeId)
       {
-        // Final destination: strip header and deliver payload to App
+        // Final destination: retain the total br_Network size for trace
+        // statistics, then strip our internal header before delivering the
+        // application payload.  app_send uses the same total-size semantics.
+        const uint32_t networkPacketBytes = packetFromHop->GetSize ();
         packetFromHop->RemoveHeader (nh);
 
         CsrDifferentialTraceEvent event;
@@ -984,7 +999,12 @@ public:
         event.packetType = "data";
         event.source = CsrTraceInteger (nwkSrc);
         event.destination = CsrTraceInteger (nwkDst);
-        event.sizeBytes = CsrTraceInteger (packetFromHop->GetSize ());
+        CsrDifferentialAppTag appTag;
+        if (packetFromHop->PeekPacketTag (appTag))
+          {
+            event.sequence = CsrTraceInteger (appTag.GetSequence ());
+          }
+        event.sizeBytes = CsrTraceInteger (networkPacketBytes);
         event.success = "1";
         event.reason = "delivered";
         WriteDifferentialTrace (event);

@@ -21,39 +21,9 @@ ATTRIBUTE_SENTINEL = b"\x00\x01"
 ATTRIBUTE_SUFFIX = b"\x00\x00\x00\x00\x00"
 NODE_MODEL = "br_node_v1"
 SCHEMA_VERSION = "csr-opnet-scenario-v1"
-
-ATTRIBUTE_NAMES = (
-    "name",
-    "doc file",
-    "icon name",
-    "altitude",
-    "Extended Attrs.",
-    "model",
-    "tooltip",
-    "creation source",
-    "creation timestamp",
-    "creation data",
-    "Model Details",
-    "Object Documentation",
-    "x position",
-    "y position",
-    "threshold",
-    "label color",
-    "Node ID",
-    "Min Speed",
-    "Max Speed",
-    "Min Power",
-    "Max Power",
-    "Link Margin",
-    "rx.ecc threshold",
-    "rx.channel [0].min frequency",
-    "tx.channel [0].min frequency",
-    "Node Type",
-    "app.Packet Interarrival Time",
-    "app.Packet Size",
-    "app.Start Time",
-    "battery.Initial Energy",
-)
+# ns-3's MRG32k3a RngStream requires seed < m2 (4294944443), which
+# is narrower than the uint32 storage type accepted by RngSeedManager.
+NS3_RNG_SEED_MAX = 4294944442
 
 SCENARIO_COLUMNS = (
     "record",
@@ -196,28 +166,39 @@ def _read_promoted_value(
 
 
 def _schema_ids(data: bytes, first_node_offset: int) -> dict[str, int]:
-    """Recover file-local attribute IDs from their ordered schema strings."""
-    found: list[tuple[int, str]] = []
-    for name in ATTRIBUTE_NAMES:
-        encoded = name.encode("ascii")
-        position = 512
-        while True:
-            position = data.find(encoded, position, first_node_offset)
-            if position < 0:
-                break
-            # Modeler tfile schema names are uint32-length-prefixed. Checking
-            # the prefix prevents a field such as "threshold" from matching
-            # the suffix of "rx.ecc threshold" and shifting every later ID.
-            if position >= 4 and data[position - 4 : position] == struct.pack(
-                ">I", len(encoded)
-            ):
-                found.append((position, name))
-                break
-            position += 1
-    found.sort()
-    if not found or found[0][1] != "name" or "model" not in {x[1] for x in found}:
+    """Recover every file-local attribute ID from the ordered schema table.
+
+    Modeler assigns promoted attribute IDs by position in this table.  The
+    table is model-dependent: fixed validation nodes omit mobility fields,
+    while campus/mobile nodes insert fields such as ``color``, ``trajectory``,
+    and ``yaw``.  Parsing only fields known to this importer therefore shifts
+    all IDs after the first unfamiliar field.
+    """
+    name_marker = struct.pack(">I", len(b"name")) + b"name"
+    position = data.find(name_marker, 512, first_node_offset)
+    if position < 0:
         raise ImportErrorDetail("could not recover the OPNET node attribute schema")
-    return {name: index + 1 for index, (_, name) in enumerate(found)}
+
+    names: list[str] = []
+    while position + 4 <= first_node_offset:
+        (length,) = struct.unpack_from(">I", data, position)
+        end = position + 4 + length
+        if length == 0 or length > 256 or end > first_node_offset:
+            break
+        try:
+            name = data[position + 4 : end].decode("ascii")
+        except UnicodeDecodeError:
+            break
+        if not name.isprintable():
+            break
+        names.append(name)
+        position = end
+
+    if not names or names[0] != "name" or "model" not in names:
+        raise ImportErrorDetail("could not recover the OPNET node attribute schema")
+    if len(names) != len(set(names)):
+        raise ImportErrorDetail("OPNET node attribute schema contains duplicate names")
+    return {name: index + 1 for index, name in enumerate(names)}
 
 
 def _candidate_node_offsets(data: bytes, name_attribute_id: int) -> list[int]:
@@ -380,11 +361,44 @@ def parse_environment(data: bytes | None) -> dict[str, object]:
             raise ImportErrorDetail(f"DES value {key!r} is not finite")
         return value
 
+    seed_value = number("seed", 128.0)
+    if (
+        not seed_value.is_integer()
+        or seed_value < 1.0
+        or seed_value > NS3_RNG_SEED_MAX
+    ):
+        raise ImportErrorDetail(
+            f"DES seed must be an integer in 1..{NS3_RNG_SEED_MAX}"
+        )
     return {
         "duration_s": number("duration", 60.0),
-        "seed": int(number("seed", 128.0)),
+        "seed": int(seed_value),
         "tmm": values.get("tmm_simulate", "false").strip().lower() == "true",
     }
+
+
+def reject_output_input_alias(output: Path, input_path: Path, label: str) -> None:
+    """Reject lexical, symlink, or inode aliases before an input can be replaced."""
+    try:
+        same_resolved_path = output.resolve(strict=False) == input_path.resolve(
+            strict=False
+        )
+    except (OSError, RuntimeError) as error:
+        raise ImportErrorDetail(
+            f"could not validate output path against {label}: {error}"
+        ) from error
+
+    same_inode = False
+    try:
+        same_inode = output.samefile(input_path)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ImportErrorDetail(
+            f"could not validate output path against {label}: {error}"
+        ) from error
+    if same_resolved_path or same_inode:
+        raise ImportErrorDetail(f"output path aliases {label}: {input_path}")
 
 
 def resolve_source(source: Path, scenario: str | None, environment: str | None) -> ScenarioSource:
@@ -485,6 +499,17 @@ def parse_reservation_slot_override(specification: str) -> tuple[int, int]:
     return node_id, slot
 
 
+def parse_gateway_flow_dscp(specification: str) -> int:
+    """Parse the deterministic DSCP modeling choice for inferred flows."""
+    try:
+        dscp = int(specification, 0)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if dscp < 0 or dscp > 7:
+        raise argparse.ArgumentTypeError("gateway flow DSCP must be in 0..7")
+    return dscp
+
+
 def infer_ring_flows(nodes: list[Node]) -> list[Flow]:
     """Create deterministic explicit flows from promoted app attributes."""
     if len(nodes) < 2:
@@ -502,6 +527,55 @@ def infer_ring_flows(nodes: list[Node]) -> list[Flow]:
                 interval_s=node.interarrival_s,
                 packet_bytes=node.packet_bytes,
                 dscp=5,
+            )
+        )
+    return flows
+
+
+def infer_gateway_flows(nodes: list[Node], dscp: int = 5) -> list[Flow]:
+    """Infer deterministic flows using the source-backed gateway pattern.
+
+    The recovered ``br_app`` process suppresses application traffic at the
+    gateway and directs every other node to the discovered gateway.  The
+    discovery time remains a runtime protocol outcome; this helper only makes
+    the source/destination relation explicit in the canonical scenario.  Its
+    DSCP is a modeling choice: ``br_app`` uses ``DSCP``/``DSCP_pct``
+    probabilistically, while a canonical explicit flow needs one fixed value.
+    """
+    if dscp < 0 or dscp > 7:
+        raise ImportErrorDetail("gateway flow DSCP must be in 0..7")
+    gateways = [node for node in nodes if node.node_type == "gateway"]
+    if len(gateways) != 1:
+        raise ImportErrorDetail(
+            "--infer-gateway-flows requires exactly one gateway node"
+        )
+    gateway_id = gateways[0].node_id
+    flows: list[Flow] = []
+    for node in nodes:
+        if node.node_id == gateway_id:
+            continue
+        missing = [
+            field
+            for field, value in (
+                ("app.Packet Interarrival Time", node.interarrival_s),
+                ("app.Packet Size", node.packet_bytes),
+                ("app.Start Time", node.start_s),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ImportErrorDetail(
+                f"node {node.name!r} lacks promoted application attribute(s) "
+                f"required by --infer-gateway-flows: {', '.join(missing)}"
+            )
+        flows.append(
+            Flow(
+                source=node.node_id,
+                destination=gateway_id,
+                start_s=node.start_s,
+                interval_s=node.interarrival_s,
+                packet_bytes=node.packet_bytes,
+                dscp=dscp,
             )
         )
     return flows
@@ -589,17 +663,42 @@ def write_scenario(
 
 def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flow]]:
     """Execute one import and return the decoded records for tests."""
+    reject_output_input_alias(arguments.output, arguments.source, "source input")
+    source_is_archive = zipfile.is_zipfile(arguments.source)
+    if not source_is_archive and arguments.environment is not None:
+        reject_output_input_alias(
+            arguments.output,
+            Path(arguments.environment),
+            "DES environment input",
+        )
     resolved = resolve_source(arguments.source, arguments.scenario, arguments.environment)
+    if (
+        not source_is_archive
+        and arguments.environment is None
+        and resolved.environment_name is not None
+    ):
+        reject_output_input_alias(
+            arguments.output,
+            Path(resolved.environment_name),
+            "auto-detected DES environment input",
+        )
     network_data = resolved.read(resolved.network_name)
     environment_data = (
         None if resolved.environment_name is None else resolved.read(resolved.environment_name)
     )
     nodes = parse_network_model(network_data, arguments.coordinate_scale)
     flows = list(arguments.flow)
+    inference_modes = int(arguments.infer_ring_flows) + int(
+        arguments.infer_gateway_flows
+    )
+    if flows and inference_modes:
+        raise ImportErrorDetail("--flow and inferred flows are mutually exclusive")
+    if inference_modes > 1:
+        raise ImportErrorDetail("flow inference modes are mutually exclusive")
     if arguments.infer_ring_flows:
-        if flows:
-            raise ImportErrorDetail("--flow and --infer-ring-flows are mutually exclusive")
         flows = infer_ring_flows(nodes)
+    elif arguments.infer_gateway_flows:
+        flows = infer_gateway_flows(nodes, arguments.gateway_flow_dscp)
     known_ids = {node.node_id for node in nodes}
     for flow in flows:
         if flow.source not in known_ids or flow.destination not in known_ids:
@@ -623,8 +722,8 @@ def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flo
             raise ImportErrorDetail("--duration must be finite and positive")
         run["duration_s"] = arguments.duration
     if arguments.seed is not None:
-        if arguments.seed < 0 or arguments.seed > 0xFFFFFFFF:
-            raise ImportErrorDetail("--seed must be in 0..4294967295")
+        if arguments.seed < 1 or arguments.seed > NS3_RNG_SEED_MAX:
+            raise ImportErrorDetail(f"--seed must be in 1..{NS3_RNG_SEED_MAX}")
         run["seed"] = arguments.seed
     if arguments.reservation_control_start is not None:
         control_start = arguments.reservation_control_start
@@ -700,7 +799,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        help="override the paired DES random seed in the canonical run row",
+        help=(
+            "override the paired DES random seed in the canonical run row "
+            f"with a value in 1..{NS3_RNG_SEED_MAX}"
+        ),
     )
     parser.add_argument(
         "--reservation-control-start",
@@ -711,6 +813,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--infer-ring-flows",
         action="store_true",
         help="make a deterministic ring from promoted app attributes",
+    )
+    parser.add_argument(
+        "--infer-gateway-flows",
+        action="store_true",
+        help=(
+            "infer non-gateway-to-gateway destinations from br_app behavior "
+            "and timing/size from promoted app attributes"
+        ),
+    )
+    parser.add_argument(
+        "--gateway-flow-dscp",
+        type=parse_gateway_flow_dscp,
+        default=5,
+        metavar="0..7",
+        help=(
+            "deterministic DSCP modeling choice for --infer-gateway-flows; "
+            "br_app selects DSCP probabilistically (default: 5)"
+        ),
     )
     return parser
 
