@@ -332,10 +332,22 @@ CSV event export is required to populate the reference side of a full
 differential certification. Exact formats, commands, assumptions, and this
 boundary are documented in `docs/opnet-scenario-differential-harness.md`.
 
+The first reference case is now fully specified and locally executable. It
+uses the recovered three-node validation geometry, two 600-byte sends at 60 s,
+controlled slot/counter 5, the source holdoff gate and 13-ms countdown, and
+an equal-time collision at gateway 1. SHA-checked instrumentation records the
+OPNET app send, reservation lifecycle, Tx start, collision count, PHY values,
+and ECC outcome. The ns-3 side passes the lifecycle/collision validator with
+both transmissions at 60.165 s and two gateway collision drops. A same-input
+harness plumbing check passes 22 selected events; it is not a substitute for
+the licensed Modeler export. The complete one-run handoff is documented in
+`docs/opnet-reservation-collision-reference.md`.
+
 ## Highest-priority remaining work
 
-1. Export at least one authoritative OPNET packet/event CSV and run it through
-   the differential harness, using recovered `.ov` totals as aggregate checks.
+1. Execute the prepared reservation/collision case in licensed Modeler, retain
+   its CSV and provenance manifest, validate it, and run the real differential
+   comparison.
 2. Reproduce synchronization-threshold variance for calibrated runs.
 3. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
@@ -375,9 +387,10 @@ boundary are documented in `docs/opnet-scenario-differential-harness.md`.
 
 All 31 CSR executable targets build on this audit revision. The 29 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (31/31), along with all five focused Python importer/comparator
-tests. The importer additionally decodes all eight supplied validation network
-models and paired DES environments. The end-to-end fixture produces five
+workflow pass (31/31), along with all nine focused Python importer, comparator,
+and instrumenter tests. The importer additionally decodes all eight supplied
+validation network models and paired DES environments. The end-to-end fixture
+produces five
 ordered events on each side with zero missing, extra, replaced, field-mismatch,
 or coverage-gap results. The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
@@ -399,8 +412,9 @@ The receive-contention test covers Search/Track timing, simultaneous collision,
 strongest-preamble capture, post-lock interference, RX-induced slot freezing,
 long- versus short-preamble duty-cycle behavior, and half-duplex loss.
 The reservation-lifecycle test adds Idle queueing until its globally aligned
-RTS TSLOT, the shared local/neighbor phase, one-time holdoff, first-contact
-reservation ordering, persistent advertisement/reuse, expiry/redraw ordering,
+RTS TSLOT, the shared local/neighbor phase, `prep_tx` holdoff restart,
+first-contact reservation ordering, persistent advertisement/reuse,
+expiry/redraw ordering,
 SYNC/Track activation, real HOP retry reuse, and delayed-packing state gates.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and

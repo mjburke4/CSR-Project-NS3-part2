@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import importlib.util
 from pathlib import Path
@@ -26,6 +27,9 @@ def load_script(module_name: str, filename: str):
 
 IMPORTER = load_script("csr_opnet_importer", "import-opnet-scenario.py")
 COMPARATOR = load_script("csr_trace_comparator", "compare-opnet-ns3-traces.py")
+INSTRUMENTER = load_script(
+    "csr_opnet_instrumenter", "instrument-opnet-reservation-trace.py"
+)
 
 
 def string_value(value: str) -> bytes:
@@ -137,6 +141,14 @@ class ScenarioImporterTests(unittest.TestCase):
         self.assertEqual(parsed["seed"], 128)
         self.assertFalse(parsed["tmm"])
 
+    def test_reservation_slot_override(self) -> None:
+        self.assertEqual(
+            IMPORTER.parse_reservation_slot_override("0x2:5"),
+            (2, 5),
+        )
+        with self.assertRaises(argparse.ArgumentTypeError):
+            IMPORTER.parse_reservation_slot_override("2:0")
+
 
 class TraceComparatorTests(unittest.TestCase):
     def write_trace(self, path: Path, rows: list[dict[str, object]]) -> None:
@@ -216,6 +228,90 @@ class TraceComparatorTests(unittest.TestCase):
             self.assertFalse(report["pass"])
             self.assertEqual(report["counts"]["extra_in_ns3"], 1)
             self.assertFalse(report["differences_truncated"])
+
+    def test_event_and_time_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trace_path = Path(directory) / "trace.csv"
+            rows = [
+                {
+                    "Simulation Time": 1.0,
+                    "Action": "TX",
+                    "Node ID": 1,
+                    "Tx Node": 2,
+                    "Pkt Type": "data",
+                    "Seq": 4,
+                    "SNR": 8.0,
+                    "Accepted": 1,
+                },
+                {
+                    "Simulation Time": 2.0,
+                    "Action": "drop",
+                    "Node ID": 1,
+                    "Tx Node": 2,
+                    "Pkt Type": "data",
+                    "Seq": 4,
+                    "SNR": 0.0,
+                    "Accepted": 0,
+                },
+            ]
+            self.write_trace(trace_path, rows)
+            selected = COMPARATOR.filter_trace(
+                COMPARATOR.normalize_trace(trace_path),
+                {"rx_drop"},
+                1.5,
+                2.0,
+                {("rx_drop", "1")},
+            )
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(selected[0].values["event"], "rx_drop")
+            self.assertEqual(
+                COMPARATOR.parse_selector("drop:0x1"),
+                ("rx_drop", "1"),
+            )
+
+    def test_coincident_event_order_is_canonical(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            expected_path = Path(directory) / "opnet.csv"
+            actual_path = Path(directory) / "ns3.csv"
+            first = {
+                "Simulation Time": 1.0,
+                "Action": "TX",
+                "Node ID": 1,
+                "Tx Node": 3,
+                "Pkt Type": "data",
+                "Seq": 4,
+                "SNR": 8.0,
+                "Accepted": 1,
+            }
+            second = dict(first, **{"Node ID": 2, "Tx Node": 4})
+            self.write_trace(expected_path, [first, second])
+            self.write_trace(actual_path, [second, first])
+            expected = COMPARATOR.order_coincident_events(
+                COMPARATOR.normalize_trace(expected_path), 1.0e-6
+            )
+            actual = COMPARATOR.order_coincident_events(
+                COMPARATOR.normalize_trace(actual_path), 1.0e-6
+            )
+            report = COMPARATOR.compare(
+                expected,
+                actual,
+                COMPARATOR.DEFAULT_KEY_FIELDS,
+                dict(COMPARATOR.DEFAULT_TOLERANCES),
+                set(),
+                20,
+            )
+            self.assertTrue(report["pass"])
+
+
+class InstrumenterTests(unittest.TestCase):
+    def test_numbered_upload_source_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "09-br_app.pr.c"
+            source.write_text("fixture", encoding="utf-8")
+            self.assertEqual(
+                INSTRUMENTER.resolve_source(Path(directory), "br_app.pr.c"),
+                source,
+            )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+record,schema,scenario,source_sha256,duration_s,seed,tmm,coordinate_scale_m_per_unit,reservation_control_start_s,node_id,forced_reservation_slot,name,node_type,x_m,y_m,height_m,min_speed_kbps,max_speed_kbps,min_power_dbm,max_power_dbm,link_margin_db,ecc_threshold,rx_frequency_hz,tx_frequency_hz,interarrival_s,packet_bytes,start_s,flow_src,flow_dst,flow_start_s,flow_interval_s,flow_packet_bytes,flow_dscp
+run,csr-opnet-scenario-v1,CSR_Validation-3_Nodes,8576f7377257d37d7f791dc8759fecec57ffc14b940c8ba41e24039b0495107d,65.0,128,0,1000.0,59.9,,,,,,,,,,,,,,,,,,,,,,,,
+node,csr-opnet-scenario-v1,,,,,,,,1,,node_1,gateway,0.0,0.0,1.05,8,128,-36.0,33.0,6.0,0.1,400000000.0,400000000.0,0.02,600,300.0,,,,,,
+node,csr-opnet-scenario-v1,,,,,,,,2,5,node_2,ordinary,600.0000000000001,-1040.0,1.05,8,128,-36.0,33.0,6.0,0.1,400000000.0,400000000.0,0.02,600,300.0,,,,,,
+node,csr-opnet-scenario-v1,,,,,,,,3,5,node_3,ordinary,1200.0,0.0,1.05,8,128,-36.0,33.0,6.0,0.1,400000000.0,400000000.0,0.02,600,300.0,,,,,,
+flow,csr-opnet-scenario-v1,,,,,,,,,,,,,,,,,,,,,,,,,,2,1,60.0,1000.0,600,5
+flow,csr-opnet-scenario-v1,,,,,,,,,,,,,,,,,,,,,,,,,,3,1,60.0,1000.0,600,5

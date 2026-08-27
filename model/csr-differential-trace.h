@@ -37,6 +37,8 @@ struct CsrDifferentialTraceEvent
   std::string routeCost;
   std::string nextHop;
   std::string securityCount;
+  std::string reservationSlot;
+  std::string reservationCounter;
   std::string detail;
 };
 
@@ -106,7 +108,8 @@ OpenDifferentialTraceCsv (const std::string &path)
     << "schema,event_index,time_s,event,node,peer,packet_type,src,dst,"
     << "sequence,rate_kbps,size_bytes,success,reason,pathloss_db,"
     << "rx_power_dbm,noise_dbm,snr_db,jsr_db,header_errors,"
-    << "payload_errors,total_errors,route_cost,next_hop,security_count,detail\n";
+    << "payload_errors,total_errors,route_cost,next_hop,security_count,"
+    << "reservation_slot,reservation_counter,detail\n";
 }
 
 inline void
@@ -157,6 +160,8 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
     event.routeCost,
     event.nextHop,
     event.securityCount,
+    event.reservationSlot,
+    event.reservationCounter,
     event.detail,
   };
   for (std::size_t index = 0; index < sizeof (fields) / sizeof (fields[0]); ++index)

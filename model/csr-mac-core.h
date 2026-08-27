@@ -373,6 +373,23 @@ class CsrMacCore
     return m_lastAdvertisedReservationSlot;
   }
 
+  /**
+   * Force the reservation selection for a controlled OPNET differential run.
+   *
+   * A negative value disables the override. Production scenarios leave this
+   * disabled; the reservation/collision fixture uses it to load a known slot
+   * and counter and align the first countdown tick while retaining the source
+   * holdoff, countdown-step, and transmit logic.
+   *
+   * @param slot Reservation slot in 1..255, or a negative value to disable.
+   */
+  void SetReservationSlotOverrideForDifferentialRun (int32_t slot)
+  {
+    NS_ABORT_MSG_IF (slot == 0 || slot > 255,
+                     "differential reservation slot must be 1..255 or negative");
+    m_forcedReservationSlot = slot;
+  }
+
   /** Return the reservation consumed by the most recent transmission. */
   int32_t GetLastTxOpportunitySlot () const
   {
@@ -614,6 +631,7 @@ private:
   int                                 m_txCountdownCounter {-1};
   int                                 m_lastAdvertisedReservationSlot {-1};
   int                                 m_lastTxOpportunitySlot {-1};
+  int                                 m_forcedReservationSlot {-1};
   bool                                m_txPreparationActive {false};
   bool                                m_txHoldoffOver {false};
   bool                                m_txInProgress {false};
@@ -772,6 +790,15 @@ private:
       }
     std::cout << std::endl;
 
+    if (m_forcedReservationSlot > 0)
+      {
+        std::cout << "[MAC " << m_nodeId
+                  << "] controlled differential reservation slot="
+                  << m_forcedReservationSlot
+                  << std::endl;
+        return m_forcedReservationSlot;
+      }
+
     Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
 
     // The legacy code draws an ordinal in [1, slotRange], then scans the full
@@ -899,6 +926,15 @@ CsrMacCore::SlotTick ()
           if (m_txHoldoffOver && m_txCountdownCounter >= 0)
             {
               m_txCountdownCounter--;
+
+              CsrDifferentialTraceEvent event;
+              event.event = "reservation_tick";
+              event.node = CsrTraceInteger (m_nodeId);
+              event.reservationSlot = CsrTraceSignedInteger (
+                m_scheduledTxSlot);
+              event.reservationCounter = CsrTraceSignedInteger (
+                m_txCountdownCounter);
+              WriteDifferentialTrace (event);
 
               if (m_txCountdownCounter == -1 &&
                   !m_txPreparationActive)

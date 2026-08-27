@@ -132,3 +132,7 @@ OPNET scenario import and differential comparison:
 4. Run and compare with utils/run-opnet-differential.py.
 5. See docs/opnet-scenario-differential-harness.md for schemas, commands,
    tolerances, artifacts, and the OPNET CSV export boundary.
+
+The deterministic three-node reservation/collision reference, SHA-checked
+OPNET instrumentation, evidence validator, and licensed-run handoff are in
+docs/opnet-reservation-collision-reference.md.

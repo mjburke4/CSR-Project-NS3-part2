@@ -636,6 +636,8 @@ CsrNetDevice::SendFramesToPeers (
   txEvent.sequence = CsrTraceInteger (sequence);
   txEvent.rateKbps = CsrTraceSignedInteger (rateKbps);
   txEvent.sizeBytes = CsrTraceInteger (payloadBytes);
+  txEvent.reservationSlot = CsrTraceSignedInteger (slot);
+  txEvent.reservationCounter = CsrTraceSignedInteger (slot);
   if (hdrOnTx.HasSecurityCount ())
     {
       txEvent.securityCount = CsrTraceInteger (
@@ -1556,6 +1558,8 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
       rxEvent.headerErrors = CsrTraceInteger (decision.headerErrors);
       rxEvent.payloadErrors = CsrTraceInteger (decision.payloadErrors);
       rxEvent.totalErrors = CsrTraceInteger (decision.totalErrors);
+      rxEvent.detail = "collisions=" + CsrTraceInteger (
+        signal.collisionCount);
       if (traceHeader.HasSecurityCount ())
         {
           rxEvent.securityCount = CsrTraceInteger (
@@ -1596,12 +1600,41 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
       missEvent.sizeBytes = CsrTraceInteger (signal.payloadBytes);
       missEvent.success = "0";
       missEvent.reason = "state";
+      missEvent.detail = "collisions=" + CsrTraceInteger (
+        signal.collisionCount);
       WriteDifferentialTrace (missEvent);
       std::cout << "[t=" << Simulator::Now ().GetSeconds ()
                 << "] RX MISS at node " << m_id
                 << " from node " << signal.txId
                 << " seq " << signal.sequence
                 << std::endl;
+    }
+  else if (signal.collisionCount > 0)
+    {
+      // Modeler's receiver pipeline still produces a rejected ECC outcome for
+      // the colliding signal that did not win acquisition. Record the same
+      // prior-stage outcome without changing ns-3 delivery behavior.
+      CsrHeader traceHeader;
+      signal.frames.front ()->PeekHeader (traceHeader);
+      CsrDifferentialTraceEvent collisionEvent;
+      collisionEvent.event = "rx_drop";
+      collisionEvent.node = CsrTraceInteger (m_id);
+      collisionEvent.peer = CsrTraceInteger (signal.txId);
+      collisionEvent.packetType = CsrPacketTypeName (traceHeader.GetType ());
+      collisionEvent.source = CsrTraceInteger (traceHeader.GetSrc ());
+      collisionEvent.destination = CsrTraceInteger (traceHeader.GetDst ());
+      collisionEvent.sequence = CsrTraceInteger (signal.sequence);
+      collisionEvent.rateKbps = CsrTraceSignedInteger (signal.rateKbps);
+      collisionEvent.sizeBytes = CsrTraceInteger (signal.payloadBytes);
+      collisionEvent.success = "0";
+      collisionEvent.reason = "prior_stage";
+      collisionEvent.pathlossDb = CsrTraceDouble (signal.pathlossDb);
+      collisionEvent.rxPowerDbm = CsrTraceDouble (signal.rxPowerDbm);
+      collisionEvent.snrDb = CsrTraceDouble (signal.snrDb);
+      collisionEvent.jsrDb = CsrTraceDouble (signal.jsrDb);
+      collisionEvent.detail = "collisions=" + CsrTraceInteger (
+        signal.collisionCount);
+      WriteDifferentialTrace (collisionEvent);
     }
 
   RemoveEndedInterference (signal);
@@ -2003,6 +2036,20 @@ CsrMacCore::TxHoldoffExpired ()
 {
   m_txHoldoffOver = true;
 
+  CsrDifferentialTraceEvent event;
+  event.event = "reservation_holdoff";
+  event.node = CsrTraceInteger (m_nodeId);
+  if (m_scheduledTxSlot >= 0)
+    {
+      event.reservationSlot = CsrTraceSignedInteger (m_scheduledTxSlot);
+    }
+  if (m_txCountdownCounter >= -1)
+    {
+      event.reservationCounter = CsrTraceSignedInteger (
+        m_txCountdownCounter);
+    }
+  WriteDifferentialTrace (event);
+
   std::cout << "[MAC " << m_nodeId
             << "] OPNET 300-ms transmit holdoff complete"
             << std::endl;
@@ -2018,8 +2065,9 @@ CsrMacCore::ActivateTxPreparation (bool redrawZero)
 
   m_txPreparationActive = true;
 
-  if (m_txCountdownCounter < 0 ||
-      (redrawZero && m_txCountdownCounter == 0))
+  bool selectedNewSlot = m_txCountdownCounter < 0 ||
+                         (redrawZero && m_txCountdownCounter == 0);
+  if (selectedNewSlot)
     {
       CsrNodeId dest = !m_ackQueue.empty ()
         ? m_ackQueue.front ().dest
@@ -2041,6 +2089,45 @@ CsrMacCore::ActivateTxPreparation (bool redrawZero)
                 << " counter=" << m_txCountdownCounter
                 << std::endl;
     }
+
+  if (m_forcedReservationSlot > 0)
+    {
+      m_scheduledTxSlot = m_forcedReservationSlot;
+      m_txCountdownCounter = m_forcedReservationSlot;
+      selectedNewSlot = true;
+
+      // Nodes in the recovered scenario have independent 13-ms timer phases.
+      // Put controlled differential runs on a common future epoch so neither
+      // sender hears the other's preamble before its final countdown event.
+      Time epoch = Seconds (0.1);
+      double holdoffGuard = m_txHoldoffOver ? 0.0 : TS_HOLDOFF_SECONDS;
+      Time earliest = Simulator::Now () +
+        Seconds (holdoffGuard) + m_slotTickPeriod;
+      int64_t epochSteps = epoch.GetTimeStep ();
+      int64_t earliestSteps = earliest.GetTimeStep ();
+      int64_t alignedSteps =
+        ((earliestSteps + epochSteps - 1) / epochSteps) * epochSteps;
+      if (m_slotTickEvent.IsPending ())
+        {
+          Simulator::Cancel (m_slotTickEvent);
+        }
+      m_slotTickEnabled = true;
+      m_slotTickEvent = Simulator::Schedule (
+        TimeStep (alignedSteps - Simulator::Now ().GetTimeStep ()),
+        &CsrMacCore::SlotTick,
+        this);
+    }
+
+  CsrDifferentialTraceEvent event;
+  event.event = "reservation_prepare";
+  event.node = CsrTraceInteger (m_nodeId);
+  event.reservationSlot = CsrTraceSignedInteger (m_scheduledTxSlot);
+  event.reservationCounter = CsrTraceSignedInteger (
+    m_txCountdownCounter);
+  event.reason = m_forcedReservationSlot > 0
+    ? (m_txHoldoffOver ? "controlled_ready" : "controlled_wait")
+    : (selectedNewSlot ? "new" : "reuse");
+  WriteDifferentialTrace (event);
 }
 
 void
@@ -2492,6 +2579,15 @@ CsrMacCore::DoTx ()
   m_scheduledTxSlot = nextReservedSlot;
   m_txCountdownCounter = nextReservedSlot;
   m_txPreparationActive = false;
+
+  CsrDifferentialTraceEvent reservationEvent;
+  reservationEvent.event = "reservation_advertise";
+  reservationEvent.node = CsrTraceInteger (m_nodeId);
+  reservationEvent.reservationSlot = CsrTraceSignedInteger (
+    nextReservedSlot);
+  reservationEvent.reservationCounter = CsrTraceSignedInteger (
+    m_txCountdownCounter);
+  WriteDifferentialTrace (reservationEvent);
 
   // Send via device
   std::cout << "[MAC " << m_nodeId
