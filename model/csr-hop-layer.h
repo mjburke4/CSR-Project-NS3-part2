@@ -77,6 +77,33 @@ public:
   {
     return static_cast<CsrRateKey> (m_maxSpeed);
   }
+
+  /** Apply the promoted legacy link-control attributes as one validated set. */
+  void ConfigureLinkControl (CsrRateKey minSpeedKbps,
+                             CsrRateKey maxSpeedKbps,
+                             double minPowerDbm,
+                             double maxPowerDbm,
+                             double linkMarginDb)
+  {
+    NS_ABORT_MSG_IF (!CsrIsOperationalRateKey (minSpeedKbps) ||
+                     !CsrIsOperationalRateKey (maxSpeedKbps) ||
+                     minSpeedKbps > maxSpeedKbps,
+                     "CSR HOP link-control speed range is invalid");
+    NS_ABORT_MSG_IF (!std::isfinite (minPowerDbm) ||
+                     !std::isfinite (maxPowerDbm) ||
+                     !std::isfinite (linkMarginDb) ||
+                     minPowerDbm > maxPowerDbm,
+                     "CSR HOP link-control power range is invalid");
+    m_minSpeed = minSpeedKbps;
+    m_maxSpeed = maxSpeedKbps;
+    m_minPower = minPowerDbm;
+    m_maxPower = maxPowerDbm;
+    m_linkMargin = linkMarginDb;
+    if (m_mac != nullptr)
+      {
+        m_mac->SetMaxRateKbps (maxSpeedKbps);
+      }
+  }
   void SetNodeId (CsrNodeId id)
   {
     NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),

@@ -602,6 +602,24 @@ CsrNetDevice::SendFramesToPeers (
   uint64_t signalId = (static_cast<uint64_t> (m_id) << 32)
                     | (++m_nextTxSignalId & 0xffffffffULL);
 
+  CsrDifferentialTraceEvent txEvent;
+  txEvent.event = "tx_start";
+  txEvent.node = CsrTraceInteger (m_id);
+  txEvent.peer = CsrTraceInteger (hdrOnTx.GetDst ());
+  txEvent.packetType = CsrPacketTypeName (hdrOnTx.GetType ());
+  txEvent.source = CsrTraceInteger (hdrOnTx.GetSrc ());
+  txEvent.destination = CsrTraceInteger (hdrOnTx.GetDst ());
+  txEvent.sequence = CsrTraceInteger (sequence);
+  txEvent.rateKbps = CsrTraceSignedInteger (rateKbps);
+  txEvent.sizeBytes = CsrTraceInteger (payloadBytes);
+  if (hdrOnTx.HasSecurityCount ())
+    {
+      txEvent.securityCount = CsrTraceInteger (
+        hdrOnTx.GetSecurityCount ());
+    }
+  txEvent.detail = preamble == PREAMBLE_LONG ? "long" : "short";
+  WriteDifferentialTrace (txEvent);
+
   // A direct SendToPeer call and a queued MAC transmission both occupy the
   // local half-duplex radio for the complete OTA duration.
   m_mac.NotifyPhyTxStart (Seconds (duration));
@@ -623,6 +641,20 @@ CsrNetDevice::SendFramesToPeers (
                     << peer->GetId () << " from node " << txId
                     << " seq " << sequence
                     << std::endl;
+          CsrDifferentialTraceEvent dropEvent;
+          dropEvent.event = "rx_drop";
+          dropEvent.node = CsrTraceInteger (peer->GetId ());
+          dropEvent.peer = CsrTraceInteger (txId);
+          dropEvent.packetType = CsrPacketTypeName (hdrOnTx.GetType ());
+          dropEvent.source = CsrTraceInteger (hdrOnTx.GetSrc ());
+          dropEvent.destination = CsrTraceInteger (hdrOnTx.GetDst ());
+          dropEvent.sequence = CsrTraceInteger (sequence);
+          dropEvent.rateKbps = CsrTraceSignedInteger (rateKbps);
+          dropEvent.sizeBytes = CsrTraceInteger (payloadBytes);
+          dropEvent.success = "0";
+          dropEvent.reason = "closure";
+          dropEvent.detail = "distance_m=" + CsrTraceDouble (distanceMeters);
+          WriteDifferentialTrace (dropEvent);
           continue;
         }
       double propagationDelaySec = distanceMeters /
@@ -1352,6 +1384,41 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
                   << "\n";
         }
 
+      CsrHeader traceHeader;
+      signal.frames.front ()->PeekHeader (traceHeader);
+      CsrDifferentialTraceEvent rxEvent;
+      rxEvent.event = decision.success ? "rx_accept" : "rx_drop";
+      rxEvent.node = CsrTraceInteger (m_id);
+      rxEvent.peer = CsrTraceInteger (signal.txId);
+      rxEvent.packetType = CsrPacketTypeName (traceHeader.GetType ());
+      rxEvent.source = CsrTraceInteger (traceHeader.GetSrc ());
+      rxEvent.destination = CsrTraceInteger (traceHeader.GetDst ());
+      rxEvent.sequence = CsrTraceInteger (signal.sequence);
+      rxEvent.rateKbps = CsrTraceSignedInteger (signal.rateKbps);
+      rxEvent.sizeBytes = CsrTraceInteger (signal.payloadBytes);
+      rxEvent.success = decision.success ? "1" : "0";
+      rxEvent.reason = decision.success
+        ? "accepted"
+        : (decision.eccDropped
+             ? "ecc"
+             : (signal.collided
+                  ? "collision"
+                  : (stateAllowsDelivery ? "phy" : "state")));
+      rxEvent.pathlossDb = CsrTraceDouble (decision.pathlossDb);
+      rxEvent.rxPowerDbm = CsrTraceDouble (decision.receivedPowerDbm);
+      rxEvent.noiseDbm = CsrTraceDouble (decision.noisePowerDbm);
+      rxEvent.snrDb = CsrTraceDouble (decision.snrDb);
+      rxEvent.jsrDb = CsrTraceDouble (decision.jsrDb);
+      rxEvent.headerErrors = CsrTraceInteger (decision.headerErrors);
+      rxEvent.payloadErrors = CsrTraceInteger (decision.payloadErrors);
+      rxEvent.totalErrors = CsrTraceInteger (decision.totalErrors);
+      if (traceHeader.HasSecurityCount ())
+        {
+          rxEvent.securityCount = CsrTraceInteger (
+            traceHeader.GetSecurityCount ());
+        }
+      WriteDifferentialTrace (rxEvent);
+
       if (decision.success)
         {
           DeliverTrackedSignal (signal, decision);
@@ -1371,6 +1438,21 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
   else if (signal.missedByState)
     {
       m_rxMissCount++;
+      CsrHeader traceHeader;
+      signal.frames.front ()->PeekHeader (traceHeader);
+      CsrDifferentialTraceEvent missEvent;
+      missEvent.event = "rx_drop";
+      missEvent.node = CsrTraceInteger (m_id);
+      missEvent.peer = CsrTraceInteger (signal.txId);
+      missEvent.packetType = CsrPacketTypeName (traceHeader.GetType ());
+      missEvent.source = CsrTraceInteger (traceHeader.GetSrc ());
+      missEvent.destination = CsrTraceInteger (traceHeader.GetDst ());
+      missEvent.sequence = CsrTraceInteger (signal.sequence);
+      missEvent.rateKbps = CsrTraceSignedInteger (signal.rateKbps);
+      missEvent.sizeBytes = CsrTraceInteger (signal.payloadBytes);
+      missEvent.success = "0";
+      missEvent.reason = "state";
+      WriteDifferentialTrace (missEvent);
       std::cout << "[t=" << Simulator::Now ().GetSeconds ()
                 << "] RX MISS at node " << m_id
                 << " from node " << signal.txId
@@ -1750,6 +1832,12 @@ CsrMacCore::NotifyPhyTxStart (Time duration)
   m_txInProgress = true;
   m_state = State::TX;
 
+  CsrDifferentialTraceEvent event;
+  event.event = "mac_state";
+  event.node = CsrTraceInteger (m_nodeId);
+  event.detail = StateName (State::TX);
+  WriteDifferentialTrace (event);
+
   if (m_finishTxEvent.IsPending ())
     {
       Simulator::Cancel (m_finishTxEvent);
@@ -1764,6 +1852,12 @@ CsrMacCore::FinishTx ()
 {
   m_txInProgress = false;
   m_state = State::SEARCH;
+
+  CsrDifferentialTraceEvent event;
+  event.event = "mac_state";
+  event.node = CsrTraceInteger (m_nodeId);
+  event.detail = StateName (State::SEARCH);
+  WriteDifferentialTrace (event);
 
   if (m_dev != nullptr)
     {

@@ -39,7 +39,7 @@ OPNET/ns-3 event-trace comparison.
 | Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
 | Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and differential traces. |
-| PHY | 82-90% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, gains, bandwidth-scaled noise, mixed-/same-rate interference, exact modulation curves, interval errors, ECC, closure ordering, and final accept/drop are live. Remaining uncertainty is threshold variance, opaque off-grid interpolation, external LOS/TMM closure, scenario import, and trace calibration. |
+| PHY | 84-91% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, gains, bandwidth-scaled noise, mixed-/same-rate interference, exact modulation curves, interval errors, ECC, closure ordering, final accept/drop, and promoted scenario radio/link attributes are live. Remaining uncertainty is threshold variance, opaque off-grid interpolation, external LOS/TMM closure, and authoritative trace calibration. |
 
 Overall estimates:
 
@@ -306,12 +306,35 @@ extension because the supplied C pipeline does not reference `dqpsk`.
 The complete table inventory, importer, equations, ordering, and explicit
 external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
 
+## Step 9: scenario import and differential traces
+
+The binary Modeler scenario boundary is now explicit and executable. The
+versioned importer recovers file-local promoted attribute IDs, so it handles
+both the normal CSR schema and the shifted one-node schema without hard-coded
+field numbers. All eight supplied validation `*.nt.m` models and their paired
+DES environments import successfully.
+
+The ns-3 runner creates the corresponding node roles, coordinates, link
+distances, rate/power limits, link margin, ECC threshold, frequency, duration,
+and seed. It emits a canonical ordered trace across scenario construction,
+application, MAC state, transmission, PHY accept/drop, NWK delivery, and route
+changes. The comparator normalizes common OPNET CSV column/event aliases,
+aligns event identities without discarding ordering, applies explicit numeric
+tolerances, and reports missing, extra, replaced, or field-mismatched events.
+Every run records normalized inputs, a JSON report, logs, hashes, and exact
+commands in a manifest.
+
+The supplied `.ov` files are aggregate output-vector databases rather than
+packet-level event logs. They remain valid count/drop checkpoints, but an OPNET
+CSV event export is required to populate the reference side of a full
+differential certification. Exact formats, commands, assumptions, and this
+boundary are documented in `docs/opnet-scenario-differential-harness.md`.
+
 ## Highest-priority remaining work
 
-1. Build differential traces for identical OPNET/ns-3 topologies, seeds, and
-   traffic, using the recovered `.ov` drop totals as aggregate checkpoints.
-2. Reproduce synchronization-threshold variance and import promoted scenario
-   radio/power/link-margin attributes for calibrated runs.
+1. Export at least one authoritative OPNET packet/event CSV and run it through
+   the differential harness, using recovered `.ov` totals as aggregate checks.
+2. Reproduce synchronization-threshold variance for calibrated runs.
 3. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
@@ -322,8 +345,8 @@ external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
   -11-dB mean.
 - Authoritative off-grid `op_tbl_mod_ber()` behavior if an OPNET probe becomes
   available; current lookups use endpoint clamp and arithmetic interpolation.
-- Promoted scenario-attribute import and exact external Earth-LOS/TMM
-  injection.
+- Exact external Earth-LOS/TMM injection; imported TMM scenarios are rejected
+  until that implementation is supplied.
 - Authoritative same-rate DQPSK collision curves, if they exist outside the
   supplied archive; the extended 500/1000-kbit/s profile treats the recorded
   jammer as payload noise and retains the DQPSK curve.
@@ -336,15 +359,21 @@ external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
 4. Sustained lossy overload across all queue limits with counter invariants.
 5. Three-or-more-signal mixed-rate intervals and multiple competing same-rate
    JSR records under the recovered receiver-global last-collision state.
-6. Differential traces using identical OPNET/ns-3 topology, traffic, and seed.
+6. An authoritative OPNET CSV reference run using the now-identical imported
+   topology, explicit traffic, and seed.
 7. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
    during admission. Focused tests now cover authenticated security-count
    restart and wrap.
 
 ## Current regression baseline
 
-The CSR module build, all 28 focused parity smoke tests, and
-`csr-mac-demo-split` pass on this audit revision (29/29). The packet-envelope
+All 30 CSR executable targets build on this audit revision. The 28 focused
+parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
+workflow pass (30/30), along with all five focused Python importer/comparator
+tests. The importer additionally decodes all eight supplied validation network
+models and paired DES environments. The end-to-end fixture produces five
+ordered events on each side with zero missing, extra, replaced, field-mismatch,
+or coverage-gap results. The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
 size tags. The relay-holdoff test covers command bytes, one-hop no-ACK

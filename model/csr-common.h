@@ -11,6 +11,7 @@
 #include "ns3/header.h"
 #include "ns3/packet.h"
 #include "csr-wire-format.h"
+#include "csr-differential-trace.h"
 #include <map>
 #include <deque>
 #include <vector>
@@ -68,6 +69,27 @@ enum CsrPktType : uint8_t
   CSR_PKT_PAIRWISE32_DATA = 10,
   CSR_PKT_NEIGHBORCAST    = 11
 };
+
+static inline const char*
+CsrPacketTypeName (uint8_t type)
+{
+  switch (type)
+    {
+    case CSR_PKT_DATA:            return "data";
+    case CSR_PKT_ACK:             return "ack";
+    case CSR_PKT_DACK:            return "dack";
+    case CSR_PKT_HELLO:           return "hello";
+    case CSR_PKT_DISCOVER:        return "discover";
+    case CSR_PKT_NEIGHBOR_CHECK:  return "neighbor_check";
+    case CSR_PKT_ROUTING_CONTROL: return "routing_control";
+    case CSR_PKT_SNMP:            return "snmp";
+    case CSR_PKT_KEY_REQUEST:     return "key_request";
+    case CSR_PKT_KEY_UPDATE:      return "key_update";
+    case CSR_PKT_PAIRWISE32_DATA: return "pairwise32_data";
+    case CSR_PKT_NEIGHBORCAST:    return "neighborcast";
+    default:                      return "unknown";
+    }
+}
 
 enum CsrDestType : uint8_t
 {

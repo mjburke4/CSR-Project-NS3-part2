@@ -25,6 +25,18 @@ class CsrMacCore
     TX
   };
 
+  static const char* StateName (State state)
+  {
+    switch (state)
+      {
+      case State::IDLE:   return "idle";
+      case State::SEARCH: return "search";
+      case State::TRACK:  return "track";
+      case State::TX:     return "tx";
+      }
+    return "unknown";
+  }
+
   void SetNodeId (CsrNodeId id)
   {
     NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
@@ -117,9 +129,14 @@ class CsrMacCore
   {
     NS_ASSERT_MSG (state != State::TX,
                    "receiver transition cannot enter the Tx state");
-    if (!m_txInProgress)
+    if (!m_txInProgress && m_state != state)
       {
         m_state = state;
+        CsrDifferentialTraceEvent event;
+        event.event = "mac_state";
+        event.node = CsrTraceInteger (m_nodeId);
+        event.detail = StateName (state);
+        WriteDifferentialTrace (event);
       }
   }
 
