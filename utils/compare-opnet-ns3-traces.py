@@ -45,6 +45,8 @@ TRACE_COLUMNS = (
     "reservation_slot",
     "reservation_counter",
     "detail",
+    "statistic",
+    "value",
 )
 
 ALIASES = {
@@ -83,6 +85,8 @@ ALIASES = {
         "slot_counter",
     ),
     "detail": ("detail", "message", "description"),
+    "statistic": ("statistic", "statistic_name", "metric", "vector"),
+    "value": ("value", "statistic_value", "metric_value"),
 }
 
 EVENT_ALIASES = {
@@ -124,6 +128,7 @@ NUMERIC_FIELDS = {
     "security_count",
     "reservation_slot",
     "reservation_counter",
+    "value",
 }
 
 DEFAULT_TOLERANCES = {
@@ -143,6 +148,7 @@ DEFAULT_KEY_FIELDS = (
     "src",
     "dst",
     "sequence",
+    "statistic",
 )
 
 IGNORABLE_VALUES = {"", "n/a", "na", "none", "null", "-"}
@@ -340,6 +346,7 @@ def order_coincident_events(
         "sequence",
         "reservation_slot",
         "reservation_counter",
+        "statistic",
     )
     while start < len(ordered):
         group_time = float(ordered[start].values["time_s"])

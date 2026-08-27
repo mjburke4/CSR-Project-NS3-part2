@@ -25,6 +25,21 @@ class CsrMacCore
     TX
   };
 
+  /**
+   * Reservation-slot selection variants recovered from the supplied source
+   * and the historical scenario executables.
+   *
+   * Historical profiles are deliberately explicit: the selected algorithm
+   * changed between builds even when the surrounding scenario was similar.
+   */
+  enum class SlotSelectionProfile
+  {
+    NS3_CURRENT_FINE_FREE_SLOT,
+    HIST_2014_ZERO_BASED_REBUILD_LIST,
+    HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+    HIST_2014_NEXT_TSLOT_MODULO_PROBE
+  };
+
   static const char* StateName (State state)
   {
     switch (state)
@@ -35,6 +50,16 @@ class CsrMacCore
       case State::TX:     return "tx";
       }
     return "unknown";
+  }
+
+  void SetSlotSelectionProfile (SlotSelectionProfile profile)
+  {
+    m_slotSelectionProfile = profile;
+  }
+
+  SlotSelectionProfile GetSlotSelectionProfile () const
+  {
+    return m_slotSelectionProfile;
   }
 
   void SetNodeId (CsrNodeId id)
@@ -285,6 +310,26 @@ class CsrMacCore
   int
   GetOpnetSlotRange (uint32_t activeNodesForSlotting) const
   {
+    if (m_slotSelectionProfile ==
+          SlotSelectionProfile::HIST_2014_ZERO_BASED_REBUILD_LIST ||
+        m_slotSelectionProfile ==
+          SlotSelectionProfile::HIST_2014_NEXT_TSLOT_MODULO_PROBE)
+      {
+        if (activeNodesForSlotting <= 4)
+          {
+            return 31;
+          }
+        if (activeNodesForSlotting <= 8)
+          {
+            return 63;
+          }
+        if (activeNodesForSlotting <= 12)
+          {
+            return 127;
+          }
+        return 255;
+      }
+
     switch (activeNodesForSlotting)
       {
       case 0:  return 15;
@@ -551,6 +596,7 @@ private:
     CsrNodeId    dest;
     uint8_t     dscp;
     bool        ackable;
+    Time        enqueuedAt;
   };
 
   struct AckQueueEntry
@@ -641,6 +687,8 @@ private:
   EventId                             m_txHoldoffEvent;
   EventId                             m_finishTxEvent;
   std::map<CsrNodeId, NeighborInfo>    m_neighbors;
+  SlotSelectionProfile                m_slotSelectionProfile {
+    SlotSelectionProfile::NS3_CURRENT_FINE_FREE_SLOT};
   Time                                m_neighborTimeout { Seconds (6.0) };   // default: 3x hello interval (if hello=2s)
   EventId                             m_neighborAgingEvent;
   std::map<CsrNodeId, double>          m_lastHeardSec;  // neighborId -> last heard time (seconds)
@@ -725,8 +773,10 @@ private:
     uint32_t activeForSlotting = GetReportedActiveNodesForSlotting ();
     int slotRange = GetOpnetSlotRange (activeForSlotting);
 
-    // OPNET get_slot() returns a slot in [1, slot_range].
-    // Keep a fixed reservation table up to 255 for now.
+    // The historical profiles disagree on zero-/one-based support and whether
+    // slot_range itself is selectable.  The current ordinal-scan profile uses
+    // this fixed reservation table; historical branches below reproduce their
+    // own exact endpoint rules.
     const int MAX_SLOTRESERVE_NS3 = 256;
 
     bool used[MAX_SLOTRESERVE_NS3];
@@ -800,6 +850,75 @@ private:
       }
 
     Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+
+    if (m_slotSelectionProfile ==
+        SlotSelectionProfile::HIST_2014_ZERO_BASED_REBUILD_LIST)
+      {
+        // d9ebf7... get_slot@0x1f5c6 rebuilds an ordered list containing
+        // exactly 0..R-1, then selects a uniform list index.  It neither reads
+        // nor avoids any neighbor reservation.
+        int chosenSlot = rng->GetInteger (0, slotRange - 1);
+        std::cout << "[MAC " << m_nodeId
+                  << "] PickTxSlot chose " << chosenSlot
+                  << " using historical zero-based rebuild-list range [0,"
+                  << (slotRange - 1) << "]"
+                  << std::endl;
+        return chosenSlot;
+      }
+
+    if (m_slotSelectionProfile ==
+        SlotSelectionProfile::HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID)
+      {
+        // dd3f38... get_slot@0x1ffdd indexes an ordered 255-entry table with
+        // floor(uniform(R))+1.  Reservation flags exist but this function does
+        // not inspect them.  Index 255 is the historical table-boundary defect.
+        int chosenSlot = rng->GetInteger (1, slotRange);
+        NS_ABORT_MSG_IF (
+          chosenSlot >= 255,
+          "historical fine-table get_slot selected invalid table index 255");
+        std::cout << "[MAC " << m_nodeId
+                  << "] PickTxSlot chose " << chosenSlot
+                  << " using historical one-based table range [1,"
+                  << slotRange << "] without reservation avoidance"
+                  << std::endl;
+        return chosenSlot;
+      }
+
+    if (m_slotSelectionProfile ==
+        SlotSelectionProfile::HIST_2014_NEXT_TSLOT_MODULO_PROBE)
+      {
+        // adb97c... get_slot@0x1f27e starts in 0..R inclusive and, on a
+        // collision with a neighbor's current next_tslot counter, advances by
+        // one modulo R.  The modulo-R off-by-one is intentional: after a
+        // collision slot R cannot be revisited.
+        int chosenSlot = rng->GetInteger (0, slotRange);
+        uint32_t probes = 0;
+        for (;;)
+          {
+            bool collision = false;
+            for (const auto &entry : m_neighbors)
+              {
+                if (entry.second.rtCounter == chosenSlot)
+                  {
+                    collision = true;
+                  }
+              }
+            if (!collision)
+              {
+                std::cout << "[MAC " << m_nodeId
+                          << "] PickTxSlot chose " << chosenSlot
+                          << " using historical next_tslot modulo probe"
+                          << std::endl;
+                return chosenSlot;
+              }
+
+            chosenSlot = (chosenSlot + 1) % slotRange;
+            probes++;
+            NS_ABORT_MSG_IF (
+              probes > static_cast<uint32_t> (slotRange),
+              "historical next_tslot modulo probe exhausted slots 0..R-1");
+          }
+      }
 
     // The legacy code draws an ordinal in [1, slotRange], then scans the full
     // 255-entry reservation table beginning at slot zero.  Slot zero is

@@ -21,39 +21,41 @@ ATTRIBUTE_SENTINEL = b"\x00\x01"
 ATTRIBUTE_SUFFIX = b"\x00\x00\x00\x00\x00"
 NODE_MODEL = "br_node_v1"
 SCHEMA_VERSION = "csr-opnet-scenario-v1"
-
-ATTRIBUTE_NAMES = (
-    "name",
-    "doc file",
-    "icon name",
-    "altitude",
-    "Extended Attrs.",
-    "model",
-    "tooltip",
-    "creation source",
-    "creation timestamp",
-    "creation data",
-    "Model Details",
-    "Object Documentation",
-    "x position",
-    "y position",
-    "threshold",
-    "label color",
-    "Node ID",
-    "Min Speed",
-    "Max Speed",
-    "Min Power",
-    "Max Power",
-    "Link Margin",
-    "rx.ecc threshold",
-    "rx.channel [0].min frequency",
-    "tx.channel [0].min frequency",
-    "Node Type",
-    "app.Packet Interarrival Time",
-    "app.Packet Size",
-    "app.Start Time",
-    "battery.Initial Energy",
+FLOW_DESTINATION_FIXED = "fixed"
+FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR = "random_route_or_neighbor"
+FLOW_DESTINATION_MODES = (
+    FLOW_DESTINATION_FIXED,
+    FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
 )
+APPLICATION_PROFILE_CURRENT_SEND_ONLY = "current-send-only"
+APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP = "legacy-send-only-no-dscp"
+APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP = (
+    "legacy-send-to-from-no-dscp"
+)
+APPLICATION_PROFILES = (
+    APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+    APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP,
+    APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+)
+MAC_PROFILE_CURRENT_FINE_FREE_SLOT = "current-fine-free-slot"
+MAC_PROFILE_HIST_2014_ZERO_BASED_REBUILD_LIST = (
+    "hist-2014-zero-based-rebuild-list"
+)
+MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID = (
+    "hist-2015-fine-one-based-table-no-avoid"
+)
+MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE = (
+    "hist-2014-next-tslot-modulo-probe"
+)
+MAC_PROFILES = (
+    MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
+    MAC_PROFILE_HIST_2014_ZERO_BASED_REBUILD_LIST,
+    MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+    MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE,
+)
+# ns-3's MRG32k3a RngStream requires seed < m2 (4294944443), which
+# is narrower than the uint32 storage type accepted by RngSeedManager.
+NS3_RNG_SEED_MAX = 4294944442
 
 SCENARIO_COLUMNS = (
     "record",
@@ -65,6 +67,8 @@ SCENARIO_COLUMNS = (
     "tmm",
     "coordinate_scale_m_per_unit",
     "reservation_control_start_s",
+    "application_profile",
+    "mac_profile",
     "node_id",
     "forced_reservation_slot",
     "name",
@@ -85,6 +89,7 @@ SCENARIO_COLUMNS = (
     "start_s",
     "flow_src",
     "flow_dst",
+    "flow_destination_mode",
     "flow_start_s",
     "flow_interval_s",
     "flow_packet_bytes",
@@ -129,6 +134,7 @@ class Flow:
     interval_s: float
     packet_bytes: int
     dscp: int
+    destination_mode: str = FLOW_DESTINATION_FIXED
 
 
 @dataclass(frozen=True)
@@ -196,28 +202,39 @@ def _read_promoted_value(
 
 
 def _schema_ids(data: bytes, first_node_offset: int) -> dict[str, int]:
-    """Recover file-local attribute IDs from their ordered schema strings."""
-    found: list[tuple[int, str]] = []
-    for name in ATTRIBUTE_NAMES:
-        encoded = name.encode("ascii")
-        position = 512
-        while True:
-            position = data.find(encoded, position, first_node_offset)
-            if position < 0:
-                break
-            # Modeler tfile schema names are uint32-length-prefixed. Checking
-            # the prefix prevents a field such as "threshold" from matching
-            # the suffix of "rx.ecc threshold" and shifting every later ID.
-            if position >= 4 and data[position - 4 : position] == struct.pack(
-                ">I", len(encoded)
-            ):
-                found.append((position, name))
-                break
-            position += 1
-    found.sort()
-    if not found or found[0][1] != "name" or "model" not in {x[1] for x in found}:
+    """Recover every file-local attribute ID from the ordered schema table.
+
+    Modeler assigns promoted attribute IDs by position in this table.  The
+    table is model-dependent: fixed validation nodes omit mobility fields,
+    while campus/mobile nodes insert fields such as ``color``, ``trajectory``,
+    and ``yaw``.  Parsing only fields known to this importer therefore shifts
+    all IDs after the first unfamiliar field.
+    """
+    name_marker = struct.pack(">I", len(b"name")) + b"name"
+    position = data.find(name_marker, 512, first_node_offset)
+    if position < 0:
         raise ImportErrorDetail("could not recover the OPNET node attribute schema")
-    return {name: index + 1 for index, (_, name) in enumerate(found)}
+
+    names: list[str] = []
+    while position + 4 <= first_node_offset:
+        (length,) = struct.unpack_from(">I", data, position)
+        end = position + 4 + length
+        if length == 0 or length > 256 or end > first_node_offset:
+            break
+        try:
+            name = data[position + 4 : end].decode("ascii")
+        except UnicodeDecodeError:
+            break
+        if not name.isprintable():
+            break
+        names.append(name)
+        position = end
+
+    if not names or names[0] != "name" or "model" not in names:
+        raise ImportErrorDetail("could not recover the OPNET node attribute schema")
+    if len(names) != len(set(names)):
+        raise ImportErrorDetail("OPNET node attribute schema contains duplicate names")
+    return {name: index + 1 for index, name in enumerate(names)}
 
 
 def _candidate_node_offsets(data: bytes, name_attribute_id: int) -> list[int]:
@@ -380,11 +397,44 @@ def parse_environment(data: bytes | None) -> dict[str, object]:
             raise ImportErrorDetail(f"DES value {key!r} is not finite")
         return value
 
+    seed_value = number("seed", 128.0)
+    if (
+        not seed_value.is_integer()
+        or seed_value < 1.0
+        or seed_value > NS3_RNG_SEED_MAX
+    ):
+        raise ImportErrorDetail(
+            f"DES seed must be an integer in 1..{NS3_RNG_SEED_MAX}"
+        )
     return {
         "duration_s": number("duration", 60.0),
-        "seed": int(number("seed", 128.0)),
+        "seed": int(seed_value),
         "tmm": values.get("tmm_simulate", "false").strip().lower() == "true",
     }
+
+
+def reject_output_input_alias(output: Path, input_path: Path, label: str) -> None:
+    """Reject lexical, symlink, or inode aliases before an input can be replaced."""
+    try:
+        same_resolved_path = output.resolve(strict=False) == input_path.resolve(
+            strict=False
+        )
+    except (OSError, RuntimeError) as error:
+        raise ImportErrorDetail(
+            f"could not validate output path against {label}: {error}"
+        ) from error
+
+    same_inode = False
+    try:
+        same_inode = output.samefile(input_path)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ImportErrorDetail(
+            f"could not validate output path against {label}: {error}"
+        ) from error
+    if same_resolved_path or same_inode:
+        raise ImportErrorDetail(f"output path aliases {label}: {input_path}")
 
 
 def resolve_source(source: Path, scenario: str | None, environment: str | None) -> ScenarioSource:
@@ -450,6 +500,7 @@ def parse_flow(specification: str) -> Flow:
             interval_s=float(parts[3]),
             packet_bytes=int(parts[4], 0),
             dscp=int(parts[5], 0),
+            destination_mode=FLOW_DESTINATION_FIXED,
         )
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
@@ -485,6 +536,17 @@ def parse_reservation_slot_override(specification: str) -> tuple[int, int]:
     return node_id, slot
 
 
+def parse_gateway_flow_dscp(specification: str) -> int:
+    """Parse the deterministic DSCP modeling choice for inferred flows."""
+    try:
+        dscp = int(specification, 0)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if dscp < 0 or dscp > 7:
+        raise argparse.ArgumentTypeError("gateway flow DSCP must be in 0..7")
+    return dscp
+
+
 def infer_ring_flows(nodes: list[Node]) -> list[Flow]:
     """Create deterministic explicit flows from promoted app attributes."""
     if len(nodes) < 2:
@@ -502,6 +564,95 @@ def infer_ring_flows(nodes: list[Node]) -> list[Flow]:
                 interval_s=node.interarrival_s,
                 packet_bytes=node.packet_bytes,
                 dscp=5,
+                destination_mode=FLOW_DESTINATION_FIXED,
+            )
+        )
+    return flows
+
+
+def infer_gateway_flows(
+    nodes: list[Node],
+    dscp: int = 5,
+    application_profile: str = APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+) -> list[Flow]:
+    """Infer flows using an explicit, executable-backed application profile.
+
+    Current ``br_app`` and legacy send-only executables suppress application
+    traffic at the gateway and direct every other node to the discovered
+    gateway.  Legacy send-to/from executables additionally schedule one flow
+    at the gateway; each admitted gateway packet chooses from the live route
+    table, with a neighbor-table fallback.  The dynamic flow stores the
+    gateway itself as a non-routing placeholder destination and identifies the
+    runtime policy through ``destination_mode``.
+
+    The current profile retains the caller-selected deterministic DSCP
+    modeling choice.  Historical no-DSCP profiles force DSCP zero because
+    their executable packet generators contain no DSCP assignment.
+    """
+    if application_profile not in APPLICATION_PROFILES:
+        raise ImportErrorDetail(
+            f"unsupported application profile {application_profile!r}"
+        )
+    if dscp < 0 or dscp > 7:
+        raise ImportErrorDetail("gateway flow DSCP must be in 0..7")
+    gateways = [node for node in nodes if node.node_type == "gateway"]
+    if len(gateways) != 1:
+        raise ImportErrorDetail(
+            "--infer-gateway-flows requires exactly one gateway node"
+        )
+    gateway_id = gateways[0].node_id
+    profile_dscp = (
+        dscp
+        if application_profile == APPLICATION_PROFILE_CURRENT_SEND_ONLY
+        else 0
+    )
+    flows: list[Flow] = []
+
+    def require_application_fields(node: Node) -> None:
+        missing = [
+            field
+            for field, value in (
+                ("app.Packet Interarrival Time", node.interarrival_s),
+                ("app.Packet Size", node.packet_bytes),
+                ("app.Start Time", node.start_s),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ImportErrorDetail(
+                f"node {node.name!r} lacks promoted application attribute(s) "
+                f"required by --infer-gateway-flows: {', '.join(missing)}"
+            )
+
+    for node in nodes:
+        if node.node_id == gateway_id:
+            continue
+        require_application_fields(node)
+        flows.append(
+            Flow(
+                source=node.node_id,
+                destination=gateway_id,
+                start_s=node.start_s,
+                interval_s=node.interarrival_s,
+                packet_bytes=node.packet_bytes,
+                dscp=profile_dscp,
+                destination_mode=FLOW_DESTINATION_FIXED,
+            )
+        )
+
+    if application_profile == APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP:
+        gateway = gateways[0]
+        require_application_fields(gateway)
+        flows.append(
+            Flow(
+                source=gateway_id,
+                # Runtime destination selection ignores this self placeholder.
+                destination=gateway_id,
+                start_s=gateway.start_s,
+                interval_s=gateway.interarrival_s,
+                packet_bytes=gateway.packet_bytes,
+                dscp=0,
+                destination_mode=FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
             )
         )
     return flows
@@ -520,8 +671,16 @@ def write_scenario(
     nodes: Iterable[Node],
     flows: Iterable[Flow],
     reservation_slot_overrides: dict[int, int],
+    application_profile: str = APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+    mac_profile: str = MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
 ) -> None:
     """Write the rectangular canonical scenario CSV."""
+    if application_profile not in APPLICATION_PROFILES:
+        raise ImportErrorDetail(
+            f"unsupported application profile {application_profile!r}"
+        )
+    if mac_profile not in MAC_PROFILES:
+        raise ImportErrorDetail(f"unsupported MAC profile {mac_profile!r}")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=SCENARIO_COLUMNS, lineterminator="\n")
@@ -536,6 +695,8 @@ def write_scenario(
             seed=str(run["seed"]),
             tmm="1" if run["tmm"] else "0",
             coordinate_scale_m_per_unit=repr(coordinate_scale),
+            application_profile=application_profile,
+            mac_profile=mac_profile,
             reservation_control_start_s=(
                 ""
                 if "reservation_control_start_s" not in run
@@ -579,6 +740,7 @@ def write_scenario(
                 schema=SCHEMA_VERSION,
                 flow_src=str(flow.source),
                 flow_dst=str(flow.destination),
+                flow_destination_mode=flow.destination_mode,
                 flow_start_s=repr(flow.start_s),
                 flow_interval_s=repr(flow.interval_s),
                 flow_packet_bytes=str(flow.packet_bytes),
@@ -589,19 +751,68 @@ def write_scenario(
 
 def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flow]]:
     """Execute one import and return the decoded records for tests."""
+    reject_output_input_alias(arguments.output, arguments.source, "source input")
+    source_is_archive = zipfile.is_zipfile(arguments.source)
+    if not source_is_archive and arguments.environment is not None:
+        reject_output_input_alias(
+            arguments.output,
+            Path(arguments.environment),
+            "DES environment input",
+        )
     resolved = resolve_source(arguments.source, arguments.scenario, arguments.environment)
+    if (
+        not source_is_archive
+        and arguments.environment is None
+        and resolved.environment_name is not None
+    ):
+        reject_output_input_alias(
+            arguments.output,
+            Path(resolved.environment_name),
+            "auto-detected DES environment input",
+        )
     network_data = resolved.read(resolved.network_name)
     environment_data = (
         None if resolved.environment_name is None else resolved.read(resolved.environment_name)
     )
     nodes = parse_network_model(network_data, arguments.coordinate_scale)
     flows = list(arguments.flow)
+    inference_modes = int(arguments.infer_ring_flows) + int(
+        arguments.infer_gateway_flows
+    )
+    if flows and inference_modes:
+        raise ImportErrorDetail("--flow and inferred flows are mutually exclusive")
+    if inference_modes > 1:
+        raise ImportErrorDetail("flow inference modes are mutually exclusive")
+    if (
+        arguments.application_profile != APPLICATION_PROFILE_CURRENT_SEND_ONLY
+        and not arguments.infer_gateway_flows
+    ):
+        raise ImportErrorDetail(
+            "--application-profile requires --infer-gateway-flows"
+        )
     if arguments.infer_ring_flows:
-        if flows:
-            raise ImportErrorDetail("--flow and --infer-ring-flows are mutually exclusive")
         flows = infer_ring_flows(nodes)
+    elif arguments.infer_gateway_flows:
+        flows = infer_gateway_flows(
+            nodes,
+            arguments.gateway_flow_dscp,
+            arguments.application_profile,
+        )
     known_ids = {node.node_id for node in nodes}
     for flow in flows:
+        if flow.destination_mode not in FLOW_DESTINATION_MODES:
+            raise ImportErrorDetail(
+                f"flow {flow.source}->{flow.destination} has unsupported "
+                f"destination mode {flow.destination_mode!r}"
+            )
+        if (
+            flow.destination_mode == FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR
+            and flow.source != flow.destination
+        ):
+            raise ImportErrorDetail(
+                "random_route_or_neighbor flow requires its source as the "
+                "placeholder destination"
+            )
         if flow.source not in known_ids or flow.destination not in known_ids:
             raise ImportErrorDetail(
                 f"flow {flow.source}->{flow.destination} references an unknown node"
@@ -623,8 +834,8 @@ def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flo
             raise ImportErrorDetail("--duration must be finite and positive")
         run["duration_s"] = arguments.duration
     if arguments.seed is not None:
-        if arguments.seed < 0 or arguments.seed > 0xFFFFFFFF:
-            raise ImportErrorDetail("--seed must be in 0..4294967295")
+        if arguments.seed < 1 or arguments.seed > NS3_RNG_SEED_MAX:
+            raise ImportErrorDetail(f"--seed must be in 1..{NS3_RNG_SEED_MAX}")
         run["seed"] = arguments.seed
     if arguments.reservation_control_start is not None:
         control_start = arguments.reservation_control_start
@@ -651,6 +862,8 @@ def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flo
         nodes,
         flows,
         reservation_slot_overrides,
+        arguments.application_profile,
+        arguments.mac_profile,
     )
     if resolved.environment_name is None:
         print(
@@ -700,7 +913,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        help="override the paired DES random seed in the canonical run row",
+        help=(
+            "override the paired DES random seed in the canonical run row "
+            f"with a value in 1..{NS3_RNG_SEED_MAX}"
+        ),
     )
     parser.add_argument(
         "--reservation-control-start",
@@ -711,6 +927,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--infer-ring-flows",
         action="store_true",
         help="make a deterministic ring from promoted app attributes",
+    )
+    parser.add_argument(
+        "--infer-gateway-flows",
+        action="store_true",
+        help=(
+            "infer non-gateway-to-gateway destinations from br_app behavior "
+            "and timing/size from promoted app attributes"
+        ),
+    )
+    parser.add_argument(
+        "--application-profile",
+        choices=APPLICATION_PROFILES,
+        default=APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+        help=(
+            "executable-backed br_app profile used with "
+            "--infer-gateway-flows (default: current-send-only)"
+        ),
+    )
+    parser.add_argument(
+        "--mac-profile",
+        choices=MAC_PROFILES,
+        default=MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
+        help=(
+            "executable-backed MAC reservation profile recorded in the run "
+            "row (default: current-fine-free-slot)"
+        ),
+    )
+    parser.add_argument(
+        "--gateway-flow-dscp",
+        type=parse_gateway_flow_dscp,
+        default=5,
+        metavar="0..7",
+        help=(
+            "deterministic DSCP modeling choice for the current send-only "
+            "profile; legacy no-DSCP profiles force zero (default: 5)"
+        ),
     )
     return parser
 

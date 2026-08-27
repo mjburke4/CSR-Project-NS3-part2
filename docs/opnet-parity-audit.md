@@ -311,14 +311,57 @@ external-closure boundary are documented in `docs/opnet-phy-ber-ecc.md`.
 ## Step 9: scenario import and differential traces
 
 The binary Modeler scenario boundary is now explicit and executable. The
-versioned importer recovers file-local promoted attribute IDs, so it handles
-both the normal CSR schema and the shifted one-node schema without hard-coded
-field numbers. All eight supplied validation `*.nt.m` models and their paired
-DES environments import successfully.
+versioned importer recovers the complete contiguous promoted-attribute schema
+and file-local IDs, so it handles normal, shifted one-node, and older/mobile
+campus records without hard-coded field numbers. All 12 recovered campus
+`*.nt.m` models and their paired DES environments import successfully.
+`--infer-gateway-flows` now requires an explicit executable-backed application
+profile. The selected 2014/15 two-node and hidden-symmetrical executables use
+send-to-and-from-gateway behavior; the selected multihop executable uses
+send-only-to-gateway. All three historical packet generators lack DSCP code,
+so their profiles force FIFO DSCP 0. The newer supplied source remains a
+separate send-only profile with an explicit fixed-DSCP approximation.
+
+The canonical run row also carries an executable-backed `mac_profile`.
+Selection is hash-bound and explicit; it is never inferred from a topology,
+scenario name, or node count because a network model can be paired with a
+different compiled executable. All four supported profiles are recorded here:
+
+| MAC profile | Source or executable binding | Exact selection family |
+| --- | --- | --- |
+| `current-fine-free-slot` | Supplied newer `br_mac.pr.c`; no recovered executable SHA binding | Fine range, one-based free-slot ordinal, with neighbor `rtslot_counter` reservations. |
+| `hist-2014-zero-based-rebuild-list` | `d9ebf7626e641ee68ccc9b58b1bb4b28fc0906111762e4456a0e8c7a0bd8b055` | Coarse range, uniform ordered-list support `0..R-1`, no reservation avoidance. |
+| `hist-2015-fine-one-based-table-no-avoid` | `dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0` | Fine range, ordered-table support `1..R` for `R<=254`, no reservation avoidance. |
+| `hist-2014-next-tslot-modulo-probe` | `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` | Coarse range, initial support `0..R`, then direct neighbor-`next_tslot` modulo probing. |
+
+The coarse mapping is `N<=4 -> R=31`, `5..8 -> 63`, `9..12 -> 127`, and
+`N>=13 -> 255`. The exact fine mapping for `N=0..16` is respectively
+`15,18,21,25,31,37,44,52,63,75,89,106,127,151,180,214,255`, with other
+values selecting 255. The zero-based executable rebuilds entries `0..R-1`
+and draws `floor(uniform(R))`; its separate `max_tslot=R+1` assignment does
+not extend that support. The fine-table executable builds indexes `0..254`
+and dereferences `floor(uniform(R))+1`. All five of its call sites pass
+`rn_range`; the archived binary initializes it to zero, never assigns it
+again, and the selected network/environment files do not configure it, so the
+default mapping applies. Its dormant positive-after-first-transmission
+override would replace `R`. A selected index 255 is the historical
+out-of-bounds defect and now fails explicitly instead of being clamped or
+wrapped.
+
+The modulo-probe executable draws `floor(uniform(R+1))`, compares the candidate
+directly with every neighbor's `next_tslot`, and on collision advances with
+`(candidate+1)%R`. Thus `R` is returnable only as a free initial draw; after a
+collision the search covers `0..R-1`, with `R -> 1` and `R-1 -> 0`. If all of
+that modulo domain is occupied, the historical code loops forever even if
+`R` is free. The corresponding profile detects the completed cycle and fails
+explicitly. Full disassembly semantics, endpoints, and the import command are
+in `docs/opnet-scenario-differential-harness.md`.
 
 The ns-3 runner creates the corresponding node roles, coordinates, link
 distances, rate/power limits, link margin, ECC threshold, frequency, duration,
-and seed. It emits a canonical ordered trace across scenario construction,
+and seed. Its parity mode starts every receiver in Idle, performs no random
+wake-phase draw, and issues the first common WAKE at exactly 0.988 seconds.
+It emits a canonical ordered trace across scenario construction,
 application, MAC state, transmission, PHY accept/drop, NWK delivery, and route
 changes. The comparator normalizes common OPNET CSV column/event aliases,
 aligns event identities without discarding ordering, applies explicit numeric
@@ -326,12 +369,54 @@ tolerances, and reports missing, extra, replaced, or field-mismatched events.
 Every run records normalized inputs, a JSON report, logs, hashes, and exact
 commands in a manifest.
 
-No historical result database is present in the supplied archives. If an
-`.ov` output-vector database is recovered, it can provide aggregate count/drop
-checkpoints rather than packet-level event ordering. An OPNET CSV event export
-is still required to populate the reference side of a full differential
-certification. Exact formats, commands, assumptions, and this boundary are
-documented in `docs/opnet-scenario-differential-harness.md`.
+The application runner schedules the next constant generator event before
+all gates, caches the discovered gateway, supports the historical gateway's
+live destination draw, and writes one compact admission row per flow. Those
+rows partition attempts into discovery, empty topology, unknown gateway route,
+missing dynamic destination, NSDP-full, and admitted counts without expanding
+the event trace by tens of millions of suppressed attempts.
+
+Historical result databases are now available and executable evidence. The
+read-only extractor decoded 10 complete Modeler `*.ov` files containing 109
+vectors and 10,900 buckets, with exact paired-`*.pb.m` identity checks. Two
+partial fragments with zero-length vectors are rejected in strict mode rather
+than treated as results. The aggregate workflow runs an imported scenario,
+derives source-equivalent ns-3 buckets, compares exact statistic/unit/
+aggregation identities, and records all commands, hashes, and statuses.
+
+Full core-statistic two-node, symmetrical hidden-node, and multihop
+comparisons align all 800 selected points in each case without missing or
+extra timestamps. The recovered application packet size matches exactly with
+the source-backed
+`configured_bytes - 8` modeled network packet. With the hash-bound application
+and MAC profiles, the two-node OPNET/ns-3 means are 16.4417/16.3597 sent,
+16.4373/16.3474 received, and 1.45125/1.42737 seconds delay. Hidden-node means
+are 12.1707/12.7283 sent, 11.4370/12.0342 received, and 9.17976/8.40223 seconds
+delay. Multihop remains the outlier at 2.0120/2.45667 sent,
+1.90167/2.29000 received, and 112.748/91.4031 seconds delay. Exact-tolerance
+reports still contain 696, 700, and 665 numeric mismatches respectively, plus
+20 correctly skipped multihop no-sample values; close means are calibration
+evidence, not claimed bucket parity.
+
+The source-exact multihop queue diagnostic also aligns all 400 positions for
+HOP resend size, MAC ACK size, MAC Tx size, and MAC Tx queuing delay. It
+compares 394 numeric pairs and preserves six no-sample cases. For bucket ends
+strictly after 300 seconds, ns-3 is 16.10% high in HOP resend size, 12.57% low
+in ACK size, 13.66% high in Tx size, and 8.85% high in Tx queuing delay. MAC
+queuing delay is therefore higher while end-to-end delay is lower, moving the
+next isolation boundary to route/path identity and NWK/HOP residence.
+
+The hidden-node ECC-drop probe also exposes a deliberately unresolved identity
+mapping: Modeler records 10.84105
+dropped packets/s on average, while ns-3's narrow `reason=ecc` event
+classification records 0.6195167 packets/s. It is excluded from the default
+equivalence set until prior-stage rejection accounting is reconciled. The
+`*.ov` files contain bucket aggregates rather than packet-level ordering, so
+an instrumented OPNET CSV event export remains necessary for reservation/
+collision event certification. Exact formats, commands, measured results, and
+this evidence boundary are documented in
+`docs/opnet-scenario-differential-harness.md` and
+`docs/opnet-aggregate-comparison.md`.
 
 The first reference case is now fully specified and locally executable. It
 uses the recovered three-node validation geometry, two 600-byte sends at 60 s,
@@ -346,11 +431,22 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Execute the prepared reservation/collision case in licensed Modeler, retain
-   its CSV and provenance manifest, validate it, and run the real differential
-   comparison.
-2. Reproduce synchronization-threshold variance for calibrated runs.
-3. Close exact security-wrapper gaps for remaining HOP control packets and the
+1. Add source-ordered delivered-hop/path, NWK queue/admission, and HOP/NWK
+   residence observers for the recovered multihop case. The completed queue
+   comparison puts ns-3 16.10% high in HOP resend size, 13.66% high in MAC Tx
+   size, and 8.85% high in MAC Tx queuing delay after startup, even though its
+   end-to-end delay is 18.93% low; the remaining delay is therefore not a
+   simple fast-MAC-service residual.
+2. Compare route convergence, path selection, and application
+   source/destination admission against the recovered route tables and
+   executable-era runtime semantics. Keep ECC/prior-stage rejection accounting
+   as a separate statistic-identity problem rather than folding it into queue
+   calibration.
+3. When licensed Modeler access is available, execute the prepared
+   reservation/collision case, retain its CSV and provenance manifest,
+   validate it, and run the event-order differential comparison.
+4. Reproduce synchronization-threshold variance for calibrated runs.
+5. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
 
@@ -378,22 +474,25 @@ the licensed Modeler export. The complete one-run handoff is documented in
 4. Sustained lossy overload across all queue limits with counter invariants.
 5. Three-or-more-signal mixed-rate intervals and multiple competing same-rate
    JSR records under the recovered receiver-global last-collision state.
-6. An authoritative OPNET CSV reference run using the now-identical imported
-   topology, explicit traffic, and seed.
+6. An authoritative OPNET CSV event reference using the now-identical imported
+   topology, explicit traffic, and seed. Historical aggregate results are
+   available but cannot substitute for chronological events.
 7. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
    during admission. Focused tests now cover authenticated security-count
    restart and wrap.
 
 ## Current regression baseline
 
-All 31 CSR executable targets build on this audit revision. The 29 focused
+All 32 CSR executable targets build on this audit revision. The 30 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (31/31), along with all nine focused Python importer, comparator,
-and instrumenter tests. The importer additionally decodes all eight supplied
-validation network models and paired DES environments. The end-to-end fixture
-produces five
-ordered events on each side with zero missing, extra, replaced, field-mismatch,
-or coverage-gap results. The packet-envelope
+workflow pass (32/32). The focused Python suite additionally covers the
+scenario importer, event comparator/instrumenter, conservative `*.ov`
+extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
+aggregate workflow. The importer decodes all 12 recovered campus network
+models and paired DES environments, while strict vector extraction accepts all
+10 complete historical results and rejects both partial fragments. The event
+end-to-end fixture produces five ordered events on each side with zero missing,
+extra, replaced, field-mismatch, or coverage-gap results. The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
 size tags. The relay-holdoff test covers command bytes, one-hop no-ACK
@@ -417,6 +516,10 @@ RTS TSLOT, the shared local/neighbor phase, `prep_tx` holdoff restart,
 first-contact reservation ordering, persistent advertisement/reuse,
 expiry/redraw ordering,
 SYNC/Track activation, real HOP retry reuse, and delayed-packing state gates.
+The queue-observation test adds exact source write-site and ordering checks for
+HOP enqueue/ACK removal, MAC data admission/selection delay, ACK duplicate and
+cumulative-update suppression, unchanged full-queue rejection, and
+one-plus-four resend-limit removal.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and
 same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table

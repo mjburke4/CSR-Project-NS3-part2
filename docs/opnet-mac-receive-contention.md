@@ -117,8 +117,8 @@ recorded as a miss.
 - a real HOP retry that consumes the preceding advertised slot; and
 - cancellation of a delayed packing retry on entry to Idle.
 
-The complete regression baseline is 29 focused smoke tests plus
-`csr-mac-demo-split`, all passing (30/30).
+The complete regression baseline is 30 focused smoke tests plus
+`csr-mac-demo-split` and the imported-scenario runner, all passing (32/32).
 
 ## Remaining PHY boundary
 

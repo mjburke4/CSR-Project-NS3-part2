@@ -133,6 +133,15 @@ OPNET scenario import and differential comparison:
 5. See docs/opnet-scenario-differential-harness.md for schemas, commands,
    tolerances, artifacts, and the OPNET CSV export boundary.
 
+Historical OPNET aggregate comparison:
+1. Decode a recovered Modeler *.ov with utils/extract-opnet-ov.py, optionally
+   cross-checking its paired *.pb.m definition.
+2. Run an imported scenario and compare source-equivalent ns-3 buckets with
+   utils/run-opnet-aggregate-differential.py.
+3. See docs/opnet-aggregate-comparison.md for the canonical schema, exact
+   source-level application packet sizing, measured historical mismatches,
+   and the aggregate-versus-event evidence boundary.
+
 The deterministic three-node reservation/collision reference, SHA-checked
 OPNET instrumentation, evidence validator, and licensed-run handoff are in
 docs/opnet-reservation-collision-reference.md.

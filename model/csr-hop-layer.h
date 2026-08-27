@@ -1088,8 +1088,15 @@ CsrHopLayer::ProtectPairwisePayload (
                                           mode,
                                           legacyPacketType,
                                           plaintext);
-  return Create<Packet> (protectedMessage.record.data (),
-                         protectedMessage.record.size ());
+  Ptr<Packet> protectedPacket =
+    Create<Packet> (protectedMessage.record.data (),
+                    protectedMessage.record.size ());
+  CsrDifferentialAppTag appTag;
+  if (payload->PeekPacketTag (appTag))
+    {
+      protectedPacket->AddPacketTag (appTag);
+    }
+  return protectedPacket;
 }
 
 void
@@ -1946,6 +1953,11 @@ CsrHopLayer::HandleProtectedPairwiseData (
 
   Ptr<Packet> plaintext = Create<Packet> (received.payload.data (),
                                           received.payload.size ());
+  CsrDifferentialAppTag appTag;
+  if (recordPacket->PeekPacketTag (appTag))
+    {
+      plaintext->AddPacketTag (appTag);
+    }
   bool firstReception = CheckReceivedSeq (header.GetSrc (),
                                           header.GetSeq (),
                                           true);
@@ -2993,6 +3005,10 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
       if (&(*it) == entry)
         {
           m_resendQueue.erase (it);
+          WriteDifferentialStatisticSample (
+            m_nodeId,
+            CSR_STAT_HOP_RESEND_QUEUE_SIZE,
+            static_cast<double> (m_resendQueue.size ()));
           break;
         }
     }
@@ -3237,6 +3253,10 @@ CsrHopLayer::EnqueueResend (
     }
 
   m_resendQueue.push_back (e);
+  WriteDifferentialStatisticSample (
+    m_nodeId,
+    CSR_STAT_HOP_RESEND_QUEUE_SIZE,
+    static_cast<double> (m_resendQueue.size ()));
 }
 
 void
@@ -3467,6 +3487,10 @@ CsrHopLayer::CheckResend ()
             }
 
           it = m_resendQueue.erase (it);
+          WriteDifferentialStatisticSample (
+            m_nodeId,
+            CSR_STAT_HOP_RESEND_QUEUE_SIZE,
+            static_cast<double> (m_resendQueue.size ()));
           continue;
         }
 
