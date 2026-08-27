@@ -119,8 +119,9 @@ Every completed tracked signal now retains a `CsrRxDecision` with:
 
 The receive CSV contains the same fields, including band overlap and path-model
 identifier. This gives the later differential-trace tooling direct
-TX-power-to-accept/drop evidence even though the supplied `.ov` files contain
-only aggregate receiver-drop vectors rather than per-packet PHY intermediates.
+TX-power-to-accept/drop evidence. No historical result database is present in
+the supplied archives; a recovered `.ov` file would normally provide aggregate
+receiver-drop vectors rather than these per-packet PHY intermediates.
 
 ## Verification
 

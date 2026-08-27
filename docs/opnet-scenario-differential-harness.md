@@ -51,11 +51,12 @@ does not promote it per node. The runner therefore applies that source-backed
 node-model default. TMM terrain runs are rejected explicitly rather than
 silently falling back to the non-terrain propagation model.
 
-The supplied `*.ov` files are Modeler output-vector databases containing
-aggregate statistics. They are useful as aggregate drop/count checkpoints,
-but they do not expose the packet-level ordering needed by the differential
-event comparator. An OPNET event export in CSV form is still required for an
-event-by-event certification run.
+Historical Modeler runs commonly produce `*.ov` output-vector databases with
+aggregate statistics, but no result database is present in the supplied
+archives. If one is recovered, it can provide aggregate drop/count
+checkpoints; it will not expose the packet-level ordering needed by the
+differential event comparator. An OPNET event export in CSV form is still
+required for an event-by-event certification run.
 
 ## Canonical scenario schema
 

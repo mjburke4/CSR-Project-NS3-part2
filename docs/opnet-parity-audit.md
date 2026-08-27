@@ -326,11 +326,12 @@ tolerances, and reports missing, extra, replaced, or field-mismatched events.
 Every run records normalized inputs, a JSON report, logs, hashes, and exact
 commands in a manifest.
 
-The supplied `.ov` files are aggregate output-vector databases rather than
-packet-level event logs. They remain valid count/drop checkpoints, but an OPNET
-CSV event export is required to populate the reference side of a full
-differential certification. Exact formats, commands, assumptions, and this
-boundary are documented in `docs/opnet-scenario-differential-harness.md`.
+No historical result database is present in the supplied archives. If an
+`.ov` output-vector database is recovered, it can provide aggregate count/drop
+checkpoints rather than packet-level event ordering. An OPNET CSV event export
+is still required to populate the reference side of a full differential
+certification. Exact formats, commands, assumptions, and this boundary are
+documented in `docs/opnet-scenario-differential-harness.md`.
 
 The first reference case is now fully specified and locally executable. It
 uses the recovered three-node validation geometry, two 600-byte sends at 60 s,
