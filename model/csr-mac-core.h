@@ -131,7 +131,47 @@ class CsrMacCore
                    "receiver transition cannot enter the Tx state");
     if (!m_txInProgress && m_state != state)
       {
+        State previous = m_state;
         m_state = state;
+
+        // br_mac.dsp_off() stops both slot and holdoff timers on entry to
+        // Idle, while start_search() restarts the two timers independently.
+        // A Track/Search transition does not restart either timer.
+        if (state == State::IDLE)
+          {
+            m_txPreparationActive = false;
+            m_txHoldoffOver = false;
+            if (m_idleRtsEvent.IsPending ())
+              {
+                Simulator::Cancel (m_idleRtsEvent);
+              }
+            if (m_txEvent.IsPending ())
+              {
+                Simulator::Cancel (m_txEvent);
+              }
+            if (m_txHoldoffEvent.IsPending ())
+              {
+                Simulator::Cancel (m_txHoldoffEvent);
+              }
+            StopSlotTick ();
+            if (HasPendingFrame ())
+              {
+                ScheduleIdleRts ();
+              }
+          }
+        else if (previous == State::IDLE && state == State::SEARCH)
+          {
+            StartSearchTiming ();
+          }
+        else if (previous == State::TRACK &&
+                 state == State::SEARCH &&
+                 HasPendingFrame ())
+          {
+            // br_mac.back2search() resumes or starts PREP_TX immediately;
+            // it does not wait for the next TSLOT after a tracked receive.
+            ActivateTxPreparation ();
+          }
+
         CsrDifferentialTraceEvent event;
         event.event = "mac_state";
         event.node = CsrTraceInteger (m_nodeId);
@@ -321,6 +361,30 @@ class CsrMacCore
     return (it == m_neighbors.end ()) ? -1 : it->second.rtCounter;
   }
 
+  /** Return the sender's live OPNET txslot_counter value. */
+  int32_t GetLocalReservationCounter () const
+  {
+    return m_txCountdownCounter;
+  }
+
+  /** Return the reservation carried in the most recent OTA frame. */
+  int32_t GetLastAdvertisedReservationSlot () const
+  {
+    return m_lastAdvertisedReservationSlot;
+  }
+
+  /** Return the reservation consumed by the most recent transmission. */
+  int32_t GetLastTxOpportunitySlot () const
+  {
+    return m_lastTxOpportunitySlot;
+  }
+
+  /** Return whether br_mac PREP_TX is active. */
+  bool IsTxPreparationActive () const
+  {
+    return m_txPreparationActive;
+  }
+
   // Called by Hop layer to enqueue a full over-the-air frame
   void EnqueueTxFrame (Ptr<Packet> frame,
                        CsrNodeId dest,
@@ -350,8 +414,18 @@ class CsrMacCore
   void NoteHeardFrom (CsrNodeId neighbor, double tRx)
   {
     m_lastHeardSec[neighbor] = tRx;
+    auto neighborIt = m_neighbors.find (neighbor);
+    bool alreadyKnown = neighborIt != m_neighbors.end ();
     NeighborInfo &info = m_neighbors[neighbor];
     info.lastHeardSec = tRx;
+    if (alreadyKnown)
+      {
+        // br_mac.proc_rx_pk() tries to apply the advertised reservation before
+        // its later ACKable-reception path adds an unknown sender.  A neighbor
+        // that existed before this reception is therefore eligible; the first
+        // reception that creates it is not.
+        info.reservationEligible = true;
+      }
     // pathloss may be updated separately
   }
 
@@ -369,8 +443,21 @@ class CsrMacCore
         StartSlotTick (m_slotTickPeriod);
       }
 
+    auto neighborIt = m_neighbors.find (neighbor);
+    if (neighborIt != m_neighbors.end () &&
+        !neighborIt->second.reservationEligible)
+      {
+        std::cout << "[MAC " << m_nodeId
+                  << "] Ignore first-contact reservation from unknown neighbor "
+                  << neighbor
+                  << " slot=" << slot
+                  << std::endl;
+        return;
+      }
+
     NeighborInfo &info = m_neighbors[neighbor];
 
+    info.reservationEligible = true;
     info.reserveSlot = slot;
     // OPNET copies the advertised "Reserve TSlot" into both fields.  The
     // counter then advances toward the neighbor's next transmission once per
@@ -437,7 +524,8 @@ private:
     double lastPathlossDb { NAN };
     double lastSnrDb { NAN };
     int32_t reserveSlot { -1 };   // neighbor's reserved timeslot (if tracked)
-    int32_t rtCounter   {  0 };   // how long to honor that reservation
+    int32_t rtCounter   { -1 };   // how long to honor that reservation
+    bool reservationEligible {false}; // known before the current reception
   };
 
   struct TxQueueEntry
@@ -483,8 +571,12 @@ private:
   void MaybeScheduleNextTx ();
   void EnqueueAckFrame (Ptr<Packet> frame, const CsrHeader &header);
   bool HasPendingFrame () const;
-  void ScheduleTxOpportunity (int slot, Time notBefore, bool initialHoldoff);
-  void AdvanceTxCountdown ();
+  void StartSearchTiming ();
+  void ScheduleIdleRts ();
+  void IdleRts ();
+  void StartTxHoldoff ();
+  void TxHoldoffExpired ();
+  void ActivateTxPreparation (bool redrawZero = false);
   void FinishTx ();
   void DoTx ();
   int SelectQueuedFrameRate (Ptr<Packet> frame,
@@ -520,9 +612,15 @@ private:
   double                              m_lastTxPowerDbm {0.0};
   int                                 m_scheduledTxSlot {-1};
   int                                 m_txCountdownCounter {-1};
+  int                                 m_lastAdvertisedReservationSlot {-1};
+  int                                 m_lastTxOpportunitySlot {-1};
+  bool                                m_txPreparationActive {false};
+  bool                                m_txHoldoffOver {false};
   bool                                m_txInProgress {false};
   bool                                m_syncPresent {false};
   State                               m_state {State::SEARCH};
+  EventId                             m_idleRtsEvent;
+  EventId                             m_txHoldoffEvent;
   EventId                             m_finishTxEvent;
   std::map<CsrNodeId, NeighborInfo>    m_neighbors;
   Time                                m_neighborTimeout { Seconds (6.0) };   // default: 3x hello interval (if hello=2s)
@@ -718,6 +816,13 @@ private:
 void
 CsrMacCore::StartSlotTick (Time period)
 {
+  if (m_slotTickEnabled &&
+      m_slotTickEvent.IsPending () &&
+      period == m_slotTickPeriod)
+    {
+      return;
+    }
+
   m_slotTickPeriod  = period;
   m_slotTickEnabled = true;
 
@@ -726,7 +831,15 @@ CsrMacCore::StartSlotTick (Time period)
       Simulator::Cancel (m_slotTickEvent);
     }
 
-  m_slotTickEvent = Simulator::Schedule (m_slotTickPeriod, &CsrMacCore::SlotTick, this);
+  NS_ABORT_MSG_IF (!m_slotTickPeriod.IsPositive (),
+                   "CSR MAC slot period must be positive");
+
+  // br_mac start_search()/prep_tx() establish the TSLOT phase relative to
+  // the transition that wakes the receiver.  The phase remains stable until
+  // dsp_off() cancels the timer; it is not snapped to a simulation-wide grid.
+  m_slotTickEvent = Simulator::Schedule (m_slotTickPeriod,
+                                         &CsrMacCore::SlotTick,
+                                         this);
 }
 
 void
@@ -739,32 +852,6 @@ CsrMacCore::StopSlotTick ()
     }
 }
 
-/*void
-CsrMacCore::SlotTick ()
-{
-  if (!m_slotTickEnabled)
-    {
-      return;
-    }
-
-  // Decay neighbor reservations over time (not only on TX)
-  for (auto &kv : m_neighbors)
-  {
-    auto &ni = kv.second;
-    if (ni.rtCounter > 0)
-    {
-      ni.rtCounter--;
-      if (ni.rtCounter == 0) ni.reserveSlot = -1;
-        std::cout << "[MAC " << m_nodeId << "] SlotTick neighbor " << kv.first
-                << " rtCounter=" << ni.rtCounter
-                << " reserveSlot=" << ni.reserveSlot
-                << std::endl;
-    }
-  }
-  // Re-arm
-  m_slotTickEvent = Simulator::Schedule (m_slotTickPeriod, &CsrMacCore::SlotTick, this);
-}*/
-
 void
 CsrMacCore::SlotTick ()
 {
@@ -773,18 +860,27 @@ CsrMacCore::SlotTick ()
       return;
     }
 
+  // br_mac reset_tslot_timer runs before any per-state work.  Re-arm first
+  // so a TX completion exactly on a boundary cannot redefine the phase.
+  m_slotTickEvent =
+    Simulator::Schedule (m_slotTickPeriod,
+                         &CsrMacCore::SlotTick,
+                         this);
+
   // OPNET tslot_tasks() advances reservation counters only in Search_st and
   // only while no SYNC preamble is present.  Idle, Track, Tx, and Search with
   // SYNC all keep the 13-ms timer running without changing the counters.
-  if (m_state == State::SEARCH && !m_syncPresent)
+  if (m_state == State::SEARCH)
     {
-      for (auto &kv : m_neighbors)
+      if (!m_syncPresent)
         {
-          CsrNodeId neighbor = kv.first;
-          NeighborInfo &ni = kv.second;
-
-          if (ni.rtCounter >= 0)
+          for (auto &kv : m_neighbors)
             {
+              CsrNodeId neighbor = kv.first;
+              NeighborInfo &ni = kv.second;
+
+              // The source's temporary `if (1)` decrements every neighbor on
+              // every eligible Search tick, including already-expired values.
               ni.rtCounter--;
 
               if (ni.rtCounter == -1)
@@ -796,13 +892,45 @@ CsrMacCore::SlotTick ()
                             << std::endl;
                 }
             }
+
+          // The sender's txslot_counter advances on this same 13-ms phase.  In
+          // br_mac this continues even with empty queues so a reservation carried
+          // by the preceding OTA frame remains live for a later enqueue.
+          if (m_txHoldoffOver && m_txCountdownCounter >= 0)
+            {
+              m_txCountdownCounter--;
+
+              if (m_txCountdownCounter == -1 &&
+                  !m_txPreparationActive)
+                {
+                  m_scheduledTxSlot = -1;
+                  std::cout << "[MAC " << m_nodeId
+                            << "] local advertised reservation expired"
+                            << std::endl;
+                }
+            }
+
+          if (m_txPreparationActive &&
+              HasPendingFrame () &&
+              m_txCountdownCounter == -1 &&
+              !m_txEvent.IsPending ())
+            {
+              DoTx ();
+              return;
+            }
+        }
+
+      // OPNET keeps this PREP_TX activation outside its !SYNC_PRES block.
+      // A Search-state arrival can therefore select/reuse a reservation while
+      // synchronization is present, although the counter stays frozen.
+      if (!m_txPreparationActive && HasPendingFrame ())
+        {
+          // Source ordering is deliberate: an empty reservation advances
+          // before newly queued traffic activates.  In particular, counter
+          // zero expires and selects a new slot rather than being reused.
+          ActivateTxPreparation ();
         }
     }
-
-  m_slotTickEvent =
-    Simulator::Schedule (m_slotTickPeriod,
-                         &CsrMacCore::SlotTick,
-                         this);
 }
 
 // SendHello() moved after CsrNetDevice definition (see below)

@@ -1,6 +1,6 @@
 # OPNET PHY front-end parity
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 ## Scope
 
@@ -89,15 +89,19 @@ signals are handled by payload rate:
 | --- | --- | --- |
 | Different rate | Add the other received power in watts to `NOISE_ACCUM`; track peak total noise and minimum SNR | Interval SNR and standard payload BER |
 | Same spread rate (8-128 kbit/s) | Do not add power to noise; retain strongest jammer-to-signal ratio and signed start-time offset | Exact `csr_*dBJSR_*ChipOff` table lookup |
-| Owner-confirmed extended DQPSK rate (500/1000 kbit/s) | Retain the strongest jammer-to-signal ratio and derive its payload-noise contribution | `dqpsk` lookup at the interference-adjusted payload SNR |
+| Extended high-rate differential mode (500-kbit/s DPSK or 1000-kbit/s DQPSK) | Retain each tracked signal's signed jammer/desired ratio and derive its payload-noise contribution | Rate-specific analytical DPSK or recovered `dqpsk` lookup at the interference-adjusted payload SNR |
 
 This preserves the otherwise surprising split in `br_inoise`: a same-rate
 jammer can corrupt a frame without changing the SNR reported by `br_snr`.
-The DQPSK adjustment is payload-local because the supplied archive contains no
-500/1000-kbit/s JSR/offset collision tables; the S0 header remains on its
-collision-table path. This rule belongs to the opt-in owner-confirmed extended
-profile. It is not claimed as an exact branch of the supplied `br_inoise` or
-`br_ber` C files.
+The high-rate differential adjustment is payload-local because the supplied
+archive contains no 500/1000-kbit/s JSR/offset collision tables; the S0 header
+remains on its collision-table path. The 500-kbit/s payload evaluates the
+recovered `DPSK_PB` equation, while the 1000-kbit/s payload uses the recovered
+`dqpsk` table. A stronger post-lock jammer retains positive JSR rather than
+being reconstructed from the receiver-global weaker/stronger diagnostic, and
+the active high-rate jammer set is recomputed when an overlap ends. This rule
+belongs to the opt-in extended profile. It is not claimed as an exact branch
+of the supplied `br_inoise` or `br_ber` C files.
 The live modulation-table and ECC path now decides whether a selected collided
 frame survives. The deterministic hard-collision boundary remains only when a
 test explicitly installs a compatibility BER hook.

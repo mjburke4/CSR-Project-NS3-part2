@@ -87,6 +87,10 @@ struct CsrBerInterval
   bool sameRateInterference {false}; ///< Select the payload collision table.
   double jsrDb {-1000.0}; ///< Receiver-global jammer-to-signal ratio.
   double timeOffsetSeconds {0.0}; ///< Receiver-global signed time offset.
+  bool highRatePayloadJammer {false}; ///< Per-signal high-rate fallback state.
+  double highRatePayloadJsrDb {
+    -std::numeric_limits<double>::infinity ()
+  }; ///< Signed high-rate jammer/desired ratio.
 };
 
 /** Header and payload BER values selected for one interval. */
@@ -217,9 +221,8 @@ CsrPerModelPlaceholder (int rateKbps, double snrDb, uint32_t nBits)
  * Return the four-bit payload interval for an operational rate key.
  *
  * The 8-128-kbit/s values are source-exact nibble durations. The 500/1000
- * values are four-bit accounting intervals derived from the owner-confirmed
- * bit rates; the recovered modem files do not establish their physical DQPSK
- * symbol framing.
+ * values are four-bit accounting intervals derived from the recovered 500-
+ * ksymbol/s DPSK/DQPSK modem definitions.
  */
 inline double
 CsrSymbolDurationSeconds (int rateKbpsKey)
@@ -260,11 +263,56 @@ CsrRateKeyToBps (int rateKbpsKey)
   return 4.0 / CsrSymbolDurationSeconds (rateKbpsKey);
 }
 
-/** Return true for owner-confirmed high-rate keys using the DQPSK curve. */
+/** Return true for the recovered 500-kbit/s differential-BPSK mode. */
+inline bool
+CsrIsDpskRate (int rateKbpsKey)
+{
+  return rateKbpsKey == 500;
+}
+
+/** Return true only for the recovered 1000-kbit/s DQPSK BER mode. */
+inline bool
+CsrUsesDqpskBer (int rateKbpsKey)
+{
+  return rateKbpsKey == 1000;
+}
+
+/** Return true for either recovered high-rate differential modem mode. */
+inline bool
+CsrIsHighRateDifferentialMode (int rateKbpsKey)
+{
+  return rateKbpsKey == 500 || rateKbpsKey == 1000;
+}
+
+/**
+ * Preserve the original public high-rate predicate for source compatibility.
+ *
+ * @deprecated The historical name predates recovery of the 500-kbit/s DPSK
+ * mode and therefore returns true for both high-rate differential modes. New
+ * code should use CsrIsHighRateDifferentialMode(), CsrIsDpskRate(), or
+ * CsrUsesDqpskBer() according to the distinction it needs.
+ */
 inline bool
 CsrIsDqpskRate (int rateKbpsKey)
 {
-  return rateKbpsKey == 500 || rateKbpsKey == 1000;
+  return CsrIsHighRateDifferentialMode (rateKbpsKey);
+}
+
+/** Evaluate the rate-specific high-rate DPSK/DQPSK payload BER. */
+inline double
+CsrGetHighRateDifferentialBer (int rateKbpsKey,
+                               double effectiveSnrDb)
+{
+  switch (rateKbpsKey)
+    {
+    case 500:
+      return CsrOpnetBerTables::GetDpskBer (effectiveSnrDb);
+    case 1000:
+      return CsrOpnetBerTables::GetDqpskBer (effectiveSnrDb);
+    default:
+      NS_ABORT_MSG ("CSR high-rate BER requested for a spread-rate key");
+      return 1.0;
+    }
 }
 
 /** Source-backed received-power, noise, SNR, and error front end. */
@@ -502,8 +550,9 @@ public:
                                  interval.noisePowerWatts);
     double headerRate = CsrRateKeyToBps (8);
     double payloadRate = CsrRateKeyToBps (rateKbps);
-    // br_ber establishes this processing-gain equation for spread rates. The
-    // extended DQPSK path deliberately reuses it as an integration rule.
+    // br_ber establishes this processing-gain equation for spread rates;
+    // modem_ex.m independently establishes the same Eb/N0 conversion for the
+    // recovered 500-kbit/s DPSK and 1000-kbit/s DQPSK modes.
     result.headerEffectiveSnrDb = result.snrDb + 10.0 * std::log10 (
       profile.rxBwHz / (2.0 * headerRate));
     result.payloadEffectiveSnrDb = result.snrDb + 10.0 * std::log10 (
@@ -524,15 +573,15 @@ public:
         return result;
       }
 
-    if (CsrIsDqpskRate (rateKbps) &&
-        interval.sameRateInterference)
+    if (CsrIsHighRateDifferentialMode (rateKbps) &&
+        interval.highRatePayloadJammer)
       {
-        // No DQPSK-specific JSR/offset curves were supplied.  Treat the
+        // No high-rate DPSK/DQPSK JSR/offset curves were supplied.  Treat the
         // recorded same-rate jammer as payload noise while leaving the S0
         // header on its source collision-table path.
         double jammerWatts = frontEnd.receivedPowerWatts * std::pow (
           10.0,
-          interval.jsrDb / 10.0);
+          interval.highRatePayloadJsrDb / 10.0);
         double payloadSnrDb = ComputeSnrDb (
           frontEnd.receivedPowerWatts,
           interval.noisePowerWatts + jammerWatts);
@@ -544,8 +593,9 @@ public:
       {
         result.headerBer = CsrOpnetBerTables::GetStandardBer (
           result.headerEffectiveSnrDb);
-        result.payloadBer = CsrIsDqpskRate (rateKbps)
-          ? CsrOpnetBerTables::GetDqpskBer (
+        result.payloadBer = CsrIsHighRateDifferentialMode (rateKbps)
+          ? CsrGetHighRateDifferentialBer (
+              rateKbps,
               result.payloadEffectiveSnrDb)
           : CsrOpnetBerTables::GetStandardBer (
               result.payloadEffectiveSnrDb);
@@ -557,9 +607,10 @@ public:
           interval.jsrDb,
           interval.timeOffsetSeconds,
           result.headerEffectiveSnrDb);
-        if (CsrIsDqpskRate (rateKbps))
+        if (CsrIsHighRateDifferentialMode (rateKbps))
           {
-            result.payloadBer = CsrOpnetBerTables::GetDqpskBer (
+            result.payloadBer = CsrGetHighRateDifferentialBer (
+              rateKbps,
               result.payloadEffectiveSnrDb);
           }
         else
@@ -816,9 +867,22 @@ public:
     result.protectedBits = ecc.protectedBits;
     result.correctableBits = ecc.correctableBits;
     result.eccDropped = ecc.eccDropped;
+    bool hasHighRatePayloadJammer = false;
     for (const CsrBerInterval &interval : intervals)
       {
-        if (interval.sameRateInterference)
+        if (interval.highRatePayloadJammer)
+          {
+            if (!hasHighRatePayloadJammer ||
+                interval.highRatePayloadJsrDb > result.jsrDb)
+              {
+                result.sameRateInterference = true;
+                result.jsrDb = interval.highRatePayloadJsrDb;
+                result.timeOffsetSeconds = interval.timeOffsetSeconds;
+              }
+            hasHighRatePayloadJammer = true;
+          }
+        else if (!hasHighRatePayloadJammer &&
+                 interval.sameRateInterference)
           {
             result.sameRateInterference = true;
             result.jsrDb = interval.jsrDb;
@@ -865,8 +929,8 @@ public:
   {
     double ber = perModel
       ? perModel (rateKbps, snrDb, packetBits)
-      : CsrIsDqpskRate (rateKbps)
-          ? CsrOpnetBerTables::GetDqpskBer (snrDb)
+      : CsrIsHighRateDifferentialMode (rateKbps)
+          ? CsrGetHighRateDifferentialBer (rateKbps, snrDb)
           : CsrOpnetBerTables::GetStandardBer (snrDb);
     return std::clamp (ber, 0.0, 1.0);
   }

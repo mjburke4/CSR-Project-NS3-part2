@@ -49,12 +49,22 @@ public:
   void EnableDutyCycling (bool enable)
   {
     m_dutyCycleEnabled = enable;
+    if (!enable && m_pendingTxWakeEvent.IsPending ())
+      {
+        Simulator::Cancel (m_pendingTxWakeEvent);
+      }
     if (enable && m_rng)
       {
         // De-sync nodes so they don't all wake at same instant
         m_wakePhaseSec = m_rng->GetValue (0.0, m_wakeCycleSec);
       }
     RefreshDutyState ();
+    if (enable &&
+        m_mac.GetState () == CsrMacCore::State::IDLE &&
+        m_mac.HasPendingFrames ())
+      {
+        SchedulePendingTxWake ();
+      }
   }
 
   bool IsDutyCyclingEnabled () const { return m_dutyCycleEnabled; }
@@ -64,7 +74,17 @@ public:
   {
     double seconds = std::fmod (phase.GetSeconds (), m_wakeCycleSec);
     m_wakePhaseSec = seconds < 0.0 ? seconds + m_wakeCycleSec : seconds;
+    if (m_pendingTxWakeEvent.IsPending ())
+      {
+        Simulator::Cancel (m_pendingTxWakeEvent);
+      }
     RefreshDutyState ();
+    if (m_dutyCycleEnabled &&
+        m_mac.GetState () == CsrMacCore::State::IDLE &&
+        m_mac.HasPendingFrames ())
+      {
+        SchedulePendingTxWake ();
+      }
   }
 
   void ForceAwakeFor (double seconds)
@@ -259,13 +279,16 @@ private:
   void StartAllSignalIntervals (double startSec);
   void RecordSameRateInterference (RxSignal &desired,
                                    const RxSignal &jammer);
+  void RefreshHighRateInterference ();
   void DeliverTrackedSignal (const RxSignal &signal,
                              const CsrRxDecision &decision);
   void UpdateSyncPresence ();
   void RefreshDutyState ();
   void WakeForSignal ();
+  void WakeForPendingTx ();
   void SleepReceiver ();
   void ScheduleSignalWake ();
+  void SchedulePendingTxWake ();
   bool IsPeriodicAwakeAt (double timeSec) const;
   double GetPeriodicWindowEnd (double timeSec) const;
   double GetNextPeriodicWake (double timeSec) const;
@@ -288,6 +311,7 @@ private:
   CsrRxDecision                  m_lastRxDecision;
   EventId                        m_acquisitionEvent;
   EventId                        m_signalWakeEvent;
+  EventId                        m_pendingTxWakeEvent;
   EventId                        m_sleepEvent;
   EventId                        m_forceAwakeEndEvent;
 
@@ -745,7 +769,13 @@ CsrNetDevice::RefreshDutyState ()
     }
 
   double now = Simulator::Now ().GetSeconds ();
-  bool shouldSearch = m_mac.HasPendingFrames () ||
+  // A queued frame alone does not extend a wake-only Search: the source's
+  // 8.9-ms no-signal sleep can precede its 13-ms TSLOT.  Once Idle RTS or a
+  // Search TSLOT has enabled PREP_TX, that preparation keeps Search active.
+  bool preparationKeepsSearch =
+    state == CsrMacCore::State::SEARCH &&
+    m_mac.IsTxPreparationActive ();
+  bool shouldSearch = preparationKeepsSearch ||
                       m_forceAwakeUntilSec > now ||
                       IsPeriodicAwakeAt (now);
   m_mac.SetReceiveState (shouldSearch
@@ -785,6 +815,46 @@ CsrNetDevice::WakeForSignal ()
 }
 
 void
+CsrNetDevice::WakeForPendingTx ()
+{
+  std::cout << "[MAC " << m_id
+            << "] pending-TX periodic WAKE at "
+            << Simulator::Now ().GetSeconds ()
+            << std::endl;
+  if (!m_dutyCycleEnabled || !m_mac.HasPendingFrames ())
+    {
+      RefreshDutyState ();
+      return;
+    }
+
+  CsrMacCore::State state = m_mac.GetState ();
+  if (state == CsrMacCore::State::TRACK ||
+      state == CsrMacCore::State::TX)
+    {
+      return;
+    }
+
+  // This is the periodic WAKE -> start_search transition.  PREP_TX is not
+  // activated until the first relative 13-ms TSLOT processes the queued
+  // frame, matching the source state machine.
+  m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
+
+  double now = Simulator::Now ().GetSeconds ();
+  double windowEnd = GetPeriodicWindowEnd (now);
+  if (windowEnd > now)
+    {
+      if (m_sleepEvent.IsPending ())
+        {
+          Simulator::Cancel (m_sleepEvent);
+        }
+      m_sleepEvent = Simulator::Schedule (
+        Seconds (windowEnd - now),
+        &CsrNetDevice::SleepReceiver,
+        this);
+    }
+}
+
+void
 CsrNetDevice::ScheduleSignalWake ()
 {
   if (!m_dutyCycleEnabled ||
@@ -817,6 +887,29 @@ CsrNetDevice::ScheduleSignalWake ()
         &CsrNetDevice::WakeForSignal,
         this);
     }
+}
+
+void
+CsrNetDevice::SchedulePendingTxWake ()
+{
+  if (!m_dutyCycleEnabled ||
+      m_mac.GetState () != CsrMacCore::State::IDLE ||
+      !m_mac.HasPendingFrames () ||
+      m_pendingTxWakeEvent.IsPending ())
+    {
+      return;
+    }
+
+  double now = Simulator::Now ().GetSeconds ();
+  double wakeTime = GetNextPeriodicWake (now);
+  std::cout << "[MAC " << m_id
+            << "] Idle RTS defers to nearby periodic WAKE at "
+            << wakeTime
+            << std::endl;
+  m_pendingTxWakeEvent = Simulator::Schedule (
+    Seconds (std::max (0.0, wakeTime - now)),
+    &CsrNetDevice::WakeForPendingTx,
+    this);
 }
 
 void
@@ -877,9 +970,18 @@ CsrNetDevice::CloseSignalInterval (RxSignal &signal, double endSec)
   interval.noisePowerWatts = signal.frontEnd.backgroundNoiseWatts +
     signal.currentInterferenceWatts;
   interval.collisionCount = signal.collisionCount;
+  // Preserve br_ber's receiver-global last-collision state for the S0 header
+  // and supplied spread-rate curves.  The high-rate payload fallback carries
+  // a separate, signed per-signal jammer ratio so a stronger or shorter
+  // jammer is represented only over the interval where it is active.
   interval.sameRateInterference = m_rxSameSpeed;
   interval.jsrDb = m_rxJsrDb;
   interval.timeOffsetSeconds = m_rxTimeOffsetSeconds;
+  if (CsrIsHighRateDifferentialMode (signal.rateKbps))
+    {
+      interval.highRatePayloadJammer = signal.sameRateInterference;
+      interval.highRatePayloadJsrDb = signal.jsrDb;
+    }
   signal.berIntervals.push_back (interval);
   uint32_t preambleBits = signal.preamble == PREAMBLE_LONG ? 7888 : 104;
   CsrErrorAllocation allocated = m_phy.AllocateErrors (
@@ -948,6 +1050,48 @@ CsrNetDevice::RecordSameRateInterference (RxSignal &desired,
       desired.sameRateInterference = true;
       desired.jsrDb = jsrDb;
       desired.timeOffsetSeconds = jammer.startSec - desired.startSec;
+    }
+}
+
+void
+CsrNetDevice::RefreshHighRateInterference ()
+{
+  // The fallback is interval-local, unlike br_ber's receiver-global
+  // diagnostic collision record.  Rebuild each active high-rate signal from
+  // the currently overlapping signals whenever an interference boundary
+  // removes a jammer.
+  for (auto &[desiredId, desired] : m_rxSignals)
+    {
+      (void) desiredId;
+      if (!CsrIsHighRateDifferentialMode (desired.rateKbps))
+        {
+          continue;
+        }
+      desired.sameRateInterference = false;
+      desired.jsrDb = -std::numeric_limits<double>::infinity ();
+      desired.timeOffsetSeconds = 0.0;
+    }
+
+  for (auto desiredIt = m_rxSignals.begin ();
+       desiredIt != m_rxSignals.end ();
+       ++desiredIt)
+    {
+      RxSignal &desired = desiredIt->second;
+      if (!CsrIsHighRateDifferentialMode (desired.rateKbps))
+        {
+          continue;
+        }
+      for (auto jammerIt = m_rxSignals.begin ();
+           jammerIt != m_rxSignals.end ();
+           ++jammerIt)
+        {
+          if (jammerIt == desiredIt ||
+              jammerIt->second.rateKbps != desired.rateKbps)
+            {
+              continue;
+            }
+          RecordSameRateInterference (desired, jammerIt->second);
+        }
     }
 }
 
@@ -1462,6 +1606,7 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
 
   RemoveEndedInterference (signal);
   m_rxSignals.erase (it);
+  RefreshHighRateInterference ();
   StartAllSignalIntervals (now);
   UpdateSyncPresence ();
 
@@ -1578,11 +1723,6 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
                             bool ackable)
 {
   CsrAnnotateOpnetEnvelope (frame);
-
-  if (!m_slotTickEnabled)
-    {
-      StartSlotTick (m_slotTickPeriod);
-    }
 
   CsrHeader header;
   if (frame != nullptr && frame->PeekHeader (header) &&
@@ -1740,11 +1880,6 @@ CsrMacCore::MaybeScheduleNextTx ()
       return;
     }
 
-  if (m_txEvent.IsPending ())
-    {
-      return;
-    }
-
   if (!HasPendingFrame ())
     {
       return;
@@ -1759,71 +1894,153 @@ CsrMacCore::MaybeScheduleNextTx ()
 
   if (m_state == State::IDLE)
     {
-      m_state = State::SEARCH;
+      // Idle's enter executive schedules an untracked RTS TSLOT on the next
+      // simulation-wide 13-ms boundary, unless that boundary is too close to
+      // the periodic WAKE.  HOP_PK_RCVD itself only queues the frame.
+      ScheduleIdleRts ();
+      return;
+    }
+  if (!m_slotTickEnabled)
+    {
+      // Direct-device tests begin in Search rather than passing through the
+      // OPNET Idle -> Search transition.  Initialize the same independent
+      // slot and holdoff timers on their first transmit request.
+      StartSearchTiming ();
     }
 
-  // OPNET prep_tx(): a newly active transmitter waits through the 300-ms
-  // radio holdoff, then decrements its selected counter once per 13-ms slot.
-  // Transmission occurs only after the counter moves from zero to -1.
-  CsrNodeId dest = !m_ackQueue.empty ()
-    ? m_ackQueue.front ().dest
-    : m_queue.front ().dest;
-  int slot = PickTxSlot (dest);
-  ScheduleTxOpportunity (slot, Seconds (0.0), true);
+  if (!m_txHoldoffOver && !m_txHoldoffEvent.IsPending ())
+    {
+      StartTxHoldoff ();
+    }
+
+  // Search-state arrivals are activated by the next shared TSLOT, after its
+  // reservation advancement, matching tslot_tasks() ordering.
 }
 
 void
-CsrMacCore::ScheduleTxOpportunity (int slot,
-                                   Time notBefore,
-                                   bool initialHoldoff)
+CsrMacCore::StartSearchTiming ()
 {
-  m_scheduledTxSlot = slot;
-  m_txCountdownCounter = slot;
+  if (!m_slotTickEnabled)
+    {
+      StartSlotTick (m_slotTickPeriod);
+    }
+  StartTxHoldoff ();
+}
 
-  Time holdoff = initialHoldoff
-    ? Seconds (TS_HOLDOFF_SECONDS)
-    : Seconds (0.0);
-  Time countdown = m_slotTickPeriod * static_cast<uint64_t> (slot + 1);
-  Time delay = notBefore + holdoff + m_slotTickPeriod;
+void
+CsrMacCore::ScheduleIdleRts ()
+{
+  if (m_state != State::IDLE ||
+      !HasPendingFrame () ||
+      m_idleRtsEvent.IsPending ())
+    {
+      return;
+    }
+
+  int64_t nowSteps = Simulator::Now ().GetTimeStep ();
+  int64_t periodSteps = m_slotTickPeriod.GetTimeStep ();
+  NS_ABORT_MSG_IF (periodSteps <= 0,
+                   "CSR MAC slot period must be positive");
+  Time nextSlot = TimeStep (
+    (nowSteps / periodSteps + 1) * periodSteps);
+
+  bool deferToWake = false;
+  if (m_dev != nullptr && m_dev->IsDutyCyclingEnabled ())
+    {
+      double nextWakeSec = m_dev->GetNextPeriodicWake (
+        Simulator::Now ().GetSeconds ());
+      deferToWake = std::fabs (nextWakeSec - nextSlot.GetSeconds ()) <=
+        m_slotTickPeriod.GetSeconds () / 2.0;
+    }
+
+  if (deferToWake)
+    {
+      m_dev->SchedulePendingTxWake ();
+      return;
+    }
 
   std::cout << "[MAC " << m_nodeId
-            << "] scheduled TX opportunity"
-            << " slot=" << slot
-            << " holdoff=" << holdoff.GetSeconds ()
-            << " countdown=" << countdown.GetSeconds ()
-            << " first_tick_in=" << delay.GetSeconds ()
-            << "s"
+            << "] Idle queue schedules RTS TSLOT at "
+            << nextSlot.GetSeconds ()
             << std::endl;
-
-  m_txEvent = Simulator::Schedule (delay,
-                                   &CsrMacCore::AdvanceTxCountdown,
-                                   this);
+  m_idleRtsEvent = Simulator::Schedule (
+    nextSlot - Simulator::Now (),
+    &CsrMacCore::IdleRts,
+    this);
 }
 
 void
-CsrMacCore::AdvanceTxCountdown ()
+CsrMacCore::IdleRts ()
 {
-  if (!HasPendingFrame () || m_dev == nullptr)
+  if (m_state != State::IDLE || !HasPendingFrame ())
     {
-      m_scheduledTxSlot = -1;
-      m_txCountdownCounter = -1;
       return;
     }
 
-  if (m_state == State::SEARCH && !m_syncPresent)
+  // Idle --RTS--> Search runs prep_tx(): restart the relative slot timer and
+  // independent holdoff, enable PREP_TX immediately, and redraw <= 0.
+  SetReceiveState (State::SEARCH);
+  ActivateTxPreparation (true);
+}
+
+void
+CsrMacCore::StartTxHoldoff ()
+{
+  if (m_txHoldoffEvent.IsPending ())
     {
-      m_txCountdownCounter--;
+      Simulator::Cancel (m_txHoldoffEvent);
     }
 
-  if (m_txCountdownCounter < 0)
+  m_txHoldoffOver = false;
+  m_txHoldoffEvent = Simulator::Schedule (
+    Seconds (TS_HOLDOFF_SECONDS),
+    &CsrMacCore::TxHoldoffExpired,
+    this);
+}
+
+void
+CsrMacCore::TxHoldoffExpired ()
+{
+  m_txHoldoffOver = true;
+
+  std::cout << "[MAC " << m_nodeId
+            << "] OPNET 300-ms transmit holdoff complete"
+            << std::endl;
+}
+
+void
+CsrMacCore::ActivateTxPreparation (bool redrawZero)
+{
+  if (m_txPreparationActive || !HasPendingFrame ())
     {
-      DoTx ();
       return;
     }
 
-  m_txEvent = Simulator::Schedule (m_slotTickPeriod,
-                                   &CsrMacCore::AdvanceTxCountdown,
-                                   this);
+  m_txPreparationActive = true;
+
+  if (m_txCountdownCounter < 0 ||
+      (redrawZero && m_txCountdownCounter == 0))
+    {
+      CsrNodeId dest = !m_ackQueue.empty ()
+        ? m_ackQueue.front ().dest
+        : m_queue.front ().dest;
+      m_scheduledTxSlot = PickTxSlot (dest);
+      m_txCountdownCounter = m_scheduledTxSlot;
+
+      std::cout << "[MAC " << m_nodeId
+                << "] starts Pre-Tx with new slot="
+                << m_scheduledTxSlot
+                << " holdoff_over=" << (m_txHoldoffOver ? 1 : 0)
+                << std::endl;
+    }
+  else
+    {
+      std::cout << "[MAC " << m_nodeId
+                << "] resumes Pre-Tx with live slot="
+                << m_scheduledTxSlot
+                << " counter=" << m_txCountdownCounter
+                << std::endl;
+    }
 }
 
 void
@@ -1864,14 +2081,11 @@ CsrMacCore::FinishTx ()
       m_dev->OnMacTxFinished ();
     }
 
-  if (!m_txEvent.IsPending () && HasPendingFrame ())
+  if (HasPendingFrame ())
     {
-      CsrNodeId destination = !m_ackQueue.empty ()
-        ? m_ackQueue.front ().dest
-        : m_queue.front ().dest;
-      ScheduleTxOpportunity (PickTxSlot (destination),
-                             Seconds (0.0),
-                             false);
+      // post_tx() enables PREP_TX immediately for frames that arrived or
+      // remained during Tx, reusing the slot advertised by this frame.
+      ActivateTxPreparation ();
     }
 }
 
@@ -2065,7 +2279,21 @@ CsrMacCore::DoTx ()
 {
   if (!HasPendingFrame () || m_dev == nullptr)
     {
-      m_scheduledTxSlot = -1;
+      m_txPreparationActive = false;
+      return;
+    }
+
+  // A delayed concatenation retry must re-enter through the same MAC gates
+  // as an ordinary slot opportunity.  If state changed while the retry was
+  // pending, retain PREP_TX/counter=-1 and let a later eligible SlotTick try
+  // again instead of transmitting in Idle, Track, Tx, or under SYNC/holdoff.
+  if (m_txInProgress ||
+      m_state != State::SEARCH ||
+      m_syncPresent ||
+      !m_txHoldoffOver ||
+      !m_txPreparationActive ||
+      m_txCountdownCounter != -1)
+    {
       return;
     }
 
@@ -2180,7 +2408,7 @@ CsrMacCore::DoTx ()
                 << "] OPNET concatenation could not fit queue head"
                 << std::endl;
       m_txEvent = Simulator::Schedule (Seconds (1.0),
-                                       &CsrMacCore::DoTx,
+                                       &CsrMacCore::MaybeScheduleNextTx,
                                        this);
       return;
     }
@@ -2256,23 +2484,28 @@ CsrMacCore::DoTx ()
     }
 
   // OPNET includes a newly selected future reservation in every OTA frame.
-  // If another frame is already queued, this is also its countdown slot.
+  // The sender loads that same value into its persistent txslot_counter even
+  // if this transmission drains both queues.
+  m_lastTxOpportunitySlot = m_scheduledTxSlot;
   int nextReservedSlot = PickTxSlot (dest);
+  m_lastAdvertisedReservationSlot = nextReservedSlot;
+  m_scheduledTxSlot = nextReservedSlot;
+  m_txCountdownCounter = nextReservedSlot;
+  m_txPreparationActive = false;
 
   // Send via device
   std::cout << "[MAC " << m_nodeId
             << "] TX opportunity reached"
-            << " currentSlot=" << m_scheduledTxSlot
+            << " currentSlot=" << m_lastTxOpportunitySlot
             << " reserveNextSlot=" << nextReservedSlot
             << std::endl;
 
-  Time txDuration =
-    m_dev->SendFramesToPeers (wireFrames,
-                              aggregateRateKbps,
-                              aggregateTxPowerDbm,
-                              pt,
-                              nextReservedSlot,
-                              anyAckable);
+  m_dev->SendFramesToPeers (wireFrames,
+                            aggregateRateKbps,
+                            aggregateTxPowerDbm,
+                            pt,
+                            nextReservedSlot,
+                            anyAckable);
 
   m_lastTxRateKbps = aggregateRateKbps;
   m_lastTxPowerDbm = aggregateTxPowerDbm;
@@ -2354,17 +2587,9 @@ CsrMacCore::DoTx ()
             << " rate=" << aggregateRateKbps
             << std::endl;
 
-  // Schedule next TX if any
-  if (HasPendingFrame ())
-    {
-      // Time-slot counters pause while OPNET MAC is in Tx_st.  Resume the
-      // advertised reservation countdown only after this frame finishes.
-      ScheduleTxOpportunity (nextReservedSlot, txDuration, false);
-    }
-  else
-    {
-      m_scheduledTxSlot = -1;
-    }
+  // FinishTx() re-enables PREP_TX if another frame remains.  Otherwise the
+  // advertised counter continues to advance in Search with PREP_TX false,
+  // exactly as br_mac.tslot_tasks() requires for reservation reuse.
 }
 
 

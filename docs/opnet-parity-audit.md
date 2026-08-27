@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 ## Scope and confidence limits
 
@@ -152,8 +152,8 @@ completion.
 - Exact standard CSR curve and all 4,910 supplied JSR/half-chip collision
   curves, with a reproducible binary-table importer and exact sample storage.
 - Source-exact four-bit payload intervals, processing gain, and table selection
-  for 8-128 kbit/s, plus exact recovered DQPSK samples in an explicitly
-  owner-confirmed 500/1000-kbit/s extension profile.
+  for 8-128 kbit/s, plus recovered 500-kbit/s DPSK and 1000-kbit/s DQPSK
+  equations in the opt-in high-rate extension profile.
 - Old-state interval closure before interference changes, source inverse-CDF
   binomial sampling, preamble exclusion, separate 48-bit header accounting,
   and payload/FCS error allocation.
@@ -250,6 +250,7 @@ delivery events.
 | Track rejects new synchronization attempts while the tracked packet remains exposed to interference | Fixed tracked-signal identity and post-lock jammer processing | A later, stronger signal cannot capture and corrupts the tracked packet. |
 | Comparable overlaps collide; sufficiently weak interference falls in the source's -12-dB JSR bucket | Selected overlaps proceed through exact JSR/offset BER and full-packet ECC; only explicit test hooks retain the old hard gate | Equal-power overlap is ECC-dropped while a weak selected jammer remains decodable. |
 | `tslot_tasks()` changes counters only in Search with no `SYNC_PRES` | Tick-by-tick local Tx countdown and neighbor reservation decay gates | A tracked reception freezes and later resumes a pending transmission. |
+| The 13-ms clock and 300-ms holdoff are independent; every Tx loads and advertises its next persistent reservation | One shared local/neighbor slot clock, explicit PREP/holdoff state, Idle's globally aligned RTS event, and retained empty-queue counter | During-Tx, post-Tx, Track-return, Idle-RTS, expiry, zero-counter, and HOP-retry cases consume or redraw the source-ordered slot. |
 | Tx is half duplex and returns to Search after OTA completion | `NotifyPhyTxStart()` / `FinishTx()` plus state-gated receive delivery | A receiver cannot decode an overlapping frame while transmitting. |
 | Long preamble supports duty-cycled discovery; short preamble must arrive during an awake window | Periodic wake phase, Idle/Search transitions, and preamble-survival check | Long preamble bridges a 500-ms sleep interval; short preamble records one miss. |
 | Preamble/header fields transmit at S0 and payload/FCS at the selected rate | Source-derived OTA duration using exact OPNET envelope bytes | Existing sent-time, queue, integration, and slot tests use the new airtime checkpoints. |
@@ -286,15 +287,16 @@ explicit BER boundary are documented in `docs/opnet-phy-front-end.md`.
 The supplied binary modulation tables and final receive stages now drive live
 accept/drop behavior. The generated runtime data contains the standard CSR and
 DQPSK curves plus all 4,910 spread-rate collision curves without requiring
-OPNET at simulation time. The DQPSK samples are exact recovered data; their
-mapping to the actual radio's owner-confirmed 500/1000-kbit/s modes is an
-extension because the supplied C pipeline does not reference `dqpsk`.
+OPNET at simulation time. Recovered modem scripts establish 500 kbit/s as
+DPSK and 1000 kbit/s as DQPSK, both at 500 ksymbols/s. The DQPSK samples match
+the recovered analytical function to table precision; the supplied C pipeline
+still does not select either high-rate mode directly.
 
 | Source or extension behavior | ns-3 implementation | Verification |
 | --- | --- | --- |
 | `op_tbl_mod_ber()` selects `csr` or a spread-rate JSR/half-chip curve | Exact embedded samples, source JSR thresholds, circular signed-offset quantization, endpoint clamp, and linear interpolation | Independent standard and all-five-spread-rate collision goldens plus boundary tests. |
-| Owner-confirmed 500/1000-kbit/s hardware modes use the recovered `dqpsk` table | Opt-in `EXTENDED_DQPSK` profile, exact DQPSK samples, NWK-to-MAC propagation, compact wire codes, and live OTA/ECC path | DQPSK goldens plus live 500/1000 delivery, duration, low-SNR drop, and same-rate overlap. |
-| Header rate is S0; 8-128-kbit/s payload uses source `4 / payload_interval` timing | Exact non-rounded source rates and processing-gain helpers shared by airtime and BER; 500/1000 four-bit accounting intervals are derived from the owner-confirmed bit rates, and reuse of the processing-gain rule is explicit extension behavior | Five source rates plus two extension rates and gains match independent numeric vectors. |
+| Recovered high-rate modem uses DPSK at 500 kbit/s and DQPSK at 1000 kbit/s | Opt-in `EXTENDED_DQPSK` compatibility profile, analytical `DPSK_PB`, exact DQPSK samples, NWK-to-MAC propagation, compact wire codes, and live OTA/ECC path | DPSK/DQPSK goldens plus live 500/1000 delivery, duration, low-SNR drop, and same-rate overlap. |
+| Header rate is S0; 8-128-kbit/s payload uses source `4 / payload_interval` timing | Exact non-rounded source rates and processing-gain helpers shared by airtime and BER; `modem_ex.m` independently establishes the same Eb/N0 conversion for the two high rates | Five source rates plus two extension rates and gains match independent numeric vectors. |
 | `NUM_COLLS > 0` always selects a collision preamble; only same-speed payload selects a collision curve | Per-interval cumulative collision and shared receiver same-speed/JSR/offset state | Standard, same-rate, and different-rate selection vectors. |
 | `br_error_all_stats` closes the old BER interval before a change | Live per-signal intervals are sampled before interference state is modified | Split, truncation, boundary, cap, and short-jammer tests. |
 | One inverse-CDF binomial draw per nontrivial header/payload region | Log-gamma source sampler, including `p > 0.5` inversion | Independent uniform-to-error golden outcomes. |
@@ -347,9 +349,13 @@ boundary are documented in `docs/opnet-scenario-differential-harness.md`.
   available; current lookups use endpoint clamp and arithmetic interpolation.
 - Exact external Earth-LOS/TMM injection; imported TMM scenarios are rejected
   until that implementation is supplied.
-- Authoritative same-rate DQPSK collision curves, if they exist outside the
-  supplied archive; the extended 500/1000-kbit/s profile treats the recorded
-  jammer as payload noise and retains the DQPSK curve.
+- Authoritative same-rate high-rate collision curves, if they exist outside
+  the supplied archive; the extended 500/1000-kbit/s profile treats the
+  recorded jammer as payload noise and retains the rate-specific DPSK/DQPSK
+  BER law.
+- DSP firmware validation and calibration against the physical modem are
+  post-parity work; they are not required to reproduce the supplied OPNET
+  model and recovered MATLAB theory path.
 
 ## Missing high-value scenarios
 
@@ -367,9 +373,9 @@ boundary are documented in `docs/opnet-scenario-differential-harness.md`.
 
 ## Current regression baseline
 
-All 30 CSR executable targets build on this audit revision. The 28 focused
+All 31 CSR executable targets build on this audit revision. The 29 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (30/30), along with all five focused Python importer/comparator
+workflow pass (31/31), along with all five focused Python importer/comparator
 tests. The importer additionally decodes all eight supplied validation network
 models and paired DES environments. The end-to-end fixture produces five
 ordered events on each side with zero missing, extra, replaced, field-mismatch,
@@ -392,6 +398,10 @@ AppNeighborcast, malformed-envelope rejection, and all three live send paths.
 The receive-contention test covers Search/Track timing, simultaneous collision,
 strongest-preamble capture, post-lock interference, RX-induced slot freezing,
 long- versus short-preamble duty-cycle behavior, and half-duplex loss.
+The reservation-lifecycle test adds Idle queueing until its globally aligned
+RTS TSLOT, the shared local/neighbor phase, one-time holdoff, first-contact
+reservation ordering, persistent advertisement/reuse, expiry/redraw ordering,
+SYNC/Track activation, real HOP retry reuse, and delayed-packing state gates.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and
 same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table
@@ -400,8 +410,9 @@ gain, interval truncation, binomial outcomes, ECC ordering, closure modes, and
 live selected-collision acceptance and rejection.
 The live high-rate test adds default-profile preservation, NWK-to-MAC extended
 profile propagation, 500-kbit/s scenario caps, exact 500/1000 OTA durations,
-production DQPSK BER and ECC outcomes, same-rate jammer-as-noise ordering, and
-safe one-frame queue progress when no high-rate concat limit is available.
+production DPSK/DQPSK BER and ECC outcomes, same-rate jammer-as-noise ordering,
+signed stronger/shorter-jammer interval handling, and safe one-frame queue
+progress when no high-rate concat limit is available.
 The admission test still covers pre-admission DATA
 rejection, reciprocal key exchange,
 ACK-driven outbound-key completion, NeighborCheck activation, route selection,
