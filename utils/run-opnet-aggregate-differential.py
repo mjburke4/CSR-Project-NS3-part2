@@ -26,6 +26,20 @@ from typing import Any, Iterable
 SCENARIO_SCHEMA = "csr-opnet-scenario-v1"
 RUN_SCHEMA = "csr-opnet-aggregate-differential-run-v1"
 NS3_PROVENANCE_SCHEMA = "csr-ns3-aggregate-provenance-v1"
+APP_ADMISSION_DIAGNOSTICS_SCHEMA = "csr-app-admission-diagnostics-v1"
+APPLICATION_PROFILES = {
+    "current-send-only",
+    "legacy-send-only-no-dscp",
+    "legacy-send-to-from-no-dscp",
+    "unspecified",
+}
+MAC_PROFILES = {
+    "current-fine-free-slot",
+    "hist-2014-zero-based-rebuild-list",
+    "hist-2015-fine-one-based-table-no-avoid",
+    "hist-2014-next-tslot-modulo-probe",
+    "unspecified",
+}
 
 # These statistics are derived from the same application send/delivery events
 # and the same bucket operations in both sources.  Queue occupancy, MAC timing,
@@ -47,6 +61,7 @@ ARTIFACT_PATHS = {
     "opnet_aggregates": "opnet-aggregates.csv",
     "opnet_extract_log": "opnet-extract.log",
     "ns3_trace": "ns3-trace.csv",
+    "app_admission_diagnostics": "app-admission-diagnostics.csv",
     "ns3_run_log": "ns3-run.log",
     "ns3_aggregates": "ns3-aggregates.csv",
     "ns3_aggregate_provenance": "ns3-aggregates.provenance.json",
@@ -144,6 +159,7 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
                 f"{path}: scenario CSV is missing columns: {', '.join(missing)}"
             )
         run_rows: list[tuple[int, dict[str, str]]] = []
+        flow_count = 0
         for row_number, row in enumerate(reader, start=2):
             if None in row or any(value is None for value in row.values()):
                 raise WorkflowError(f"{path}:{row_number}: malformed CSV row")
@@ -154,6 +170,8 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
                 )
             if row["record"].strip() == "run":
                 run_rows.append((row_number, row))
+            elif row["record"].strip() == "flow":
+                flow_count += 1
         if len(run_rows) != 1:
             raise WorkflowError(
                 f"{path}: expected exactly one run row, found {len(run_rows)}"
@@ -162,6 +180,19 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
         scenario = row["scenario"].strip()
         if not scenario:
             raise WorkflowError(f"{path}:{row_number}: scenario is empty")
+        application_profile = (
+            row.get("application_profile", "").strip() or "unspecified"
+        )
+        if application_profile not in APPLICATION_PROFILES:
+            raise WorkflowError(
+                f"{path}:{row_number}: unsupported application_profile "
+                f"{application_profile!r}"
+            )
+        mac_profile = row.get("mac_profile", "").strip() or "unspecified"
+        if mac_profile not in MAC_PROFILES:
+            raise WorkflowError(
+                f"{path}:{row_number}: unsupported mac_profile {mac_profile!r}"
+            )
         source_sha256 = row["source_sha256"].strip().lower()
         if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
             raise WorkflowError(
@@ -195,10 +226,156 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
             )
         return {
             "scenario": scenario,
+            "application_profile": application_profile,
+            "mac_profile": mac_profile,
             "source_sha256": source_sha256,
             "duration_s": duration_s,
             "seed": int(seed_value),
+            "flow_count": flow_count,
         }
+
+
+def validate_app_admission_diagnostics(
+    path: Path,
+    scenario: str,
+    application_profile: str,
+    expected_flow_count: int,
+) -> dict[str, int]:
+    """Validate compact per-flow gate counters emitted by the runner."""
+
+    required = {
+        "schema",
+        "scenario",
+        "application_profile",
+        "flow_index",
+        "attempts",
+        "admitted",
+        "blocked_discovery",
+        "blocked_topology",
+        "blocked_gateway_route",
+        "blocked_destination",
+        "blocked_nsdp",
+        "first_admitted_s",
+        "last_admitted_s",
+    }
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None:
+            raise WorkflowError(
+                "application admission diagnostics has no header", stage="run_ns3"
+            )
+        if len(set(reader.fieldnames)) != len(reader.fieldnames):
+            raise WorkflowError(
+                "application admission diagnostics has duplicate columns",
+                stage="run_ns3",
+            )
+        missing = sorted(required - set(reader.fieldnames))
+        if missing:
+            raise WorkflowError(
+                "application admission diagnostics is missing columns: "
+                + ", ".join(missing),
+                stage="run_ns3",
+            )
+        rows = list(reader)
+
+    if len(rows) != expected_flow_count:
+        raise WorkflowError(
+            "application admission diagnostics flow count does not match the "
+            f"scenario: expected {expected_flow_count}, found {len(rows)}",
+            stage="run_ns3",
+        )
+    totals = {
+        "attempts": 0,
+        "admitted": 0,
+        "blocked_discovery": 0,
+        "blocked_topology": 0,
+        "blocked_gateway_route": 0,
+        "blocked_destination": 0,
+        "blocked_nsdp": 0,
+    }
+    seen_indexes: set[int] = set()
+    blocked_fields = tuple(key for key in totals if key.startswith("blocked_"))
+    for row_number, row in enumerate(rows, start=2):
+        if None in row or any(value is None for value in row.values()):
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} is malformed",
+                stage="run_ns3",
+            )
+        if row["schema"].strip() != APP_ADMISSION_DIAGNOSTICS_SCHEMA:
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has an "
+                "unsupported schema",
+                stage="run_ns3",
+            )
+        if row["scenario"].strip() != scenario:
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has the "
+                "wrong scenario",
+                stage="run_ns3",
+            )
+        if row["application_profile"].strip() != application_profile:
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has the "
+                "wrong application profile",
+                stage="run_ns3",
+            )
+        try:
+            flow_index = int(row["flow_index"], 10)
+            counts = {field: int(row[field], 10) for field in totals}
+        except ValueError as error:
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has a "
+                "non-integer index or counter",
+                stage="run_ns3",
+            ) from error
+        if flow_index < 0 or flow_index in seen_indexes:
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has an "
+                "invalid or duplicate flow_index",
+                stage="run_ns3",
+            )
+        seen_indexes.add(flow_index)
+        if any(value < 0 for value in counts.values()):
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has a "
+                "negative counter",
+                stage="run_ns3",
+            )
+        if counts["attempts"] != counts["admitted"] + sum(
+            counts[field] for field in blocked_fields
+        ):
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} counters "
+                "do not partition attempts",
+                stage="run_ns3",
+            )
+        for time_field in ("first_admitted_s", "last_admitted_s"):
+            raw_time = row[time_field].strip()
+            if raw_time:
+                try:
+                    time_value = float(raw_time)
+                except ValueError as error:
+                    raise WorkflowError(
+                        f"application admission diagnostics row {row_number} "
+                        f"has nonnumeric {time_field}",
+                        stage="run_ns3",
+                    ) from error
+                if not math.isfinite(time_value) or time_value < 0.0:
+                    raise WorkflowError(
+                        f"application admission diagnostics row {row_number} "
+                        f"has invalid {time_field}",
+                        stage="run_ns3",
+                    )
+        for field, value in counts.items():
+            totals[field] += value
+
+    if seen_indexes != set(range(expected_flow_count)):
+        raise WorkflowError(
+            "application admission diagnostics flow_index values are not "
+            "contiguous from zero",
+            stage="run_ns3",
+        )
+    return totals
 
 
 def validate_vector_axes(extract: dict[str, Any]) -> dict[str, Any]:
@@ -1024,6 +1201,12 @@ def main(argv: list[str] | None = None) -> int:
         axis = validate_vector_axes(extract)
         selected = _selected_statistics(arguments.statistic, extract)
         profile, noncertifying_overrides = _comparison_profile(selected, arguments)
+        if scenario_run["application_profile"] == "unspecified":
+            profile = "diagnostic"
+            noncertifying_overrides.append("application_profile_unspecified")
+        if scenario_run["mac_profile"] == "unspecified":
+            profile = "diagnostic"
+            noncertifying_overrides.append("mac_profile_unspecified")
         manifest["profile"] = profile
         manifest["noncertifying_overrides"] = noncertifying_overrides
         _validate_probe_crosscheck(extract, scenario_run["scenario"], selected)
@@ -1047,6 +1230,8 @@ def main(argv: list[str] | None = None) -> int:
             "identities": {
                 "canonical_scenario": {
                     "scenario": scenario_run["scenario"],
+                    "application_profile": scenario_run["application_profile"],
+                    "mac_profile": scenario_run["mac_profile"],
                     "duration_s": scenario_run["duration_s"],
                     "seed": scenario_run["seed"],
                     "source_sha256": scenario_run["source_sha256"],
@@ -1068,10 +1253,16 @@ def main(argv: list[str] | None = None) -> int:
             "runner": {
                 "flow_limit": arguments.flow_limit,
                 "duty_cycling": not arguments.no_duty_cycling,
+                "opnet_aligned_duty_cycle": True,
                 "gateway_discovery": not arguments.no_gateway_discovery,
                 "opnet_app_gating": not arguments.no_opnet_app_gating,
+                "application_profile": scenario_run["application_profile"],
+                "mac_profile": scenario_run["mac_profile"],
                 "aggregate_trace_only": True,
                 "quiet_model_logs": True,
+                "app_admission_diagnostics_schema": (
+                    APP_ADMISSION_DIAGNOSTICS_SCHEMA
+                ),
             },
             "legacy_trace_size_exclusion_bits": (
                 arguments.legacy_trace_size_exclusion_bits
@@ -1080,13 +1271,18 @@ def main(argv: list[str] | None = None) -> int:
         }
 
         ns3_trace = arguments.output_dir / ARTIFACT_PATHS["ns3_trace"]
+        app_diagnostics = arguments.output_dir / ARTIFACT_PATHS[
+            "app_admission_diagnostics"
+        ]
         runner_command = [
             str(arguments.runner.resolve()),
             f"--scenario={arguments.scenario}",
             f"--trace={ns3_trace}",
+            f"--appDiagnostics={app_diagnostics}",
             f"--stop={_number(stop_s)}",
             f"--flowLimit={arguments.flow_limit}",
             f"--dutyCycling={0 if arguments.no_duty_cycling else 1}",
+            "--opnetAlignedDutyCycle=1",
             f"--gatewayDiscovery={0 if arguments.no_gateway_discovery else 1}",
             f"--opnetAppGating={0 if arguments.no_opnet_app_gating else 1}",
             "--aggregateTraceOnly=1",
@@ -1106,6 +1302,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         if not ns3_trace.is_file():
             raise WorkflowError("ns-3 runner produced no trace", stage="run_ns3")
+        if not app_diagnostics.is_file():
+            raise WorkflowError(
+                "ns-3 runner produced no application admission diagnostics",
+                stage="run_ns3",
+            )
+        stages["run_ns3"]["application_admission_totals"] = (
+            validate_app_admission_diagnostics(
+                app_diagnostics,
+                scenario_run["scenario"],
+                scenario_run["application_profile"],
+                scenario_run["flow_count"],
+            )
+        )
 
         ns3_aggregates = arguments.output_dir / ARTIFACT_PATHS["ns3_aggregates"]
         ns3_provenance = arguments.output_dir / ARTIFACT_PATHS[

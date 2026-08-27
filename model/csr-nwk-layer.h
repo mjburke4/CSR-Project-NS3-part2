@@ -305,6 +305,60 @@ public:
   }
 
   /**
+   * Return whether br_app would regard routing/neighbor discovery as usable.
+   *
+   * The historical process suppresses an attempt only while both of its
+   * persistent route and neighbor lists are empty.  It does not require the
+   * currently selected ARL route to pass the newer validity/freshness tests
+   * on every later application interrupt.
+   */
+  bool HasApplicationTopologyKnowledge () const
+  {
+    return !m_routes.empty () || !m_nwkNeighbors.empty ();
+  }
+
+  /**
+   * Build the live destination population used by the historical gateway.
+   *
+   * SEND_TO_&_FROM_GATEWAY selects uniformly from the route list and falls
+   * back to the neighbor list only when no route exists.  The current routing
+   * implementation may retain more than one candidate entry for a network
+   * destination, so expose each destination once while preserving insertion
+   * order.  This is an observation/application boundary; it does not alter
+   * route selection or forwarding.
+   */
+  std::vector<CsrNodeId> GetApplicationDestinationCandidates () const
+  {
+    std::vector<CsrNodeId> destinations;
+    std::set<CsrNodeId> seen;
+    for (const auto &route : m_routes)
+      {
+        if (route.nwkDst == m_nodeId ||
+            seen.find (route.nwkDst) != seen.end ())
+          {
+            continue;
+          }
+        seen.insert (route.nwkDst);
+        destinations.push_back (route.nwkDst);
+      }
+    if (!destinations.empty ())
+      {
+        return destinations;
+      }
+    for (const auto &neighbor : m_nwkNeighbors)
+      {
+        if (neighbor.first == m_nodeId ||
+            seen.find (neighbor.first) != seen.end ())
+          {
+            continue;
+          }
+        seen.insert (neighbor.first);
+        destinations.push_back (neighbor.first);
+      }
+    return destinations;
+  }
+
+  /**
    * Get the cost of the currently selected route.
    *
    * @param destination Network destination.

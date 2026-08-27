@@ -26,6 +26,10 @@ The aggregate toolchain is:
 | `utils/compare-opnet-ns3-aggregates.py` | Align exact series/time identities and report coverage or value differences |
 | `utils/run-opnet-aggregate-differential.py` | Run the strict end-to-end workflow and record reproducibility provenance |
 
+Every workflow run also retains `app-admission-diagnostics.csv`. Its per-flow
+counters must exactly partition generator attempts into admitted packets and
+one source-ordered gate reason before the workflow proceeds.
+
 ## Canonical CSV contract
 
 Every row describes one sample from one aggregate time series. The six core
@@ -71,6 +75,13 @@ deprecated `--opnet-size-exclusion-bits` alias) exists only for older traces
 that recorded the configured size; any adjustment is explicit in provenance.
 
 ## Alignment and tolerances
+
+Recovered Modeler buckets use `[previous_bucket_end, bucket_end)` endpoints.
+The ns-3 aggregator therefore assigns an event exactly on an interior boundary
+to the following bucket, includes `t=0` in the first bucket, and excludes an
+event exactly at the configured stop time. Stop-boundary and after-stop events
+are reported separately in provenance rather than clamped into the last
+bucket.
 
 Input order is irrelevant. Within each comparable series, OPNET and ns-3
 points are sorted by time and aligned one-to-one. Alignment first maximizes the
@@ -188,14 +199,17 @@ named scenario as the same evidence.
 |  | `*-DES-1.ef` | `67b1667da06408ce190347a6ada98cf9989e75e986b753dd21671823c7ff3fa5` |
 |  | `*-DES-1.ov` | `dbbbd61759299e9a41aaed9d53acb983df653670843d5ae62f039b772dd989e5` |
 |  | `*.pb.m` | `8ed62d4c3bc1a11eb5639394c6ccea5b5d415c8afad138b3e493b413ee0a359e` |
+|  | `*.dev32.i1.nt.so` | `d9ebf7626e641ee68ccc9b58b1bb4b28fc0906111762e4456a0e8c7a0bd8b055` |
 | `blue_radio_campus-hidden_nodes_symmetrical` | `*.nt.m` | `4ac306b6d984d2d8b65557261d11a0a4321082f30e75dd2ce1affa9486093cbd` |
 |  | `*-DES-1.ef` | `3f4a302486fbdc8e5fe56e0df5da1de8ea2c6216ae9324b3e33ecbb33a3f703c` |
 |  | `*-DES-1.ov` | `f656cf217236392a845fbfa5bcc1458df8fbe0b62bc04af54435013a6f2e537d` |
 |  | `*.pb.m` | `3a22de6cfa554916f6f9649bd67308f956a04f86bc6b79a3cd1dacd059bd100c` |
+|  | `*.dev32.i1.nt.so` | `dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0` |
 | `blue_radio_campus-multihop` | `*.nt.m` | `7052743dc082f3ba34ee2bd8ac70068adf8091efaf4ff8cb2116faff088abcd7` |
 |  | `*-DES-1.ef` | `a5ce1d570adbb9dd0e2720506bcbf645abf4d53d563e3ccb0fbeac2f6d7feff9` |
 |  | `*-DES-1.ov` | `b643bee5c1d0260581a0135c0add5c87441bd98f70f66388fac0bf95096c39ee` |
 |  | `*.pb.m` | `2871b54d0c531198f8ff77b1aa2a3cc81da6f05814c9ca00e64ed6a544a6470f` |
+|  | `*.dev32.i1.nt.so` | `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` |
 
 ## Measured exact-tolerance results
 
@@ -205,38 +219,55 @@ parity:
 
 | Scenario | Statistic | OPNET mean | ns-3 mean | Result |
 | --- | --- | ---: | ---: | --- |
-| `blue_radio_campus-2_nodes` | Traffic sent | 16.4417167 packet/s | 12.9128167 packet/s | Mean relative delta 21.4513% |
-|  | Traffic received | 16.4372667 packet/s | 12.9125500 packet/s | Mean relative delta 21.4311% |
-|  | End-to-end delay | 1.4512490 s | 1.0571018 s | Mean relative delta 27.1527% |
+| `blue_radio_campus-2_nodes` | Traffic sent | 16.4417167 packet/s | 16.3596500 packet/s | 0.4991% error vs OPNET mean |
+|  | Traffic received | 16.4372667 packet/s | 16.3473667 packet/s | 0.5469% error vs OPNET mean |
+|  | End-to-end delay | 1.4512490 s | 1.4273729 s | 1.6452% error vs OPNET mean |
 |  | Application packet size | 4,736 bits | 4,736 bits | Exact in all 100 buckets |
-| `blue_radio_campus-hidden_nodes_symmetrical` | Traffic sent | 12.1707333 packet/s | 14.7748167 packet/s | Mean relative delta 17.6391% |
-|  | Traffic received | 11.4369500 packet/s | 14.5755000 packet/s | Mean relative delta 21.5523% |
-|  | End-to-end delay | 9.1797597 s | 3.2916742 s | Mean relative delta 64.1180% |
+| `blue_radio_campus-hidden_nodes_symmetrical` | Traffic sent | 12.1707333 packet/s | 12.7283333 packet/s | 4.5815% error vs OPNET mean |
+|  | Traffic received | 11.4369500 packet/s | 12.0342167 packet/s | 5.2223% error vs OPNET mean |
+|  | End-to-end delay | 9.1797597 s | 8.4022281 s | 8.4701% error vs OPNET mean |
 |  | Application packet size | 4,736 bits | 4,736 bits | Exact in all 100 buckets |
-| `blue_radio_campus-multihop` | Traffic sent | 2.0120000 packet/s | 2.3923333 packet/s | Mean relative delta 16.7569% |
-|  | Traffic received | 1.9016667 packet/s | 2.2783333 packet/s | Mean relative delta 15.6605% |
-|  | End-to-end delay | 112.7480 s | 47.0161 s | Mean relative delta 56.0651% |
+| `blue_radio_campus-multihop` | Traffic sent | 2.0120000 packet/s | 2.4566667 packet/s | 22.1007% error vs OPNET mean |
+|  | Traffic received | 1.9016667 packet/s | 2.2900000 packet/s | 20.4207% error vs OPNET mean |
+|  | End-to-end delay | 112.7480 s | 91.4031 s | 18.9315% error vs OPNET mean |
 |  | Application packet size | 1,536 bits | 1,536 bits | Exact in 95 measured buckets; 5 no-sample buckets |
+
+These runs use the hash-bound historical application and MAC profiles, FIFO
+DSCP 0, source-ordered generator gates, and the common 0.988-second wake
+phase. The two-node and hidden-node headline means are now close without a
+tolerance adjustment. Multihop remains materially high in traffic and low in
+delay; its recovered HOP resend, MAC Tx, MAC ACK, and MAC queuing-delay vectors
+are therefore the next diagnostic comparison rather than another slot-policy
+guess.
 
 The corrected traces also retain complete correlation and size-integrity
 provenance:
 
 | Scenario | Trace events | Exact deliveries | Unmatched sends | Unmatched deliveries | Size mismatches |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `blue_radio_campus-2_nodes` | 1,549,522 | 774,753 | 16 | 0 | 0 |
-| `blue_radio_campus-hidden_nodes_symmetrical` | 1,980,906 | 874,530 | 11,959 | 0 | 0 |
-| `blue_radio_campus-multihop` | 210,238 | 13,670 | 684 | 0 | 0 |
+| `blue_radio_campus-2_nodes` | 1,974,900 | 980,842 | 737 | 0 | 0 |
+| `blue_radio_campus-hidden_nodes_symmetrical` | 2,234,152 | 722,053 | 41,647 | 0 | 0 |
+| `blue_radio_campus-multihop` | 191,591 | 13,740 | 1,000 | 0 | 0 |
+
+The generator diagnostics account for every scheduled attempt before packet
+creation:
+
+| Scenario | Attempts | Admitted | Discovery | Empty topology | Gateway route | Dynamic destination | NSDP full |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `blue_radio_campus-2_nodes` | 59,700,000 | 981,579 | 0 | 0 | 0 | 0 | 58,718,421 |
+| `blue_radio_campus-hidden_nodes_symmetrical` | 149,250,000 | 763,700 | 0 | 0 | 0 | 0 | 148,486,300 |
+| `blue_radio_campus-multihop` | 1,710,000 | 14,740 | 1,500 | 4,117 | 189 | 0 | 1,689,454 |
 
 The compact trace SHA-256 values are, respectively,
-`e0185ab03eb7f15eb89ce61495d0a8dec1cfefee40d7c87249a2946ec3da59c1`,
-`199628b5645da8a8be8217c8381636242c6b060760ef35f6e34208a637379f5a`,
-and `527f5cbce45455c1f1afa340580bdf33a27e3d71acb8be55dab83feddbb61a74`.
+`94091ec88155ab9c97b3a667b52f96cf516c618e5405e0533de5092a8bae494b`,
+`a7b2bbc98ce4acd4c3d72145e6c7043bf143c7bfd4a8785ca0994a45afdbaf56`,
+and `57721b50d4dcad31d7da36d79ad5f7bd24147ea54d255490c0dd3ac321d90070`.
 The mandatory-hash canonical workflow was also executed end to end for the
 multihop case; its scoped status was `selected_comparison_failed`, with all
 four stages completing as designed and the comparator returning status 1.
 
-At exact tolerance, the two-node and hidden-node reports each contain 700
-numeric mismatches. The multihop report contains 665 numeric mismatches and
+At exact tolerance, the two-node report contains 696 numeric mismatches, the
+hidden-node report contains 700, and the multihop report contains 665 and
 skips 20 aligned missing values; the sentinel-derived gaps are not failures by
 themselves. Exact packet size in all three cases validates the vector decoder
 and source-level modeled size, but it does not validate traffic generation,
@@ -244,8 +275,8 @@ reservation/ACK timing, routing, delay, or collision behavior.
 
 The hidden-node run also confirms why ECC drop accounting is excluded from the
 default set. Modeler's `ECC.Traffic Dropped (packets/sec)` mean is 10.84105,
-while the current narrow ns-3 `rx_drop` `reason=ecc` mean is only 0.0028833.
-The ns-3 trace separately records 159,234 `prior_stage` and 60,480 `state`
+while the narrow ns-3 `rx_drop` `reason=ecc` mean is 0.6195167.
+The ns-3 trace separately records 487,751 `prior_stage` and 223,477 `state`
 drops. That is an unresolved event-identity mapping, not a tolerable numeric
 offset; prior-stage collision rejections must be mapped from source semantics
 before the counters can be called equivalent. Tolerances were not widened to

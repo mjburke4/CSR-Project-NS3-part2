@@ -241,6 +241,41 @@ RunSlotFreezeScenario ()
 }
 
 void
+RunOpnetAlignedDutyInitializationScenario ()
+{
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (2);
+  receiver->EnableOpnetAlignedDutyCycling (true);
+
+  Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+           "OPNET-aligned duty cycle did not start in Idle at t=0");
+
+  Simulator::Schedule (MilliSeconds (987), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+             "OPNET-aligned duty cycle woke before 0.988 seconds");
+  });
+  Simulator::Schedule (MilliSeconds (988), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "OPNET-aligned duty cycle did not wake at 0.988 seconds");
+  });
+  Simulator::Schedule (MicroSeconds (996800), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "OPNET-aligned wake window closed too early");
+  });
+  Simulator::Schedule (MilliSeconds (997), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+             "OPNET-aligned wake window did not return to Idle");
+  });
+  Simulator::Schedule (MicroSeconds (1976001), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "OPNET-aligned duty cycle did not schedule its second wake");
+  });
+
+  Simulator::Stop (MilliSeconds (1977));
+  Simulator::Run ();
+  Simulator::Destroy ();
+}
+
+void
 RunDutyCycleScenarios ()
 {
   g_receivedSources.clear ();
@@ -323,6 +358,7 @@ main ()
   RunAcquisitionCaptureScenario ();
   RunPostLockCollisionScenario ();
   RunSlotFreezeScenario ();
+  RunOpnetAlignedDutyInitializationScenario ();
   RunDutyCycleScenarios ();
   RunHalfDuplexScenario ();
 

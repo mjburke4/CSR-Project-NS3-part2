@@ -101,7 +101,7 @@ class AggregateNs3TraceTests(unittest.TestCase):
                     trace_row(1, 3, "nwk_delivery", src="9", dst="8", size_bytes="10"),
                     trace_row(2, 5, "app_send", src="1", dst="2", size_bytes="20"),
                     trace_row(3, 7, "nwk_delivery", src="1", dst="2", size_bytes="10"),
-                    # Exact bucket boundaries belong to the bucket ending there.
+                    # Exact bucket boundaries belong to the bucket starting there.
                     trace_row(4, 10, "app_send", src="1", dst="2", size_bytes="30"),
                     trace_row(5, 10, "rx_drop", src="1", dst="2", reason="ecc"),
                     trace_row(6, 11, "rx_drop", src="1", dst="2", reason="collision"),
@@ -118,10 +118,12 @@ class AggregateNs3TraceTests(unittest.TestCase):
 
             self.assertEqual(len(rows), 18)
             self.assertEqual(
-                values[(aggregate.SENT_PACKETS_RATE, 10.0)]["value"], "0.29999999999999999"
+                values[(aggregate.SENT_PACKETS_RATE, 10.0)]["value"],
+                "0.20000000000000001",
             )
             self.assertEqual(
-                values[(aggregate.SENT_PACKETS_RATE, 20.0)]["value"], "0"
+                values[(aggregate.SENT_PACKETS_RATE, 20.0)]["value"],
+                "0.10000000000000001",
             )
             self.assertEqual(
                 values[(aggregate.RECEIVED_PACKETS_RATE, 10.0)]["value"],
@@ -135,12 +137,14 @@ class AggregateNs3TraceTests(unittest.TestCase):
             )
             self.assertEqual(
                 values[(aggregate.SENT_BITS_RATE, 10.0)]["value"],
-                "48",
+                "24",
             )
-            self.assertEqual(values[(aggregate.PACKET_SIZE, 10.0)]["value"], "160")
             self.assertEqual(
-                values[(aggregate.PACKET_SIZE, 20.0)]["value_status"], "missing"
+                values[(aggregate.SENT_BITS_RATE, 20.0)]["value"],
+                "24",
             )
+            self.assertEqual(values[(aggregate.PACKET_SIZE, 10.0)]["value"], "120")
+            self.assertEqual(values[(aggregate.PACKET_SIZE, 20.0)]["value"], "240")
             self.assertEqual(
                 values[(aggregate.RECEIVED_BITS_RATE, 10.0)]["value"],
                 "16",
@@ -155,9 +159,12 @@ class AggregateNs3TraceTests(unittest.TestCase):
             self.assertEqual(values[(aggregate.END_TO_END_DELAY, 20.0)]["value"], "7")
             self.assertEqual(
                 values[(aggregate.ECC_DROPS_RATE, 10.0)]["value"],
+                "0",
+            )
+            self.assertEqual(
+                values[(aggregate.ECC_DROPS_RATE, 20.0)]["value"],
                 "0.10000000000000001",
             )
-            self.assertEqual(values[(aggregate.ECC_DROPS_RATE, 20.0)]["value"], "0")
 
             self.assertEqual(provenance["delay_matching"]["matched_count"], 2)
             self.assertEqual(
@@ -184,6 +191,58 @@ class AggregateNs3TraceTests(unittest.TestCase):
             self.assertEqual(
                 provenance["opnet_app_size_semantics"]["size_exclusion_bits"], 0
             )
+
+    def test_modeler_bucket_endpoint_is_left_closed_and_stop_is_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(0, 0, "app_send", src="1", dst="2", size_bytes="10"),
+                    trace_row(1, 300, "app_send", src="1", dst="2", size_bytes="20"),
+                    trace_row(2, 600, "app_send", src="1", dst="2", size_bytes="30"),
+                    trace_row(3, 601, "app_send", src="1", dst="2", size_bytes="40"),
+                ],
+            )
+
+            rows, provenance = aggregate.derive_series(
+                trace, "bucket-endpoints", 60.0, 600.0
+            )
+            sent_rates = {
+                float(row["time_s"]): row["value"]
+                for row in rows
+                if row["statistic"] == aggregate.SENT_PACKETS_RATE
+            }
+            packet_sizes = {
+                float(row["time_s"]): row["value"]
+                for row in rows
+                if row["statistic"] == aggregate.PACKET_SIZE
+                and row["value_status"] == "observed"
+            }
+
+            self.assertEqual(sent_rates[60.0], "0.016666666666666666")
+            self.assertEqual(sent_rates[300.0], "0")
+            self.assertEqual(sent_rates[360.0], "0.016666666666666666")
+            self.assertEqual(packet_sizes, {60.0: "80", 360.0: "160"})
+            self.assertEqual(
+                provenance["window"]["interval"],
+                "[previous_bucket_end, bucket_end); t=0 is included in the "
+                "first bucket and t=stop_time_s is excluded",
+            )
+            self.assertEqual(provenance["window"]["start_endpoint"], "inclusive")
+            self.assertEqual(provenance["window"]["stop_endpoint"], "exclusive")
+            self.assertEqual(
+                provenance["window"]["excluded_at_stop"], {"app_send": 1}
+            )
+            self.assertEqual(
+                provenance["window"]["excluded_after_stop"], {"app_send": 1}
+            )
+            self.assertEqual(aggregate._bucket_index(0.0, 60.0, 10), 0)
+            self.assertEqual(aggregate._bucket_index(300.0, 60.0, 10), 5)
+            with self.assertRaisesRegex(
+                aggregate.TraceAggregationError, "outside the half-open"
+            ):
+                aggregate._bucket_index(600.0, 60.0, 10)
 
     def test_prefers_exact_application_sequence_over_fifo(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

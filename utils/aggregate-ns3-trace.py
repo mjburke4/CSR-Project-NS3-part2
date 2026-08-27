@@ -193,14 +193,20 @@ def _flow_key(row: dict[str, str], row_number: int) -> tuple[str, str]:
 
 
 def _bucket_index(time_s: float, bucket_width_s: float, bucket_count: int) -> int:
-    """Map time to (previous bucket end, bucket end], with zero in bucket 0."""
+    """Map an in-window time to [previous bucket end, bucket end)."""
 
     quotient = time_s / bucket_width_s
     nearest = round(quotient)
     if math.isclose(quotient, nearest, rel_tol=0.0, abs_tol=1.0e-12):
         quotient = float(nearest)
-    index = max(0, math.ceil(quotient) - 1)
-    return min(index, bucket_count - 1)
+    index = math.floor(quotient)
+    if index < 0 or index >= bucket_count:
+        stop_time_s = bucket_width_s * bucket_count
+        raise TraceAggregationError(
+            f"event time {time_s!r} is outside the half-open aggregation "
+            f"window [0, {stop_time_s!r})"
+        )
+    return index
 
 
 def _validate_window(bucket_width_s: float, stop_time_s: float) -> int:
@@ -313,6 +319,7 @@ def derive_series(
     ] = defaultdict(deque)
     all_event_counts: Counter[str] = Counter()
     in_window_event_counts: Counter[str] = Counter()
+    excluded_at_stop: Counter[str] = Counter()
     excluded_after_stop: Counter[str] = Counter()
     ignored_rx_drop_reasons: Counter[str] = Counter()
     unmatched_deliveries: Counter[tuple[str, str]] = Counter()
@@ -326,9 +333,12 @@ def derive_series(
         input_row_count += 1
         event = row["event"].strip()
         all_event_counts[event] += 1
-        if time_s > stop_time_s:
+        if time_s >= stop_time_s:
             if event in {"app_send", "nwk_delivery", "rx_drop"}:
-                excluded_after_stop[event] += 1
+                if time_s == stop_time_s:
+                    excluded_at_stop[event] += 1
+                else:
+                    excluded_after_stop[event] += 1
             continue
         in_window_event_counts[event] += 1
         bucket = _bucket_index(time_s, bucket_width_s, bucket_count)
@@ -505,8 +515,14 @@ def derive_series(
             "bucket_width_s": bucket_width_s,
             "bucket_count": bucket_count,
             "timestamp": "bucket_end",
-            "interval": "(previous_bucket_end, bucket_end], with t=0 in first bucket",
+            "interval": (
+                "[previous_bucket_end, bucket_end); t=0 is included in the "
+                "first bucket and t=stop_time_s is excluded"
+            ),
+            "start_endpoint": "inclusive",
+            "stop_endpoint": "exclusive",
             "in_window_event_counts": dict(sorted(in_window_event_counts.items())),
+            "excluded_at_stop": dict(sorted(excluded_at_stop.items())),
             "excluded_after_stop": dict(sorted(excluded_after_stop.items())),
         },
         "delay_matching": {
@@ -621,7 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--stop-time",
         required=True,
         type=float,
-        help="inclusive simulation stop time in seconds",
+        help="exclusive aggregate-window stop time in simulation seconds",
     )
     parser.add_argument(
         "--legacy-trace-size-exclusion-bits",

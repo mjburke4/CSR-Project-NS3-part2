@@ -80,11 +80,13 @@ is still required for event-by-event certification.
 
 Every row uses schema `csr-opnet-scenario-v1` and one of three record types:
 
-- `run`: scenario digest, duration, seed, TMM flag, coordinate scale, and an
-  optional reservation-control activation time.
+- `run`: scenario digest, duration, seed, TMM flag, coordinate scale,
+  executable-backed application and MAC profiles, and an optional
+  reservation-control activation time.
 - `node`: one imported CSR node, all calibrated radio/link attributes, and an
   optional controlled reservation slot.
-- `flow`: one explicit deterministic application flow.
+- `flow`: one application generator, including fixed or live
+  route/neighbor destination selection.
 
 The file is deliberately rectangular so both Python and the C++ runner reject
 missing or shifted fields. The source digest covers the exact `*.nt.m` and
@@ -101,26 +103,108 @@ python3 utils/import-opnet-scenario.py \
 ```
 
 For repeatable differential runs, explicit `--flow` records remain available.
-For the recovered campus models, `--infer-gateway-flows` implements the
-source-backed `SEND_ONLY_TO_GATEWAY=1` destination pattern: it requires exactly
-one gateway, creates a flow from every non-gateway node to that gateway, and
-leaves the gateway itself silent. Every sender must provide promoted start,
-interval, and packet-size attributes; a missing value is an error rather than a
-silently omitted flow. For example:
+Gateway inference requires exactly one gateway and every generator must provide
+promoted start, interval, and packet-size attributes. A missing value is an
+error rather than a silently omitted flow. Compile-time application behavior
+is not stored in `*.nt.m`, so `--application-profile` records which executable
+era is being reconstructed:
+
+- `current-send-only` leaves the gateway silent and retains the explicit
+  `--gateway-flow-dscp` modeling choice;
+- `legacy-send-only-no-dscp` leaves the gateway silent and forces DSCP 0; and
+- `legacy-send-to-from-no-dscp` adds one gateway generator which chooses
+  uniformly from its live route list, with a neighbor-list fallback, and
+  forces DSCP 0.
+
+The selected 2014/15 aggregate executables are content-addressed evidence:
+
+| Scenario | Application profile | Executable SHA-256 |
+| --- | --- | --- |
+| `blue_radio_campus-2_nodes` | `legacy-send-to-from-no-dscp` | `d9ebf7626e641ee68ccc9b58b1bb4b28fc0906111762e4456a0e8c7a0bd8b055` |
+| `blue_radio_campus-hidden_nodes_symmetrical` | `legacy-send-to-from-no-dscp` | `dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0` |
+| `blue_radio_campus-multihop` | `legacy-send-only-no-dscp` | `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` |
+
+Their bounded packet-generator disassembly contains no DSCP setter or DSCP
+probability draw. For example:
 
 ```bash
 python3 utils/import-opnet-scenario.py \
   historical-campus.zip imported-campus.csv \
   --scenario blue_radio_campus-2_nodes.nt.m \
   --infer-gateway-flows \
-  --gateway-flow-dscp 5
+  --application-profile legacy-send-to-from-no-dscp
 ```
 
-The DSCP is a deterministic modeling choice, not a recovered per-packet fact.
-`br_app` uses process-level `DSCP` and `DSCP_pct` inputs to choose between that
-DSCP and zero probabilistically. The importer defaults the deterministic choice
-to 5 for these comparisons, exposes it through `--gateway-flow-dscp`, and
-records it in every canonical flow row.
+Only the newer current profile treats DSCP as a deterministic modeling choice.
+The supplied newer `br_app` uses process-level `DSCP` and `DSCP_pct` inputs to
+choose between that DSCP and zero probabilistically; the importer retains the
+previous fixed default of 5 for backward compatibility and records it in every
+flow row. It never substitutes that assumption into either historical
+no-DSCP profile.
+
+### Executable-bound MAC profiles
+
+The run row's `mac_profile` records the exact `get_slot()` family selected by
+`--mac-profile`. It is bound to compiled-code evidence, not inferred from the
+scenario name, node count, or topology: the same `*.nt.m` can be run with a
+different compiled executable. The four accepted profile names are:
+
+| MAC profile | Evidence binding | Slot-selection behavior |
+| --- | --- | --- |
+| `current-fine-free-slot` | Supplied newer `br_mac.pr.c`; no recovered executable SHA binding | Fine active-node range; draw a one-based free-slot ordinal, mark neighbor `rtslot_counter` values reserved, and walk the reservation table. With no reservations the support is `1..R`; reservations can shift the physical slot above `R`. |
+| `hist-2014-zero-based-rebuild-list` | `d9ebf7626e641ee68ccc9b58b1bb4b28fc0906111762e4456a0e8c7a0bd8b055` (`blue_radio_campus-2_nodes`) | Coarse range; rebuild an ordered `0..R-1` list and choose one list index uniformly. |
+| `hist-2015-fine-one-based-table-no-avoid` | `dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0` (`blue_radio_campus-hidden_nodes_symmetrical`) | Fine range; index an ordered 255-entry table with a uniform integer in `1..R`, without reservation avoidance. |
+| `hist-2014-next-tslot-modulo-probe` | `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` (`blue_radio_campus-multihop`) | Coarse range; draw in `0..R`, compare directly with each neighbor's `next_tslot`, and probe after a collision. |
+
+For the two coarse profiles, the disassembled signed comparisons give
+`R=31` for `N<=4`, `R=63` for `5<=N<=8`, `R=127` for `9<=N<=12`, and
+`R=255` for `N>=13`; the unreachable-for-normal-input negative-node edge also
+falls in the first branch. The fine mapping is exact:
+
+| Active nodes `N` | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 or other |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Range `R` | 15 | 18 | 21 | 25 | 31 | 37 | 44 | 52 | 63 | 75 | 89 | 106 | 127 | 151 | 180 | 214 | 255 |
+
+The three historical algorithms preserve their executable-specific endpoints
+and defects:
+
+- The zero-based executable creates exactly `R` entries with slot fields
+  `0..R-1`, draws `floor(uniform(R))`, and consults no reservation state. Slot
+  zero is selectable and `R` is not, despite the executable also recording
+  `max_tslot=R+1`.
+- The fine-table executable creates 255 entries with indexes and slot fields
+  `0..254`, draws `j=floor(uniform(R))+1`, and returns table entry `j`. For
+  `R<=254` its exact support is `1..R`; slot zero is excluded. Neighbor
+  reservation flags and counters exist but `get_slot()` reads neither. Its
+  five call sites all pass the process-state `rn_range` as `num_rslot`.
+  `rn_range` is initialized to zero, has no later executable assignment, and
+  is not present in the selected `*.nt.m` or `*.ef`, so the archived run uses
+  the default fine mapping. A debugger-injected positive value after the first
+  transmission would replace `R`, but that is not part of the archived run.
+  When a draw selects index 255 (or a larger injected override reaches it),
+  the historical code dereferences outside the table; this profile aborts
+  explicitly instead of clamping, wrapping, or inventing a slot.
+- The modulo-probe executable initially draws `floor(uniform(R+1))`, giving
+  `0..R` inclusive, and returns immediately if no neighbor has that
+  `next_tslot`. On a collision it advances with `(candidate+1)%R`, so the
+  subsequent search is restricted to `0..R-1`: `R` can be returned only as a
+  free initial draw, a collision at `R` advances to 1, and a collision at
+  `R-1` wraps to zero. It uses direct neighbor comparisons, not a reservation
+  array. If every slot in `0..R-1` is occupied, the historical loop never
+  terminates even when `R` is free; this profile detects a complete modulo
+  cycle and aborts explicitly instead of hanging.
+
+For example, a hash-matched two-node import records both executable-era
+choices:
+
+```bash
+python3 utils/import-opnet-scenario.py \
+  historical-campus.zip imported-campus.csv \
+  --scenario blue_radio_campus-2_nodes.nt.m \
+  --infer-gateway-flows \
+  --application-profile legacy-send-to-from-no-dscp \
+  --mac-profile hist-2014-zero-based-rebuild-list
+```
 
 `--infer-ring-flows` remains a deterministic smoke-test surrogate. It is not
 source-exact for these runs because the OPNET application obtains destinations
@@ -251,13 +335,16 @@ not parity passes:
 
 | Scenario | Compared points | Exact packet size | Mean OPNET vs ns-3 | Exact-tolerance outcome |
 | --- | ---: | --- | --- | --- |
-| `blue_radio_campus-2_nodes` | 800 | All 100 buckets | Sent 16.4417 vs 12.9128 packet/s; received 16.4373 vs 12.9126 packet/s; delay 1.45125 vs 1.05710 s | 700 numeric mismatches; no missing or extra points |
-| `blue_radio_campus-hidden_nodes_symmetrical` | 800 | All 100 buckets | Sent 12.1707 vs 14.7748 packet/s; received 11.4370 vs 14.5755 packet/s; delay 9.17976 vs 3.29167 s | 700 numeric mismatches; no missing or extra points |
-| `blue_radio_campus-multihop` | 800 | All 95 measured buckets; 5 OPNET no-sample buckets preserved | Sent 2.0120 vs 2.39233 packet/s; received 1.90167 vs 2.27833 packet/s; delay 112.748 vs 47.0161 s | 665 numeric mismatches; no missing or extra points; 20 missing values skipped |
+| `blue_radio_campus-2_nodes` | 800 | All 100 buckets | Sent 16.4417 vs 16.3597 packet/s; received 16.4373 vs 16.3474 packet/s; delay 1.45125 vs 1.42737 s | 696 numeric mismatches; no missing or extra points |
+| `blue_radio_campus-hidden_nodes_symmetrical` | 800 | All 100 buckets | Sent 12.1707 vs 12.7283 packet/s; received 11.4370 vs 12.0342 packet/s; delay 9.17976 vs 8.40223 s | 700 numeric mismatches; no missing or extra points |
+| `blue_radio_campus-multihop` | 800 | All 95 measured buckets; 5 OPNET no-sample buckets preserved | Sent 2.0120 vs 2.45667 packet/s; received 1.90167 vs 2.29000 packet/s; delay 112.748 vs 91.4031 s | 665 numeric mismatches; no missing or extra points; 20 missing values skipped |
 
 These failures were not hidden by widening tolerances. The exact packet-size
 matches validate vector decoding and the source-level modeled size, while the
-traffic-rate and delay differences identify real model-calibration work.
+remaining bucket-by-bucket traffic and delay differences identify real
+model-calibration work. The two-node and hidden-node mean values are now close
+under their executable-bound application and MAC profiles. Multihop's
+remaining rate and delay residual is the next queue/service diagnostic target.
 
 ## Remaining certification boundary
 

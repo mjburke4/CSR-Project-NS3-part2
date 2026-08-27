@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 from dataclasses import replace
 import importlib.util
+import io
 import os
 from pathlib import Path
 import struct
@@ -231,6 +233,180 @@ class ScenarioImporterTests(unittest.TestCase):
         self.assertEqual(flow.interval_s, 0.02)
         self.assertEqual(flow.packet_bytes, 600)
         self.assertEqual(flow.dscp, 5)
+        self.assertEqual(
+            flow.destination_mode, IMPORTER.FLOW_DESTINATION_FIXED
+        )
+
+    def test_legacy_send_only_profile_forces_no_dscp(self) -> None:
+        (gateway,) = IMPORTER.parse_network_model(synthetic_network(), 1.0)
+        ordinary = replace(
+            gateway,
+            node_id=8,
+            name="node_8",
+            node_type="ordinary",
+        )
+        (flow,) = IMPORTER.infer_gateway_flows(
+            [gateway, ordinary],
+            dscp=7,
+            application_profile=(
+                IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP
+            ),
+        )
+        self.assertEqual((flow.source, flow.destination), (8, 7))
+        self.assertEqual(flow.dscp, 0)
+        self.assertEqual(
+            flow.destination_mode, IMPORTER.FLOW_DESTINATION_FIXED
+        )
+
+    def test_legacy_send_to_from_adds_one_dynamic_gateway_flow(self) -> None:
+        (gateway,) = IMPORTER.parse_network_model(synthetic_network(), 1.0)
+        ordinary = replace(
+            gateway,
+            node_id=8,
+            name="node_8",
+            node_type="ordinary",
+        )
+        flows = IMPORTER.infer_gateway_flows(
+            [gateway, ordinary],
+            application_profile=(
+                IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP
+            ),
+        )
+        self.assertEqual(len(flows), 2)
+        ordinary_flow, gateway_flow = flows
+        self.assertEqual(
+            (ordinary_flow.source, ordinary_flow.destination), (8, 7)
+        )
+        self.assertEqual(ordinary_flow.dscp, 0)
+        self.assertEqual(
+            ordinary_flow.destination_mode, IMPORTER.FLOW_DESTINATION_FIXED
+        )
+        self.assertEqual((gateway_flow.source, gateway_flow.destination), (7, 7))
+        self.assertEqual(gateway_flow.start_s, 300.0)
+        self.assertEqual(gateway_flow.interval_s, 0.02)
+        self.assertEqual(gateway_flow.packet_bytes, 600)
+        self.assertEqual(gateway_flow.dscp, 0)
+        self.assertEqual(
+            gateway_flow.destination_mode,
+            IMPORTER.FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
+        )
+
+    def test_application_profile_validation(self) -> None:
+        (gateway,) = IMPORTER.parse_network_model(synthetic_network(), 1.0)
+        with self.assertRaisesRegex(
+            IMPORTER.ImportErrorDetail, "unsupported application profile"
+        ):
+            IMPORTER.infer_gateway_flows(
+                [gateway], application_profile="not-a-profile"
+            )
+        arguments = IMPORTER.build_parser().parse_args(
+            [
+                "scenario.nt.m",
+                "scenario.csv",
+                "--infer-gateway-flows",
+                "--application-profile",
+                IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+            ]
+        )
+        self.assertEqual(
+            arguments.application_profile,
+            IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                IMPORTER.build_parser().parse_args(
+                    [
+                        "scenario.nt.m",
+                        "scenario.csv",
+                        "--application-profile",
+                        "not-a-profile",
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scenario.nt.m"
+            output = root / "scenario.csv"
+            source.write_bytes(synthetic_network())
+            without_inference = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--application-profile",
+                    IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP,
+                ]
+            )
+            with self.assertRaisesRegex(
+                IMPORTER.ImportErrorDetail,
+                "--application-profile requires --infer-gateway-flows",
+            ):
+                IMPORTER.import_scenario(without_inference)
+            self.assertFalse(output.exists())
+
+    def test_legacy_send_to_from_requires_gateway_app_fields(self) -> None:
+        (gateway,) = IMPORTER.parse_network_model(synthetic_network(), 1.0)
+        ordinary = replace(
+            gateway,
+            node_id=8,
+            name="node_8",
+            node_type="ordinary",
+        )
+        with self.assertRaisesRegex(
+            IMPORTER.ImportErrorDetail,
+            r"node 'node_7' lacks promoted application attribute.*app\.Start Time",
+        ):
+            IMPORTER.infer_gateway_flows(
+                [replace(gateway, start_s=None), ordinary],
+                application_profile=(
+                    IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP
+                ),
+            )
+
+    def test_flow_destination_mode_is_written(self) -> None:
+        (gateway,) = IMPORTER.parse_network_model(synthetic_network(), 1.0)
+        flow = IMPORTER.Flow(
+            source=gateway.node_id,
+            destination=gateway.node_id,
+            start_s=300.0,
+            interval_s=0.02,
+            packet_bytes=600,
+            dscp=0,
+            destination_mode=(
+                IMPORTER.FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "scenario.csv"
+            IMPORTER.write_scenario(
+                output,
+                "scenario",
+                "0" * 64,
+                {"duration_s": 60000.0, "seed": 128, "tmm": False},
+                1.0,
+                [gateway],
+                [flow],
+                {},
+                IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+                IMPORTER.MAC_PROFILE_HIST_2014_ZERO_BASED_REBUILD_LIST,
+            )
+            with output.open(encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+        run_row = next(row for row in rows if row["record"] == "run")
+        self.assertEqual(
+            run_row["application_profile"],
+            IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+        )
+        self.assertEqual(
+            run_row["mac_profile"],
+            IMPORTER.MAC_PROFILE_HIST_2014_ZERO_BASED_REBUILD_LIST,
+        )
+        flow_row = next(row for row in rows if row["record"] == "flow")
+        self.assertEqual(flow_row["flow_src"], "7")
+        self.assertEqual(flow_row["flow_dst"], "7")
+        self.assertEqual(
+            flow_row["flow_destination_mode"],
+            IMPORTER.FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
+        )
 
     def test_gateway_flow_inference_uses_explicit_dscp_assumption(self) -> None:
         (gateway,) = IMPORTER.parse_network_model(synthetic_network(), 1.0)
@@ -354,6 +530,52 @@ class ScenarioImporterTests(unittest.TestCase):
             self.assertEqual(len(nodes), 1)
             self.assertEqual(flows, [])
             self.assertTrue(output.read_text(encoding="utf-8").startswith("record,"))
+            with output.open(encoding="utf-8") as stream:
+                run_row = next(csv.DictReader(stream))
+            self.assertEqual(
+                run_row["application_profile"],
+                IMPORTER.APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+            )
+            self.assertEqual(
+                run_row["mac_profile"],
+                IMPORTER.MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
+            )
+
+    def test_mac_profile_cli_and_run_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scenario.nt.m"
+            output = root / "scenario.csv"
+            source.write_bytes(synthetic_network())
+            arguments = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--mac-profile",
+                    IMPORTER.MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+                ]
+            )
+            IMPORTER.import_scenario(arguments)
+            with output.open(encoding="utf-8") as stream:
+                run_row = next(csv.DictReader(stream))
+            self.assertEqual(
+                run_row["mac_profile"],
+                IMPORTER.MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+            )
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                IMPORTER.build_parser().parse_args(
+                    [
+                        "scenario.nt.m",
+                        "scenario.csv",
+                        "--mac-profile",
+                        "not-a-profile",
+                    ]
+                )
+        help_text = IMPORTER.build_parser().format_help()
+        for profile in IMPORTER.MAC_PROFILES:
+            self.assertIn(profile, help_text)
 
 
 class TraceComparatorTests(unittest.TestCase):

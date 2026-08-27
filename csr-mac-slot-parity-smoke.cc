@@ -48,6 +48,44 @@ BuildDataFrame (uint16_t sequence, uint8_t dscp)
 }
 
 void
+CheckSlotSelectionProfileRanges (Ptr<CsrNetDevice> device)
+{
+  CsrMacCore &mac = device->GetMac ();
+  using Profile = CsrMacCore::SlotSelectionProfile;
+
+  mac.SetSlotSelectionProfile (Profile::NS3_CURRENT_FINE_FREE_SLOT);
+  Require (mac.GetOpnetSlotRange (0) == 15 &&
+             mac.GetOpnetSlotRange (5) == 37 &&
+             mac.GetOpnetSlotRange (16) == 255,
+           "current fine slot-range map changed");
+
+  mac.SetSlotSelectionProfile (Profile::HIST_2014_ZERO_BASED_REBUILD_LIST);
+  Require (mac.GetOpnetSlotRange (0) == 31 &&
+             mac.GetOpnetSlotRange (4) == 31 &&
+             mac.GetOpnetSlotRange (5) == 63 &&
+             mac.GetOpnetSlotRange (9) == 127 &&
+             mac.GetOpnetSlotRange (13) == 255,
+           "historical rebuild-list coarse slot-range map is wrong");
+
+  mac.SetSlotSelectionProfile (
+    Profile::HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID);
+  Require (mac.GetOpnetSlotRange (0) == 15 &&
+             mac.GetOpnetSlotRange (5) == 37 &&
+             mac.GetOpnetSlotRange (16) == 255,
+           "historical one-based-table fine slot-range map is wrong");
+
+  mac.SetSlotSelectionProfile (
+    Profile::HIST_2014_NEXT_TSLOT_MODULO_PROBE);
+  Require (mac.GetOpnetSlotRange (4) == 31 &&
+             mac.GetOpnetSlotRange (8) == 63 &&
+             mac.GetOpnetSlotRange (12) == 127 &&
+             mac.GetOpnetSlotRange (17) == 255,
+           "historical modulo-probe coarse slot-range map is wrong");
+
+  mac.SetSlotSelectionProfile (Profile::NS3_CURRENT_FINE_FREE_SLOT);
+}
+
+void
 CheckHoldoff (Ptr<CsrNetDevice> device)
 {
   Require (device->GetMac ().GetTransmittedFrameCount () == 0,
@@ -140,6 +178,7 @@ main ()
   Time::SetResolution (Time::NS);
 
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
+  CheckSlotSelectionProfileRanges (device);
   device->GetMac ().SetActiveNodesForPostTx (1);
   device->GetMac ().SetTxSentCallback (MakeCallback (&RecordTransmission));
 

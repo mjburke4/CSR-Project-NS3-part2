@@ -48,6 +48,11 @@ public:
 
   void EnableDutyCycling (bool enable)
   {
+    m_opnetAlignedDutyCycle = false;
+    if (m_opnetPeriodicWakeEvent.IsPending ())
+      {
+        Simulator::Cancel (m_opnetPeriodicWakeEvent);
+      }
     m_dutyCycleEnabled = enable;
     if (!enable && m_pendingTxWakeEvent.IsPending ())
       {
@@ -67,11 +72,49 @@ public:
       }
   }
 
+  /**
+   * Enable the source-aligned OPNET wake lifecycle.
+   *
+   * Unlike EnableDutyCycling(), this mode does not draw a random phase.  The
+   * receiver begins in Idle and its first unconditional WAKE occurs at
+   * WAKE_CYCLE (0.988 s), matching br_mac_init() in br_mac.pr.c.
+   */
+  void EnableOpnetAlignedDutyCycling (bool enable)
+  {
+    m_opnetAlignedDutyCycle = enable;
+    m_dutyCycleEnabled = enable;
+    m_wakePhaseSec = 0.0;
+
+    if (m_opnetPeriodicWakeEvent.IsPending ())
+      {
+        Simulator::Cancel (m_opnetPeriodicWakeEvent);
+      }
+    if (m_signalWakeEvent.IsPending ())
+      {
+        Simulator::Cancel (m_signalWakeEvent);
+      }
+    if (m_pendingTxWakeEvent.IsPending ())
+      {
+        Simulator::Cancel (m_pendingTxWakeEvent);
+      }
+
+    RefreshDutyState ();
+    if (enable)
+      {
+        ScheduleOpnetPeriodicWake ();
+      }
+  }
+
   bool IsDutyCyclingEnabled () const { return m_dutyCycleEnabled; }
 
   /** Set a deterministic wake phase, primarily for repeatable scenarios. */
   void SetDutyCyclePhase (Time phase)
   {
+    m_opnetAlignedDutyCycle = false;
+    if (m_opnetPeriodicWakeEvent.IsPending ())
+      {
+        Simulator::Cancel (m_opnetPeriodicWakeEvent);
+      }
     double seconds = std::fmod (phase.GetSeconds (), m_wakeCycleSec);
     m_wakePhaseSec = seconds < 0.0 ? seconds + m_wakeCycleSec : seconds;
     if (m_pendingTxWakeEvent.IsPending ())
@@ -286,9 +329,11 @@ private:
   void RefreshDutyState ();
   void WakeForSignal ();
   void WakeForPendingTx ();
+  void OpnetPeriodicWake ();
   void SleepReceiver ();
   void ScheduleSignalWake ();
   void SchedulePendingTxWake ();
+  void ScheduleOpnetPeriodicWake ();
   bool IsPeriodicAwakeAt (double timeSec) const;
   double GetPeriodicWindowEnd (double timeSec) const;
   double GetNextPeriodicWake (double timeSec) const;
@@ -312,11 +357,13 @@ private:
   EventId                        m_acquisitionEvent;
   EventId                        m_signalWakeEvent;
   EventId                        m_pendingTxWakeEvent;
+  EventId                        m_opnetPeriodicWakeEvent;
   EventId                        m_sleepEvent;
   EventId                        m_forceAwakeEndEvent;
 
   // --- Duty cycling (OPNET-inspired) ---
   bool   m_dutyCycleEnabled { false };
+  bool   m_opnetAlignedDutyCycle { false };
 
   // OPNET constants:
   //   WAKE_CYCLE ~0.988 s
@@ -718,6 +765,11 @@ CsrNetDevice::SendFramesToPeers (
 bool
 CsrNetDevice::IsPeriodicAwakeAt (double timeSec) const
 {
+  if (m_opnetAlignedDutyCycle && timeSec < m_wakeCycleSec)
+    {
+      return false;
+    }
+
   double offset = std::fmod (timeSec - m_wakePhaseSec, m_wakeCycleSec);
   if (offset < 0.0)
     {
@@ -742,6 +794,11 @@ CsrNetDevice::GetPeriodicWindowEnd (double timeSec) const
 double
 CsrNetDevice::GetNextPeriodicWake (double timeSec) const
 {
+  if (m_opnetAlignedDutyCycle && timeSec < m_wakeCycleSec)
+    {
+      return m_wakeCycleSec;
+    }
+
   double offset = std::fmod (timeSec - m_wakePhaseSec, m_wakeCycleSec);
   if (offset < 0.0)
     {
@@ -857,9 +914,61 @@ CsrNetDevice::WakeForPendingTx ()
 }
 
 void
+CsrNetDevice::OpnetPeriodicWake ()
+{
+  if (!m_dutyCycleEnabled || !m_opnetAlignedDutyCycle)
+    {
+      return;
+    }
+
+  // br_mac handles WAKE in Track/Tx/Search by resetting the timer.  Only an
+  // Idle WAKE enters start_search() and starts the no-signal sleep window.
+  m_opnetPeriodicWakeEvent = Simulator::Schedule (
+    Seconds (m_wakeCycleSec),
+    &CsrNetDevice::OpnetPeriodicWake,
+    this);
+  if (m_mac.GetState () != CsrMacCore::State::IDLE)
+    {
+      return;
+    }
+
+  m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
+  if (m_sleepEvent.IsPending ())
+    {
+      Simulator::Cancel (m_sleepEvent);
+    }
+  m_sleepEvent = Simulator::Schedule (Seconds (m_awakeWindowSec),
+                                      &CsrNetDevice::SleepReceiver,
+                                      this);
+  ScheduleAcquisition ();
+}
+
+void
+CsrNetDevice::ScheduleOpnetPeriodicWake ()
+{
+  if (!m_dutyCycleEnabled ||
+      !m_opnetAlignedDutyCycle ||
+      m_opnetPeriodicWakeEvent.IsPending ())
+    {
+      return;
+    }
+
+  int64_t cycleSteps = Seconds (m_wakeCycleSec).GetTimeStep ();
+  int64_t nowSteps = Simulator::Now ().GetTimeStep ();
+  NS_ABORT_MSG_IF (cycleSteps <= 0,
+                   "CSR MAC wake cycle must be positive");
+  int64_t nextWakeSteps = (nowSteps / cycleSteps + 1) * cycleSteps;
+  m_opnetPeriodicWakeEvent = Simulator::Schedule (
+    TimeStep (nextWakeSteps - nowSteps),
+    &CsrNetDevice::OpnetPeriodicWake,
+    this);
+}
+
+void
 CsrNetDevice::ScheduleSignalWake ()
 {
   if (!m_dutyCycleEnabled ||
+      m_opnetAlignedDutyCycle ||
       m_mac.GetState () != CsrMacCore::State::IDLE ||
       m_signalWakeEvent.IsPending ())
     {
@@ -895,6 +1004,7 @@ void
 CsrNetDevice::SchedulePendingTxWake ()
 {
   if (!m_dutyCycleEnabled ||
+      m_opnetAlignedDutyCycle ||
       m_mac.GetState () != CsrMacCore::State::IDLE ||
       !m_mac.HasPendingFrames () ||
       m_pendingTxWakeEvent.IsPending ())

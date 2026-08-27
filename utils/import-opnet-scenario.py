@@ -21,6 +21,38 @@ ATTRIBUTE_SENTINEL = b"\x00\x01"
 ATTRIBUTE_SUFFIX = b"\x00\x00\x00\x00\x00"
 NODE_MODEL = "br_node_v1"
 SCHEMA_VERSION = "csr-opnet-scenario-v1"
+FLOW_DESTINATION_FIXED = "fixed"
+FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR = "random_route_or_neighbor"
+FLOW_DESTINATION_MODES = (
+    FLOW_DESTINATION_FIXED,
+    FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
+)
+APPLICATION_PROFILE_CURRENT_SEND_ONLY = "current-send-only"
+APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP = "legacy-send-only-no-dscp"
+APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP = (
+    "legacy-send-to-from-no-dscp"
+)
+APPLICATION_PROFILES = (
+    APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+    APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP,
+    APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+)
+MAC_PROFILE_CURRENT_FINE_FREE_SLOT = "current-fine-free-slot"
+MAC_PROFILE_HIST_2014_ZERO_BASED_REBUILD_LIST = (
+    "hist-2014-zero-based-rebuild-list"
+)
+MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID = (
+    "hist-2015-fine-one-based-table-no-avoid"
+)
+MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE = (
+    "hist-2014-next-tslot-modulo-probe"
+)
+MAC_PROFILES = (
+    MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
+    MAC_PROFILE_HIST_2014_ZERO_BASED_REBUILD_LIST,
+    MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+    MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE,
+)
 # ns-3's MRG32k3a RngStream requires seed < m2 (4294944443), which
 # is narrower than the uint32 storage type accepted by RngSeedManager.
 NS3_RNG_SEED_MAX = 4294944442
@@ -35,6 +67,8 @@ SCENARIO_COLUMNS = (
     "tmm",
     "coordinate_scale_m_per_unit",
     "reservation_control_start_s",
+    "application_profile",
+    "mac_profile",
     "node_id",
     "forced_reservation_slot",
     "name",
@@ -55,6 +89,7 @@ SCENARIO_COLUMNS = (
     "start_s",
     "flow_src",
     "flow_dst",
+    "flow_destination_mode",
     "flow_start_s",
     "flow_interval_s",
     "flow_packet_bytes",
@@ -99,6 +134,7 @@ class Flow:
     interval_s: float
     packet_bytes: int
     dscp: int
+    destination_mode: str = FLOW_DESTINATION_FIXED
 
 
 @dataclass(frozen=True)
@@ -464,6 +500,7 @@ def parse_flow(specification: str) -> Flow:
             interval_s=float(parts[3]),
             packet_bytes=int(parts[4], 0),
             dscp=int(parts[5], 0),
+            destination_mode=FLOW_DESTINATION_FIXED,
         )
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
@@ -527,21 +564,35 @@ def infer_ring_flows(nodes: list[Node]) -> list[Flow]:
                 interval_s=node.interarrival_s,
                 packet_bytes=node.packet_bytes,
                 dscp=5,
+                destination_mode=FLOW_DESTINATION_FIXED,
             )
         )
     return flows
 
 
-def infer_gateway_flows(nodes: list[Node], dscp: int = 5) -> list[Flow]:
-    """Infer deterministic flows using the source-backed gateway pattern.
+def infer_gateway_flows(
+    nodes: list[Node],
+    dscp: int = 5,
+    application_profile: str = APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+) -> list[Flow]:
+    """Infer flows using an explicit, executable-backed application profile.
 
-    The recovered ``br_app`` process suppresses application traffic at the
-    gateway and directs every other node to the discovered gateway.  The
-    discovery time remains a runtime protocol outcome; this helper only makes
-    the source/destination relation explicit in the canonical scenario.  Its
-    DSCP is a modeling choice: ``br_app`` uses ``DSCP``/``DSCP_pct``
-    probabilistically, while a canonical explicit flow needs one fixed value.
+    Current ``br_app`` and legacy send-only executables suppress application
+    traffic at the gateway and direct every other node to the discovered
+    gateway.  Legacy send-to/from executables additionally schedule one flow
+    at the gateway; each admitted gateway packet chooses from the live route
+    table, with a neighbor-table fallback.  The dynamic flow stores the
+    gateway itself as a non-routing placeholder destination and identifies the
+    runtime policy through ``destination_mode``.
+
+    The current profile retains the caller-selected deterministic DSCP
+    modeling choice.  Historical no-DSCP profiles force DSCP zero because
+    their executable packet generators contain no DSCP assignment.
     """
+    if application_profile not in APPLICATION_PROFILES:
+        raise ImportErrorDetail(
+            f"unsupported application profile {application_profile!r}"
+        )
     if dscp < 0 or dscp > 7:
         raise ImportErrorDetail("gateway flow DSCP must be in 0..7")
     gateways = [node for node in nodes if node.node_type == "gateway"]
@@ -550,10 +601,14 @@ def infer_gateway_flows(nodes: list[Node], dscp: int = 5) -> list[Flow]:
             "--infer-gateway-flows requires exactly one gateway node"
         )
     gateway_id = gateways[0].node_id
+    profile_dscp = (
+        dscp
+        if application_profile == APPLICATION_PROFILE_CURRENT_SEND_ONLY
+        else 0
+    )
     flows: list[Flow] = []
-    for node in nodes:
-        if node.node_id == gateway_id:
-            continue
+
+    def require_application_fields(node: Node) -> None:
         missing = [
             field
             for field, value in (
@@ -568,6 +623,11 @@ def infer_gateway_flows(nodes: list[Node], dscp: int = 5) -> list[Flow]:
                 f"node {node.name!r} lacks promoted application attribute(s) "
                 f"required by --infer-gateway-flows: {', '.join(missing)}"
             )
+
+    for node in nodes:
+        if node.node_id == gateway_id:
+            continue
+        require_application_fields(node)
         flows.append(
             Flow(
                 source=node.node_id,
@@ -575,7 +635,24 @@ def infer_gateway_flows(nodes: list[Node], dscp: int = 5) -> list[Flow]:
                 start_s=node.start_s,
                 interval_s=node.interarrival_s,
                 packet_bytes=node.packet_bytes,
-                dscp=dscp,
+                dscp=profile_dscp,
+                destination_mode=FLOW_DESTINATION_FIXED,
+            )
+        )
+
+    if application_profile == APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP:
+        gateway = gateways[0]
+        require_application_fields(gateway)
+        flows.append(
+            Flow(
+                source=gateway_id,
+                # Runtime destination selection ignores this self placeholder.
+                destination=gateway_id,
+                start_s=gateway.start_s,
+                interval_s=gateway.interarrival_s,
+                packet_bytes=gateway.packet_bytes,
+                dscp=0,
+                destination_mode=FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
             )
         )
     return flows
@@ -594,8 +671,16 @@ def write_scenario(
     nodes: Iterable[Node],
     flows: Iterable[Flow],
     reservation_slot_overrides: dict[int, int],
+    application_profile: str = APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+    mac_profile: str = MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
 ) -> None:
     """Write the rectangular canonical scenario CSV."""
+    if application_profile not in APPLICATION_PROFILES:
+        raise ImportErrorDetail(
+            f"unsupported application profile {application_profile!r}"
+        )
+    if mac_profile not in MAC_PROFILES:
+        raise ImportErrorDetail(f"unsupported MAC profile {mac_profile!r}")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=SCENARIO_COLUMNS, lineterminator="\n")
@@ -610,6 +695,8 @@ def write_scenario(
             seed=str(run["seed"]),
             tmm="1" if run["tmm"] else "0",
             coordinate_scale_m_per_unit=repr(coordinate_scale),
+            application_profile=application_profile,
+            mac_profile=mac_profile,
             reservation_control_start_s=(
                 ""
                 if "reservation_control_start_s" not in run
@@ -653,6 +740,7 @@ def write_scenario(
                 schema=SCHEMA_VERSION,
                 flow_src=str(flow.source),
                 flow_dst=str(flow.destination),
+                flow_destination_mode=flow.destination_mode,
                 flow_start_s=repr(flow.start_s),
                 flow_interval_s=repr(flow.interval_s),
                 flow_packet_bytes=str(flow.packet_bytes),
@@ -695,12 +783,36 @@ def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flo
         raise ImportErrorDetail("--flow and inferred flows are mutually exclusive")
     if inference_modes > 1:
         raise ImportErrorDetail("flow inference modes are mutually exclusive")
+    if (
+        arguments.application_profile != APPLICATION_PROFILE_CURRENT_SEND_ONLY
+        and not arguments.infer_gateway_flows
+    ):
+        raise ImportErrorDetail(
+            "--application-profile requires --infer-gateway-flows"
+        )
     if arguments.infer_ring_flows:
         flows = infer_ring_flows(nodes)
     elif arguments.infer_gateway_flows:
-        flows = infer_gateway_flows(nodes, arguments.gateway_flow_dscp)
+        flows = infer_gateway_flows(
+            nodes,
+            arguments.gateway_flow_dscp,
+            arguments.application_profile,
+        )
     known_ids = {node.node_id for node in nodes}
     for flow in flows:
+        if flow.destination_mode not in FLOW_DESTINATION_MODES:
+            raise ImportErrorDetail(
+                f"flow {flow.source}->{flow.destination} has unsupported "
+                f"destination mode {flow.destination_mode!r}"
+            )
+        if (
+            flow.destination_mode == FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR
+            and flow.source != flow.destination
+        ):
+            raise ImportErrorDetail(
+                "random_route_or_neighbor flow requires its source as the "
+                "placeholder destination"
+            )
         if flow.source not in known_ids or flow.destination not in known_ids:
             raise ImportErrorDetail(
                 f"flow {flow.source}->{flow.destination} references an unknown node"
@@ -750,6 +862,8 @@ def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flo
         nodes,
         flows,
         reservation_slot_overrides,
+        arguments.application_profile,
+        arguments.mac_profile,
     )
     if resolved.environment_name is None:
         print(
@@ -823,13 +937,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--application-profile",
+        choices=APPLICATION_PROFILES,
+        default=APPLICATION_PROFILE_CURRENT_SEND_ONLY,
+        help=(
+            "executable-backed br_app profile used with "
+            "--infer-gateway-flows (default: current-send-only)"
+        ),
+    )
+    parser.add_argument(
+        "--mac-profile",
+        choices=MAC_PROFILES,
+        default=MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
+        help=(
+            "executable-backed MAC reservation profile recorded in the run "
+            "row (default: current-fine-free-slot)"
+        ),
+    )
+    parser.add_argument(
         "--gateway-flow-dscp",
         type=parse_gateway_flow_dscp,
         default=5,
         metavar="0..7",
         help=(
-            "deterministic DSCP modeling choice for --infer-gateway-flows; "
-            "br_app selects DSCP probabilistically (default: 5)"
+            "deterministic DSCP modeling choice for the current send-only "
+            "profile; legacy no-DSCP profiles force zero (default: 5)"
         ),
     )
     return parser

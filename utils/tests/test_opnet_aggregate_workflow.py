@@ -39,6 +39,8 @@ SCENARIO_COLUMNS = (
     "record",
     "schema",
     "scenario",
+    "application_profile",
+    "mac_profile",
     "source_sha256",
     "duration_s",
     "seed",
@@ -63,6 +65,7 @@ SCENARIO_COLUMNS = (
     "start_s",
     "flow_src",
     "flow_dst",
+    "flow_destination_mode",
     "flow_start_s",
     "flow_interval_s",
     "flow_packet_bytes",
@@ -75,12 +78,15 @@ def write_scenario(
     duration_s: float = 60000.0,
     seed: int | float | str = 128,
     source_sha256: str = "0" * 64,
+    application_profile: str = "current-send-only",
+    mac_profile: str | None = "current-fine-free-slot",
 ) -> None:
     rows = [
         {
             "record": "run",
             "schema": WORKFLOW.SCENARIO_SCHEMA,
             "scenario": "fixture",
+            "application_profile": application_profile,
             "source_sha256": source_sha256,
             "duration_s": str(duration_s),
             "seed": str(seed),
@@ -128,14 +134,22 @@ def write_scenario(
             "schema": WORKFLOW.SCENARIO_SCHEMA,
             "flow_src": "2",
             "flow_dst": "1",
+            "flow_destination_mode": "fixed",
             "flow_start_s": "1",
             "flow_interval_s": "600",
             "flow_packet_bytes": "16",
             "flow_dscp": "0",
         },
     ]
+    if mac_profile is not None:
+        rows[0]["mac_profile"] = mac_profile
+        columns = SCENARIO_COLUMNS
+    else:
+        columns = tuple(
+            column for column in SCENARIO_COLUMNS if column != "mac_profile"
+        )
     with path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=SCENARIO_COLUMNS, lineterminator="\n")
+        writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -160,8 +174,9 @@ def write_fake_runner(path: Path, mode: str = "exact") -> None:
                 options[name] = value
             required = {
                 "scenario", "trace", "stop", "flowLimit", "dutyCycling",
+                "opnetAlignedDutyCycle",
                 "gatewayDiscovery", "opnetAppGating", "aggregateTraceOnly",
-                "quietModelLogs",
+                "quietModelLogs", "appDiagnostics",
             }
             if set(options) != required:
                 raise SystemExit(65)
@@ -203,6 +218,18 @@ def write_fake_runner(path: Path, mode: str = "exact") -> None:
                         "size_bytes": "16", "reason": "",
                     })
                     event_index += 1
+            diagnostics = Path(options["appDiagnostics"])
+            diagnostics.write_text(
+                "schema,scenario,application_profile,flow_index,source,"
+                "configured_destination,"
+                "destination_mode,attempts,admitted,blocked_discovery,"
+                "blocked_topology,blocked_gateway_route,blocked_destination,"
+                "blocked_nsdp,first_admitted_s,last_admitted_s\\n"
+                "csr-app-admission-diagnostics-v1,fixture,current-send-only,"
+                "0,2,1,fixed,100,100,"
+                "0,0,0,0,0,598,599\\n",
+                encoding="utf-8",
+            )
             print(f"fake runner wrote {event_index} events")
         """
     ).replace("__MODE__", repr(mode))
@@ -331,6 +358,8 @@ class AggregateWorkflowTests(unittest.TestCase):
                 configuration["identities"]["canonical_scenario"],
                 {
                     "scenario": "fixture",
+                    "application_profile": "current-send-only",
+                    "mac_profile": "current-fine-free-slot",
                     "duration_s": 60000.0,
                     "seed": 128,
                     "source_sha256": "0" * 64,
@@ -354,8 +383,14 @@ class AggregateWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 configuration["runner"],
                 {
+                    "app_admission_diagnostics_schema": (
+                        WORKFLOW.APP_ADMISSION_DIAGNOSTICS_SCHEMA
+                    ),
+                    "application_profile": "current-send-only",
+                    "mac_profile": "current-fine-free-slot",
                     "aggregate_trace_only": True,
                     "duty_cycling": False,
+                    "opnet_aligned_duty_cycle": True,
                     "flow_limit": 7,
                     "gateway_discovery": False,
                     "opnet_app_gating": False,
@@ -382,6 +417,22 @@ class AggregateWorkflowTests(unittest.TestCase):
             self.assertIn("--stop=60000", runner_command)
             self.assertIn("--aggregateTraceOnly=1", runner_command)
             self.assertIn("--quietModelLogs=1", runner_command)
+            self.assertIn("--opnetAlignedDutyCycle=1", runner_command)
+            self.assertTrue(
+                any(value.startswith("--appDiagnostics=") for value in runner_command)
+            )
+            self.assertEqual(
+                manifest["stages"]["run_ns3"]["application_admission_totals"],
+                {
+                    "admitted": 100,
+                    "attempts": 100,
+                    "blocked_destination": 0,
+                    "blocked_discovery": 0,
+                    "blocked_gateway_route": 0,
+                    "blocked_nsdp": 0,
+                    "blocked_topology": 0,
+                },
+            )
             compare_command = manifest["stages"]["compare"]["command"]
             self.assertEqual(
                 compare_command[compare_command.index("--time-stop") + 1], "60000"
@@ -858,6 +909,95 @@ class AggregateWorkflowTests(unittest.TestCase):
                 with self.subTest(seed=seed):
                     write_scenario(path, seed=seed)
                     self.assertEqual(WORKFLOW.load_scenario_run(path)["seed"], seed)
+
+    def test_unknown_application_profile_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scenario.csv"
+            write_scenario(path, application_profile="invented-profile")
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "unsupported application_profile"
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+    def test_unknown_mac_profile_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scenario.csv"
+            write_scenario(path, mac_profile="invented-profile")
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "unsupported mac_profile"
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+    def test_supported_mac_profiles_are_accepted(self) -> None:
+        profiles = (
+            "current-fine-free-slot",
+            "hist-2014-zero-based-rebuild-list",
+            "hist-2015-fine-one-based-table-no-avoid",
+            "hist-2014-next-tslot-modulo-probe",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scenario.csv"
+            for profile in profiles:
+                with self.subTest(profile=profile):
+                    write_scenario(path, mac_profile=profile)
+                    self.assertEqual(
+                        WORKFLOW.load_scenario_run(path)["mac_profile"], profile
+                    )
+
+    def test_missing_mac_profile_is_backward_compatible_but_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenario, ov, _pb, runner = self.prepare(root)
+            write_scenario(scenario, mac_profile=None)
+
+            loaded = WORKFLOW.load_scenario_run(scenario)
+            self.assertEqual(loaded["mac_profile"], "unspecified")
+
+            output = root / "run"
+            completed = subprocess.run(
+                self.command(scenario, ov, runner, output),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            manifest = json.loads(
+                (output / WORKFLOW.MANIFEST_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["profile"], "diagnostic")
+            self.assertIn(
+                "mac_profile_unspecified", manifest["noncertifying_overrides"]
+            )
+            self.assertEqual(
+                manifest["configuration"]["identities"]["canonical_scenario"][
+                    "mac_profile"
+                ],
+                "unspecified",
+            )
+            self.assertEqual(
+                manifest["configuration"]["runner"]["mac_profile"],
+                "unspecified",
+            )
+
+    def test_application_diagnostics_counters_must_partition_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "app.csv"
+            path.write_text(
+                "schema,scenario,application_profile,flow_index,attempts,"
+                "admitted,blocked_discovery,blocked_topology,"
+                "blocked_gateway_route,blocked_destination,blocked_nsdp,"
+                "first_admitted_s,last_admitted_s\n"
+                "csr-app-admission-diagnostics-v1,fixture,current-send-only,"
+                "0,2,1,0,0,0,0,0,1,1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "do not partition attempts"
+            ):
+                WORKFLOW.validate_app_admission_diagnostics(
+                    path, "fixture", "current-send-only", 1
+                )
 
     def test_inconsistent_vector_axes_are_rejected(self) -> None:
         vector = {
