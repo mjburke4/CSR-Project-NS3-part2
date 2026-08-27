@@ -3005,6 +3005,10 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
       if (&(*it) == entry)
         {
           m_resendQueue.erase (it);
+          WriteDifferentialStatisticSample (
+            m_nodeId,
+            CSR_STAT_HOP_RESEND_QUEUE_SIZE,
+            static_cast<double> (m_resendQueue.size ()));
           break;
         }
     }
@@ -3249,6 +3253,10 @@ CsrHopLayer::EnqueueResend (
     }
 
   m_resendQueue.push_back (e);
+  WriteDifferentialStatisticSample (
+    m_nodeId,
+    CSR_STAT_HOP_RESEND_QUEUE_SIZE,
+    static_cast<double> (m_resendQueue.size ()));
 }
 
 void
@@ -3479,6 +3487,10 @@ CsrHopLayer::CheckResend ()
             }
 
           it = m_resendQueue.erase (it);
+          WriteDifferentialStatisticSample (
+            m_nodeId,
+            CSR_STAT_HOP_RESEND_QUEUE_SIZE,
+            static_cast<double> (m_resendQueue.size ()));
           continue;
         }
 

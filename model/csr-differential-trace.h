@@ -101,7 +101,18 @@ struct CsrDifferentialTraceEvent
   std::string reservationSlot;
   std::string reservationCounter;
   std::string detail;
+  std::string statistic;
+  std::string value;
 };
+
+inline constexpr const char* CSR_STAT_HOP_RESEND_QUEUE_SIZE =
+  "HOP.Resend Queue Size (packets)";
+inline constexpr const char* CSR_STAT_MAC_ACK_QUEUE_SIZE =
+  "MAC.ACK Queue Size (packets)";
+inline constexpr const char* CSR_STAT_MAC_TX_QUEUE_SIZE =
+  "MAC.Tx Queue Size (packets)";
+inline constexpr const char* CSR_STAT_MAC_TX_QUEUE_DELAY =
+  "MAC.Tx Queuing Delay (sec)";
 
 inline std::ofstream g_csrDifferentialTrace;
 inline uint64_t g_csrDifferentialTraceIndex = 0;
@@ -176,7 +187,8 @@ OpenDifferentialTraceCsv (const std::string &path)
   if (g_csrDifferentialAggregateOnly)
     {
       g_csrDifferentialTrace
-        << "schema,event_index,time_s,event,src,dst,sequence,size_bytes,reason\n";
+        << "schema,event_index,time_s,event,src,dst,sequence,size_bytes,reason,"
+        << "node,statistic,value\n";
       return;
     }
   g_csrDifferentialTrace
@@ -184,7 +196,7 @@ OpenDifferentialTraceCsv (const std::string &path)
     << "sequence,rate_kbps,size_bytes,success,reason,pathloss_db,"
     << "rx_power_dbm,noise_dbm,snr_db,jsr_db,header_errors,"
     << "payload_errors,total_errors,route_cost,next_hop,security_count,"
-    << "reservation_slot,reservation_counter,detail\n";
+    << "reservation_slot,reservation_counter,detail,statistic,value\n";
 }
 
 inline void
@@ -212,7 +224,8 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
   if (g_csrDifferentialAggregateOnly &&
       event.event != "app_send" &&
       event.event != "nwk_delivery" &&
-      event.event != "rx_drop")
+      event.event != "rx_drop" &&
+      event.event != "statistic_sample")
     {
       return;
     }
@@ -228,6 +241,9 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
         event.sequence,
         event.sizeBytes,
         event.reason,
+        event.node,
+        event.statistic,
+        event.value,
       };
       for (std::size_t index = 0;
            index < sizeof (aggregateFields) / sizeof (aggregateFields[0]);
@@ -271,6 +287,8 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
     event.reservationSlot,
     event.reservationCounter,
     event.detail,
+    event.statistic,
+    event.value,
   };
   for (std::size_t index = 0; index < sizeof (fields) / sizeof (fields[0]); ++index)
     {
@@ -281,6 +299,20 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
       g_csrDifferentialTrace << CsrTraceCsvEscape (fields[index]);
     }
   g_csrDifferentialTrace << '\n';
+}
+
+/** Write one source-equivalent discrete statistic sample. */
+inline void
+WriteDifferentialStatisticSample (uint32_t node,
+                                  const char *statistic,
+                                  double value)
+{
+  CsrDifferentialTraceEvent event;
+  event.event = "statistic_sample";
+  event.node = CsrTraceInteger (node);
+  event.statistic = statistic;
+  event.value = CsrTraceDouble (value);
+  WriteDifferentialTrace (event);
 }
 
 } // namespace ns3

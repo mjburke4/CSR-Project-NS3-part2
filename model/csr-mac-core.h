@@ -596,6 +596,7 @@ private:
     CsrNodeId    dest;
     uint8_t     dscp;
     bool        ackable;
+    Time        enqueuedAt;
   };
 
   struct AckQueueEntry

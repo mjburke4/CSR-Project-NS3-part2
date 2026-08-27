@@ -39,7 +39,12 @@ TRACE_COLUMNS = (
     "sequence",
     "size_bytes",
     "reason",
+    "node",
+    "statistic",
+    "value",
 )
+
+LEGACY_TRACE_COLUMNS = TRACE_COLUMNS[:-3]
 
 
 def trace_row(index: int, time_s: float, event: str, **values: str) -> dict[str, str]:
@@ -53,6 +58,9 @@ def trace_row(index: int, time_s: float, event: str, **values: str) -> dict[str,
         "sequence": "",
         "size_bytes": "",
         "reason": "",
+        "node": "",
+        "statistic": "",
+        "value": "",
     }
     row.update(values)
     return row
@@ -63,6 +71,17 @@ def write_trace(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(stream, fieldnames=TRACE_COLUMNS, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_legacy_trace(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=LEGACY_TRACE_COLUMNS, lineterminator="\n"
+        )
+        writer.writeheader()
+        writer.writerows(
+            {column: row[column] for column in LEGACY_TRACE_COLUMNS} for row in rows
+        )
 
 
 def run_cli(trace: Path, output: Path, provenance: Path) -> subprocess.CompletedProcess[str]:
@@ -89,6 +108,311 @@ def run_cli(trace: Path, output: Path, provenance: Path) -> subprocess.Completed
 
 
 class AggregateNs3TraceTests(unittest.TestCase):
+    def test_pools_allowlisted_statistic_samples_and_preserves_missing_buckets(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(
+                        0,
+                        0,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.HOP_RESEND_QUEUE_SIZE,
+                        value="0",
+                    ),
+                    trace_row(
+                        1,
+                        1,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.MAC_ACK_QUEUE_SIZE,
+                        value="1",
+                    ),
+                    trace_row(
+                        2,
+                        1,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.MAC_TX_QUEUE_DELAY,
+                        value="0.25",
+                    ),
+                    trace_row(
+                        3,
+                        2,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="2",
+                        statistic=aggregate.HOP_RESEND_QUEUE_SIZE,
+                        value="2",
+                    ),
+                    # A duplicate value/time remains an independent source sample.
+                    trace_row(
+                        4,
+                        2,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.HOP_RESEND_QUEUE_SIZE,
+                        value="4",
+                    ),
+                    trace_row(
+                        5,
+                        4,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="2",
+                        statistic=aggregate.MAC_ACK_QUEUE_SIZE,
+                        value="3",
+                    ),
+                    trace_row(
+                        6,
+                        4,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="2",
+                        statistic=aggregate.MAC_TX_QUEUE_DELAY,
+                        value="0.75",
+                    ),
+                    # An exact boundary belongs to the bucket starting there.
+                    trace_row(
+                        7,
+                        5,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.HOP_RESEND_QUEUE_SIZE,
+                        value="8",
+                    ),
+                    trace_row(
+                        8,
+                        6,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="3",
+                        statistic=aggregate.MAC_TX_QUEUE_SIZE,
+                        value="7",
+                    ),
+                    # The explicit stop and later samples activate their series but
+                    # do not contribute to a bucket.
+                    trace_row(
+                        9,
+                        10,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.MAC_TX_QUEUE_DELAY,
+                        value="99",
+                    ),
+                    trace_row(
+                        10,
+                        11,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="3",
+                        statistic=aggregate.MAC_TX_QUEUE_SIZE,
+                        value="9",
+                    ),
+                ],
+            )
+
+            rows, provenance = aggregate.derive_series(
+                trace, "queue-samples", 5.0, 10.0
+            )
+            values = {
+                (row["statistic"], float(row["time_s"])): row for row in rows
+            }
+
+            self.assertEqual(len(rows), 26)
+            self.assertEqual(
+                values[(aggregate.HOP_RESEND_QUEUE_SIZE, 5.0)]["value"], "2"
+            )
+            self.assertEqual(
+                values[(aggregate.HOP_RESEND_QUEUE_SIZE, 10.0)]["value"], "8"
+            )
+            self.assertEqual(
+                values[(aggregate.MAC_ACK_QUEUE_SIZE, 5.0)]["value"], "2"
+            )
+            self.assertEqual(
+                values[(aggregate.MAC_ACK_QUEUE_SIZE, 10.0)]["value_status"],
+                "missing",
+            )
+            self.assertEqual(
+                values[(aggregate.MAC_TX_QUEUE_SIZE, 5.0)]["value_status"],
+                "missing",
+            )
+            self.assertEqual(
+                values[(aggregate.MAC_TX_QUEUE_SIZE, 10.0)]["value"], "7"
+            )
+            self.assertEqual(
+                values[(aggregate.MAC_TX_QUEUE_DELAY, 5.0)]["value"], "0.5"
+            )
+            self.assertEqual(
+                values[(aggregate.MAC_TX_QUEUE_DELAY, 10.0)]["value_status"],
+                "missing",
+            )
+            for statistic in (
+                aggregate.HOP_RESEND_QUEUE_SIZE,
+                aggregate.MAC_ACK_QUEUE_SIZE,
+                aggregate.MAC_TX_QUEUE_SIZE,
+            ):
+                self.assertEqual(values[(statistic, 5.0)]["unit"], "packets")
+                self.assertEqual(
+                    values[(statistic, 5.0)]["aggregation"],
+                    "bucket_sample_mean",
+                )
+            self.assertEqual(
+                values[(aggregate.MAC_TX_QUEUE_DELAY, 5.0)]["unit"], "s"
+            )
+
+            details = {
+                record["statistic"]: record
+                for record in provenance["statistic_sample_derivation"][
+                    "active_statistics"
+                ]
+            }
+            self.assertEqual(
+                details[aggregate.HOP_RESEND_QUEUE_SIZE]["sample_count"], 4
+            )
+            self.assertEqual(
+                details[aggregate.HOP_RESEND_QUEUE_SIZE]["samples_by_node"],
+                {"1": 3, "2": 1},
+            )
+            self.assertEqual(
+                details[aggregate.MAC_ACK_QUEUE_SIZE][
+                    "missing_sample_mean_bucket_ends_s"
+                ],
+                [10.0],
+            )
+            self.assertEqual(
+                details[aggregate.MAC_TX_QUEUE_DELAY]["sample_count"], 3
+            )
+            self.assertEqual(
+                details[aggregate.MAC_TX_QUEUE_DELAY]["in_window_sample_count"],
+                2,
+            )
+            self.assertEqual(
+                details[aggregate.MAC_TX_QUEUE_DELAY]["excluded_at_stop_count"],
+                1,
+            )
+            self.assertEqual(
+                details[aggregate.MAC_TX_QUEUE_SIZE]["excluded_after_stop_count"],
+                1,
+            )
+            self.assertEqual(
+                provenance["window"]["excluded_at_stop"],
+                {aggregate.STATISTIC_SAMPLE_EVENT: 1},
+            )
+            self.assertEqual(
+                provenance["window"]["excluded_after_stop"],
+                {aggregate.STATISTIC_SAMPLE_EVENT: 1},
+            )
+
+    def test_out_of_window_sample_activates_an_all_missing_series(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(
+                        0,
+                        5,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="7",
+                        statistic=aggregate.MAC_ACK_QUEUE_SIZE,
+                        value="1",
+                    )
+                ],
+            )
+
+            rows, provenance = aggregate.derive_series(
+                trace, "outside-only", 5.0, 5.0
+            )
+            ack = [
+                row
+                for row in rows
+                if row["statistic"] == aggregate.MAC_ACK_QUEUE_SIZE
+            ]
+
+            self.assertEqual(len(rows), 10)
+            self.assertEqual(len(ack), 1)
+            self.assertEqual(ack[0]["value"], "")
+            self.assertEqual(ack[0]["value_status"], "missing")
+            detail = provenance["statistic_sample_derivation"][
+                "active_statistics"
+            ][0]
+            self.assertEqual(detail["sample_count"], 1)
+            self.assertEqual(detail["in_window_sample_count"], 0)
+            self.assertEqual(detail["excluded_at_stop_count"], 1)
+
+    def test_rejects_malformed_or_unsupported_statistic_samples(self) -> None:
+        cases = (
+            ({"node": "1", "statistic": "MAC.Unknown", "value": "1"}, "unsupported"),
+            (
+                {
+                    "node": "1.5",
+                    "statistic": aggregate.MAC_ACK_QUEUE_SIZE,
+                    "value": "1",
+                },
+                "node is not an integer",
+            ),
+            (
+                {
+                    "node": "1",
+                    "statistic": aggregate.MAC_ACK_QUEUE_SIZE,
+                    "value": "1.5",
+                },
+                "integer packet count",
+            ),
+            (
+                {
+                    "node": "1",
+                    "statistic": aggregate.MAC_TX_QUEUE_DELAY,
+                    "value": "-0.1",
+                },
+                "finite and nonnegative",
+            ),
+            (
+                {
+                    "node": "1",
+                    "statistic": aggregate.MAC_TX_QUEUE_DELAY,
+                    "value": "nan",
+                },
+                "finite and nonnegative",
+            ),
+        )
+        for fields, message in cases:
+            with self.subTest(fields=fields):
+                with tempfile.TemporaryDirectory() as temporary:
+                    trace = Path(temporary) / "trace.csv"
+                    write_trace(
+                        trace,
+                        [
+                            trace_row(
+                                0,
+                                1,
+                                aggregate.STATISTIC_SAMPLE_EVENT,
+                                **fields,
+                            )
+                        ],
+                    )
+                    with self.assertRaisesRegex(
+                        aggregate.TraceAggregationError, message
+                    ):
+                        aggregate.derive_series(trace, "malformed", 5.0, 5.0)
+
+    def test_legacy_header_without_statistic_columns_remains_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "legacy.csv"
+            write_legacy_trace(
+                trace,
+                [trace_row(0, 1, "app_send", src="1", dst="2", size_bytes="10")],
+            )
+
+            rows, provenance = aggregate.derive_series(
+                trace, "legacy-header", 5.0, 5.0
+            )
+
+            self.assertEqual(len(rows), 9)
+            self.assertEqual(
+                provenance["statistic_sample_derivation"]["active_statistics"], []
+            )
+
     def test_derives_bucketed_counts_fifo_delay_and_ecc_drops(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "trace.csv"

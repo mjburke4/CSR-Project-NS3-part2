@@ -50,6 +50,12 @@ RECEIVED_BITS_RATE = "Sink.Traffic Received (bits/sec)"
 RECEIVED_BITS = "Sink.Traffic Received (bits)"
 END_TO_END_DELAY = "Sink.End-to-End Delay (seconds)"
 ECC_DROPS_RATE = "ECC.Traffic Dropped (packets/sec)"
+HOP_RESEND_QUEUE_SIZE = "HOP.Resend Queue Size (packets)"
+MAC_ACK_QUEUE_SIZE = "MAC.ACK Queue Size (packets)"
+MAC_TX_QUEUE_SIZE = "MAC.Tx Queue Size (packets)"
+MAC_TX_QUEUE_DELAY = "MAC.Tx Queuing Delay (sec)"
+
+STATISTIC_SAMPLE_EVENT = "statistic_sample"
 
 STATISTICS = (
     (SENT_PACKETS_RATE, "packets/s", "bucket_sum_per_second"),
@@ -62,6 +68,21 @@ STATISTICS = (
     (END_TO_END_DELAY, "s", "bucket_sample_mean"),
     (ECC_DROPS_RATE, "packets/s", "bucket_sum_per_second"),
 )
+
+# These vectors are activated dynamically when a trace contains at least one
+# matching statistic_sample event.  This keeps legacy traces byte-shape
+# compatible (nine derived series) while making an explicitly instrumented
+# trace fail closed if a sample identity or value is malformed.
+STATISTIC_SAMPLE_STATISTICS = (
+    (HOP_RESEND_QUEUE_SIZE, "packets", "bucket_sample_mean", True),
+    (MAC_ACK_QUEUE_SIZE, "packets", "bucket_sample_mean", True),
+    (MAC_TX_QUEUE_SIZE, "packets", "bucket_sample_mean", True),
+    (MAC_TX_QUEUE_DELAY, "s", "bucket_sample_mean", False),
+)
+STATISTIC_SAMPLE_SEMANTICS = {
+    name: (unit, aggregation, integral)
+    for name, unit, aggregation, integral in STATISTIC_SAMPLE_STATISTICS
+}
 
 REQUIRED_COLUMNS = {
     "schema",
@@ -153,6 +174,65 @@ def _parse_index(value: str, row_number: int) -> int:
             f"row {row_number}: event_index must be nonnegative"
         )
     return parsed
+
+
+def _parse_nonnegative_integer(value: str, label: str, row_number: int) -> int:
+    try:
+        parsed = int(value, 10)
+    except ValueError as error:
+        raise TraceAggregationError(
+            f"row {row_number}: {label} is not an integer: {value!r}"
+        ) from error
+    if parsed < 0:
+        raise TraceAggregationError(
+            f"row {row_number}: {label} must be nonnegative"
+        )
+    return parsed
+
+
+def _statistic_sample(
+    row: dict[str, str], row_number: int
+) -> tuple[str, str, float]:
+    """Validate and return one explicit source-equivalent statistic sample."""
+
+    missing_columns = [
+        field for field in ("node", "statistic", "value") if field not in row
+    ]
+    if missing_columns:
+        raise TraceAggregationError(
+            f"row {row_number}: {STATISTIC_SAMPLE_EVENT} requires columns: "
+            + ", ".join(missing_columns)
+        )
+
+    node_raw = (row.get("node") or "").strip()
+    statistic = (row.get("statistic") or "").strip()
+    value_raw = (row.get("value") or "").strip()
+    if not node_raw:
+        raise TraceAggregationError(
+            f"row {row_number}: {STATISTIC_SAMPLE_EVENT} requires node"
+        )
+    if not statistic:
+        raise TraceAggregationError(
+            f"row {row_number}: {STATISTIC_SAMPLE_EVENT} requires statistic"
+        )
+    if not value_raw:
+        raise TraceAggregationError(
+            f"row {row_number}: {STATISTIC_SAMPLE_EVENT} requires value"
+        )
+    semantics = STATISTIC_SAMPLE_SEMANTICS.get(statistic)
+    if semantics is None:
+        raise TraceAggregationError(
+            f"row {row_number}: unsupported {STATISTIC_SAMPLE_EVENT} statistic "
+            f"{statistic!r}"
+        )
+
+    node = _parse_nonnegative_integer(node_raw, "node", row_number)
+    value = _parse_nonnegative_float(value_raw, "value", row_number)
+    if semantics[2] and not value.is_integer():
+        raise TraceAggregationError(
+            f"row {row_number}: {statistic} sample must be an integer packet count"
+        )
+    return statistic, str(node), value
 
 
 def _trace_packet_bits(
@@ -311,6 +391,17 @@ def derive_series(
     received_bits = [0] * bucket_count
     ecc_drops = [0] * bucket_count
     delays: list[list[float]] = [[] for _ in range(bucket_count)]
+    statistic_samples: dict[str, list[list[float]]] = {
+        name: [[] for _ in range(bucket_count)]
+        for name in STATISTIC_SAMPLE_SEMANTICS
+    }
+    active_sample_statistics: set[str] = set()
+    statistic_sample_counts: Counter[str] = Counter()
+    in_window_statistic_sample_counts: Counter[str] = Counter()
+    statistic_samples_by_node: Counter[tuple[str, str]] = Counter()
+    in_window_statistic_samples_by_node: Counter[tuple[str, str]] = Counter()
+    statistic_samples_excluded_at_stop: Counter[str] = Counter()
+    statistic_samples_excluded_after_stop: Counter[str] = Counter()
     pending_exact: dict[
         tuple[str, str], dict[str, tuple[float, int, int]]
     ] = defaultdict(dict)
@@ -333,12 +424,32 @@ def derive_series(
         input_row_count += 1
         event = row["event"].strip()
         all_event_counts[event] += 1
+        parsed_statistic_sample: tuple[str, str, float] | None = None
+        if event == STATISTIC_SAMPLE_EVENT:
+            parsed_statistic_sample = _statistic_sample(row, row_number)
+            statistic, node, _ = parsed_statistic_sample
+            active_sample_statistics.add(statistic)
+            statistic_sample_counts[statistic] += 1
+            statistic_samples_by_node[(statistic, node)] += 1
         if time_s >= stop_time_s:
-            if event in {"app_send", "nwk_delivery", "rx_drop"}:
+            if event in {
+                "app_send",
+                "nwk_delivery",
+                "rx_drop",
+                STATISTIC_SAMPLE_EVENT,
+            }:
                 if time_s == stop_time_s:
                     excluded_at_stop[event] += 1
+                    if parsed_statistic_sample is not None:
+                        statistic_samples_excluded_at_stop[
+                            parsed_statistic_sample[0]
+                        ] += 1
                 else:
                     excluded_after_stop[event] += 1
+                    if parsed_statistic_sample is not None:
+                        statistic_samples_excluded_after_stop[
+                            parsed_statistic_sample[0]
+                        ] += 1
             continue
         in_window_event_counts[event] += 1
         bucket = _bucket_index(time_s, bucket_width_s, bucket_count)
@@ -429,6 +540,13 @@ def derive_series(
                 ecc_drops[bucket] += 1
             else:
                 ignored_rx_drop_reasons[reason or "<empty>"] += 1
+        elif event == STATISTIC_SAMPLE_EVENT:
+            if parsed_statistic_sample is None:  # pragma: no cover - invariant.
+                raise AssertionError("statistic sample was not parsed")
+            statistic, node, value = parsed_statistic_sample
+            statistic_samples[statistic][bucket].append(value)
+            in_window_statistic_sample_counts[statistic] += 1
+            in_window_statistic_samples_by_node[(statistic, node)] += 1
 
     unmatched_sends: Counter[tuple[str, str]] = Counter()
     for flow in set(pending_exact) | set(pending_fifo):
@@ -457,12 +575,24 @@ def derive_series(
         ],
         ECC_DROPS_RATE: [value / bucket_width_s for value in ecc_drops],
     }
+    active_sample_semantics = tuple(
+        (name, unit, aggregation)
+        for name, unit, aggregation, _ in STATISTIC_SAMPLE_STATISTICS
+        if name in active_sample_statistics
+    )
+    for statistic, _, _ in active_sample_semantics:
+        series_values[statistic] = [
+            (sum(samples) / len(samples)) if samples else None
+            for samples in statistic_samples[statistic]
+        ]
+    output_statistics = STATISTICS + active_sample_semantics
     semantics = {
-        name: (unit, aggregation) for name, unit, aggregation in STATISTICS
+        name: (unit, aggregation)
+        for name, unit, aggregation in output_statistics
     }
     rows: list[dict[str, str]] = []
     missing_sample_buckets: dict[str, list[float]] = defaultdict(list)
-    for statistic, _, _ in STATISTICS:
+    for statistic, _, _ in output_statistics:
         unit, aggregation = semantics[statistic]
         for bucket, value in enumerate(series_values[statistic]):
             bucket_end_s = (bucket + 1) * bucket_width_s
@@ -495,6 +625,46 @@ def derive_series(
             {"src": source, "dst": destination, "count": count}
             for (source, destination), count in sorted(counter.items())
         ]
+
+    def node_counts(
+        counter: Counter[tuple[str, str]], statistic: str
+    ) -> dict[str, int]:
+        return {
+            node: counter[(sample_statistic, node)]
+            for sample_statistic, node in sorted(counter)
+            if sample_statistic == statistic
+        }
+
+    statistic_sample_records = []
+    for statistic, unit, aggregation in active_sample_semantics:
+        integral = STATISTIC_SAMPLE_SEMANTICS[statistic][2]
+        statistic_sample_records.append(
+            {
+                "statistic": statistic,
+                "unit": unit,
+                "aggregation": aggregation,
+                "integral_samples_required": integral,
+                "sample_count": statistic_sample_counts[statistic],
+                "in_window_sample_count": in_window_statistic_sample_counts[
+                    statistic
+                ],
+                "samples_by_node": node_counts(
+                    statistic_samples_by_node, statistic
+                ),
+                "in_window_samples_by_node": node_counts(
+                    in_window_statistic_samples_by_node, statistic
+                ),
+                "excluded_at_stop_count": statistic_samples_excluded_at_stop[
+                    statistic
+                ],
+                "excluded_after_stop_count": statistic_samples_excluded_after_stop[
+                    statistic
+                ],
+                "missing_sample_mean_bucket_ends_s": missing_sample_buckets.get(
+                    statistic, []
+                ),
+            }
+        )
 
     provenance: dict[str, object] = {
         "schema": PROVENANCE_SCHEMA,
@@ -552,9 +722,26 @@ def derive_series(
             "included_rx_drop_reason": "ecc",
             "ignored_rx_drop_reasons": dict(sorted(ignored_rx_drop_reasons.items())),
         },
+        "statistic_sample_derivation": {
+            "event": STATISTIC_SAMPLE_EVENT,
+            "encoding": {
+                "node_field": "node",
+                "statistic_field": "statistic",
+                "value_field": "value",
+            },
+            "allowlisted_statistics": [
+                name for name, _, _, _ in STATISTIC_SAMPLE_STATISTICS
+            ],
+            "aggregation_semantics": (
+                "arithmetic mean of every discrete source-ordered sample from "
+                "all nodes in [previous_bucket_end, bucket_end); samples are "
+                "not time weighted and per-node means are not averaged"
+            ),
+            "active_statistics": statistic_sample_records,
+        },
         "statistics": [
             {"statistic": name, "unit": unit, "aggregation": aggregation}
-            for name, unit, aggregation in STATISTICS
+            for name, unit, aggregation in output_statistics
         ],
         "opnet_app_size_semantics": {
             "trace_size_source": (
@@ -570,6 +757,7 @@ def derive_series(
             "missing_sample_mean_bucket_ends_s": {
                 statistic: bucket_ends
                 for statistic, bucket_ends in sorted(missing_sample_buckets.items())
+                if statistic in {PACKET_SIZE, END_TO_END_DELAY}
             },
         },
         "semantic_limits": [

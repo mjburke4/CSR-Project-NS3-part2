@@ -222,14 +222,23 @@ and simulation timestamp. Its current observation points are:
 - OTA transmission starts;
 - PHY/MAC receive acceptance and rejection, including closure, receiver state,
   path loss, received power, noise, SNR, JSR, and interval error counts;
-- NWK delivery and route changes; and
+- NWK delivery and route changes;
 - packet identity, rate, modeled size, sequence, and security count wherever
-  that information exists.
+  that information exists; and
+- source-ordered discrete HOP resend-size, MAC ACK-size, MAC Tx-size, and MAC
+  Tx queuing-delay samples, encoded as `statistic_sample` rows with `node`,
+  `statistic`, and `value` fields.
 
 The trace writer contains observation only. Opening or closing it does not
 change queueing, random draws, packet delivery, or simulator event scheduling.
 Controlled reservation fields in a scenario are separate, explicit test
 inputs and are disabled in ordinary imported scenarios.
+
+`statistic_sample` is an additive v1 row type using `node`, `statistic`, and
+`value`. Recognized samples dynamically activate the four queue series in the
+aggregate builder; legacy traces without those columns retain the original
+nine-statistic output. Strict aggregation requires finite nonnegative values
+and integral queue-size samples.
 
 OPNET CSV exports may use canonical names or common aliases such as `Time`,
 `Action`, `Node ID`, `Tx Node`, `Pkt Type`, `Seq`, `SNR`, and `Accepted`. Event
@@ -240,9 +249,9 @@ alignment. Rows must remain in nondecreasing timestamp order.
 
 Events are aligned in order using their mutually available identity fields.
 The default identity is event, receiver node, peer, packet type, source,
-destination, and sequence; optional identity fields are omitted when one input
-does not provide them. Matching rows compare every field present in both
-traces.
+destination, sequence, and statistic name; optional identity fields are
+omitted when one input does not provide them. Matching rows compare every
+field present in both traces.
 
 Default absolute tolerances are:
 
@@ -344,7 +353,19 @@ matches validate vector decoding and the source-level modeled size, while the
 remaining bucket-by-bucket traffic and delay differences identify real
 model-calibration work. The two-node and hidden-node mean values are now close
 under their executable-bound application and MAC profiles. Multihop's
-remaining rate and delay residual is the next queue/service diagnostic target.
+remaining rate and delay residual was therefore taken through the recovered
+queue/service diagnostic surface.
+
+The multihop queue run aligned all 400 bucket positions for HOP resend size,
+MAC ACK size, MAC Tx size, and MAC Tx queuing delay. Of those positions, 394
+contained numeric values on both sides and all 394 differed at exact
+tolerance; four OPNET no-sample values were skipped and two additional ns-3
+values were missing. For bucket ends strictly after 300 seconds, ns-3 is
+16.10% high in HOP resend size, 12.57% low in MAC ACK size, 13.66% high in MAC
+Tx size, and 8.85% high in MAC Tx queuing delay. Because MAC queuing delay is
+higher while end-to-end delay is lower, the next isolation target is route
+and delivered-hop identity plus NWK/HOP admission and residence time, not
+another MAC service-rate adjustment.
 
 ## Remaining certification boundary
 

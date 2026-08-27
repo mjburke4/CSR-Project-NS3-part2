@@ -42,9 +42,9 @@ MAC_PROFILES = {
 }
 
 # These statistics are derived from the same application send/delivery events
-# and the same bucket operations in both sources.  Queue occupancy, MAC timing,
-# and generator interarrival vectors are deliberately not selected by default
-# because the current ns-3 event trace does not observe equivalent samples.
+# and remain the canonical default surface.  Source-equivalent HOP/MAC queue
+# samples are available as explicit diagnostic selections; broadening the
+# default would change the meaning of existing certifying runs.
 DEFAULT_STATISTICS = (
     "Generator.Traffic Sent (packets/sec)",
     "Generator.Traffic Sent (bits/sec)",

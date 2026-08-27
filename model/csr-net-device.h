@@ -1837,6 +1837,11 @@ CsrMacCore::EnqueueAckFrame (Ptr<Packet> frame,
                 << " seq=" << seq
                 << " limit=" << ACK_QUEUE_SIZE
                 << std::endl;
+      // br_mac writes the unchanged full-queue value on this rejection.
+      WriteDifferentialStatisticSample (
+        m_nodeId,
+        CSR_STAT_MAC_ACK_QUEUE_SIZE,
+        static_cast<double> (m_ackQueue.size ()));
       return;
     }
 
@@ -1847,6 +1852,10 @@ CsrMacCore::EnqueueAckFrame (Ptr<Packet> frame,
   entry.hasWindow = header.HasAckWindow ();
   entry.txCount = 0;
   m_ackQueue.push_back (entry);
+  WriteDifferentialStatisticSample (
+    m_nodeId,
+    CSR_STAT_MAC_ACK_QUEUE_SIZE,
+    static_cast<double> (m_ackQueue.size ()));
 
   std::cout << "[MAC " << m_nodeId
             << "] Enqueue ACK"
@@ -1899,6 +1908,7 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
   e.dest    = dest;
   e.dscp    = dscp;
   e.ackable = ackable;
+  e.enqueuedAt = Simulator::Now ();
 
   // DSCP priority insert: higher dscp earlier
   auto it = m_queue.begin ();
@@ -1917,6 +1927,10 @@ CsrMacCore::EnqueueTxFrame (Ptr<Packet> frame,
             << std::endl;
 
   m_queue.insert (it, e);
+  WriteDifferentialStatisticSample (
+    m_nodeId,
+    CSR_STAT_MAC_TX_QUEUE_SIZE,
+    static_cast<double> (m_queue.size ()));
   MaybeScheduleNextTx ();
 }
 
@@ -2562,6 +2576,19 @@ CsrMacCore::DoTx ()
                                rate,
                                SelectQueuedFrameTxPower (entry.frame)});
 
+          // OPNET removes each accepted data segment while building the
+          // aggregate and writes size before delay.  The ns-3 queue remains
+          // intact until the already-copied aggregate has entered the PHY,
+          // but these observation-only samples retain that source order.
+          WriteDifferentialStatisticSample (
+            m_nodeId,
+            CSR_STAT_MAC_TX_QUEUE_SIZE,
+            static_cast<double> (m_queue.size () - i - 1));
+          WriteDifferentialStatisticSample (
+            m_nodeId,
+            CSR_STAT_MAC_TX_QUEUE_DELAY,
+            (Simulator::Now () - entry.enqueuedAt).GetSeconds ());
+
           if (selected.size () >= MAX_CONCAT_SEGMENTS)
             {
               packingStopped = true;
@@ -2597,6 +2624,14 @@ CsrMacCore::DoTx ()
                            0,
                            aggregateRateKbps,
                            SelectQueuedFrameTxPower (entry.frame)});
+      WriteDifferentialStatisticSample (
+        m_nodeId,
+        CSR_STAT_MAC_TX_QUEUE_SIZE,
+        static_cast<double> (m_queue.size () - 1));
+      WriteDifferentialStatisticSample (
+        m_nodeId,
+        CSR_STAT_MAC_TX_QUEUE_DELAY,
+        (Simulator::Now () - entry.enqueuedAt).GetSeconds ());
     }
 
   if (selected.empty ())
@@ -2608,6 +2643,31 @@ CsrMacCore::DoTx ()
                                        &CsrMacCore::MaybeScheduleNextTx,
                                        this);
       return;
+    }
+
+  // Predict the post-packing ACK removals for source-ordered observation.
+  // Physical mutation remains after SendFramesToPeers(), preserving existing
+  // ns-3 behavior while the trace matches br_mac's pre-transmitter writes.
+  std::vector<uint32_t> selectedAckTransmissions (m_ackQueue.size (), 0);
+  for (const auto &entry : selected)
+    {
+      if (entry.fromAckQueue)
+        {
+          selectedAckTransmissions[entry.queueIndex]++;
+        }
+    }
+  uint32_t observedAckQueueSize = m_ackQueue.size ();
+  for (uint32_t i = 0; i < m_ackQueue.size (); ++i)
+    {
+      if (m_ackQueue[i].txCount + selectedAckTransmissions[i] >=
+          MAX_ACK_RESEND + 1)
+        {
+          observedAckQueueSize--;
+          WriteDifferentialStatisticSample (
+            m_nodeId,
+            CSR_STAT_MAC_ACK_QUEUE_SIZE,
+            static_cast<double> (observedAckQueueSize));
+        }
     }
 
   CsrNodeId dest = selected.front ().dest;
@@ -2760,23 +2820,20 @@ CsrMacCore::DoTx ()
         }
     }
 
-  m_ackQueue.erase (
-    std::remove_if (
-      m_ackQueue.begin (),
-      m_ackQueue.end (),
-      [this] (const AckQueueEntry &entry) {
-        if (entry.txCount < MAX_ACK_RESEND + 1)
-          {
-            return false;
-          }
-        std::cout << "[MAC " << m_nodeId
-                  << "] Remove ACK after OPNET resend limit"
-                  << " dest=" << entry.dest
-                  << " seq=" << entry.seq
-                  << std::endl;
-        return true;
-      }),
-    m_ackQueue.end ());
+  for (auto it = m_ackQueue.begin (); it != m_ackQueue.end (); )
+    {
+      if (it->txCount < MAX_ACK_RESEND + 1)
+        {
+          ++it;
+          continue;
+        }
+      std::cout << "[MAC " << m_nodeId
+                << "] Remove ACK after OPNET resend limit"
+                << " dest=" << it->dest
+                << " seq=" << it->seq
+                << std::endl;
+      it = m_ackQueue.erase (it);
+    }
 
   if (selectedDataCount > 0)
     {

@@ -213,9 +213,9 @@ named scenario as the same evidence.
 
 ## Measured exact-tolerance results
 
-The three completed full-duration comparisons align all 800 selected points in
-each case, with no missing or extra timestamps. They do not pass numeric
-parity:
+The three completed full-duration core-statistic comparisons align all 800
+selected points in each case, with no missing or extra timestamps. They do not
+pass numeric parity:
 
 | Scenario | Statistic | OPNET mean | ns-3 mean | Result |
 | --- | --- | ---: | ---: | --- |
@@ -236,9 +236,52 @@ These runs use the hash-bound historical application and MAC profiles, FIFO
 DSCP 0, source-ordered generator gates, and the common 0.988-second wake
 phase. The two-node and hidden-node headline means are now close without a
 tolerance adjustment. Multihop remains materially high in traffic and low in
-delay; its recovered HOP resend, MAC Tx, MAC ACK, and MAC queuing-delay vectors
-are therefore the next diagnostic comparison rather than another slot-policy
-guess.
+delay, so the four recovered HOP/MAC queue vectors were compared next rather
+than changing slot policy again.
+
+### Multihop queue-residence diagnostic
+
+The recovered probes are global `bucket/default total/sample mean` vectors.
+Each OPNET process writes its local post-event queue value into one pooled
+global sample stream; the result is neither a time-weighted occupancy nor an
+average of per-node means. The ns-3 observers reproduce the source write
+sites and ordering without inventing initialization or final-zero samples:
+
+- HOP resend size after successful admission, ACK removal, and timeout
+  removal, but not after DACK removal or obsolete-key cleanup;
+- MAC ACK size after successful admission, unchanged on a full-queue
+  rejection, and after resend-limit removal;
+- MAC Tx size after successful admission and each actual transmission
+  selection, but not after ACK/DACK cancellation; and
+- MAC Tx queuing delay at actual transmission selection, measured from the
+  timestamp recorded immediately before successful admission.
+
+The strict 6,000-second multihop workflow aligned all 400 queue-vector bucket
+positions. It compared 394 numeric pairs, found 394 exact-value mismatches,
+skipped the four OPNET no-sample values at 300 seconds, and reported two
+additional ns-3 no-sample values at 180 seconds for HOP resend and MAC ACK.
+There were no missing, extra, noncomparable, or time-misaligned series.
+As intended for this queue-only selection, the manifest identifies the run as
+the `diagnostic` profile with `statistics_not_complete_core_set`; the workflow
+status is `selected_comparison_failed` because the measured residual is real.
+
+To avoid treating startup-only empty buckets as steady behavior, these are the
+arithmetic means of the observed 60-second bucket sample-means strictly after
+300 seconds:
+
+| Statistic | OPNET | ns-3 | ns-3 residual |
+| --- | ---: | ---: | ---: |
+| HOP resend queue size | 10.301027 packets | 11.959792 packets | +16.1029% |
+| MAC ACK queue size | 0.676701 packets | 0.591629 packets | -12.5715% |
+| MAC Tx queue size | 9.537101 packets | 10.840019 packets | +13.6616% |
+| MAC Tx queuing delay | 7.208239 s | 7.846244 s | +8.8510% |
+
+This rules out a simple "ns-3 MAC serves packets too quickly" explanation for
+the 18.9% low end-to-end delay: ns-3's MAC Tx queuing delay is higher, not
+lower. The higher HOP and Tx queue samples also confirm excess admitted or
+retransmitted load. The next diagnostic boundary is therefore above and
+across the MAC: delivered hop count/path, route convergence, and NWK/HOP
+admission and residence time.
 
 The corrected traces also retain complete correlation and size-integrity
 provenance:

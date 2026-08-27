@@ -384,9 +384,10 @@ than treated as results. The aggregate workflow runs an imported scenario,
 derives source-equivalent ns-3 buckets, compares exact statistic/unit/
 aggregation identities, and records all commands, hashes, and statuses.
 
-Full two-node, symmetrical hidden-node, and multihop comparisons align all 800
-selected points in each case without missing or extra timestamps. The
-recovered application packet size matches exactly with the source-backed
+Full core-statistic two-node, symmetrical hidden-node, and multihop
+comparisons align all 800 selected points in each case without missing or
+extra timestamps. The recovered application packet size matches exactly with
+the source-backed
 `configured_bytes - 8` modeled network packet. With the hash-bound application
 and MAC profiles, the two-node OPNET/ns-3 means are 16.4417/16.3597 sent,
 16.4373/16.3474 received, and 1.45125/1.42737 seconds delay. Hidden-node means
@@ -395,8 +396,18 @@ delay. Multihop remains the outlier at 2.0120/2.45667 sent,
 1.90167/2.29000 received, and 112.748/91.4031 seconds delay. Exact-tolerance
 reports still contain 696, 700, and 665 numeric mismatches respectively, plus
 20 correctly skipped multihop no-sample values; close means are calibration
-evidence, not claimed bucket parity. The hidden-node ECC-drop probe also
-exposes a deliberately unresolved identity mapping: Modeler records 10.84105
+evidence, not claimed bucket parity.
+
+The source-exact multihop queue diagnostic also aligns all 400 positions for
+HOP resend size, MAC ACK size, MAC Tx size, and MAC Tx queuing delay. It
+compares 394 numeric pairs and preserves six no-sample cases. For bucket ends
+strictly after 300 seconds, ns-3 is 16.10% high in HOP resend size, 12.57% low
+in ACK size, 13.66% high in Tx size, and 8.85% high in Tx queuing delay. MAC
+queuing delay is therefore higher while end-to-end delay is lower, moving the
+next isolation boundary to route/path identity and NWK/HOP residence.
+
+The hidden-node ECC-drop probe also exposes a deliberately unresolved identity
+mapping: Modeler records 10.84105
 dropped packets/s on average, while ns-3's narrow `reason=ecc` event
 classification records 0.6195167 packets/s. It is excluded from the default
 equivalence set until prior-stage rejection accounting is reconciled. The
@@ -420,13 +431,17 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Add source-ordered observers for HOP resend-queue size, MAC Tx/ACK queue
-   size, and MAC Tx queuing delay, then compare the four recovered multihop
-   vectors bucket for bucket. This separates excess application admission from
-   MAC service and retransmission residence time.
-2. Use those queue residuals to isolate the remaining multihop traffic/delay
-   gap; keep ECC/prior-stage rejection accounting as a separate statistic-
-   identity problem rather than folding it into queue calibration.
+1. Add source-ordered delivered-hop/path, NWK queue/admission, and HOP/NWK
+   residence observers for the recovered multihop case. The completed queue
+   comparison puts ns-3 16.10% high in HOP resend size, 13.66% high in MAC Tx
+   size, and 8.85% high in MAC Tx queuing delay after startup, even though its
+   end-to-end delay is 18.93% low; the remaining delay is therefore not a
+   simple fast-MAC-service residual.
+2. Compare route convergence, path selection, and application
+   source/destination admission against the recovered route tables and
+   executable-era runtime semantics. Keep ECC/prior-stage rejection accounting
+   as a separate statistic-identity problem rather than folding it into queue
+   calibration.
 3. When licensed Modeler access is available, execute the prepared
    reservation/collision case, retain its CSV and provenance manifest,
    validate it, and run the event-order differential comparison.
@@ -468,9 +483,9 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Current regression baseline
 
-All 31 CSR executable targets build on this audit revision. The 29 focused
+All 32 CSR executable targets build on this audit revision. The 30 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (31/31). The focused Python suite additionally covers the
+workflow pass (32/32). The focused Python suite additionally covers the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
 aggregate workflow. The importer decodes all 12 recovered campus network
@@ -501,6 +516,10 @@ RTS TSLOT, the shared local/neighbor phase, `prep_tx` holdoff restart,
 first-contact reservation ordering, persistent advertisement/reuse,
 expiry/redraw ordering,
 SYNC/Track activation, real HOP retry reuse, and delayed-packing state gates.
+The queue-observation test adds exact source write-site and ordering checks for
+HOP enqueue/ACK removal, MAC data admission/selection delay, ACK duplicate and
+cumulative-update suppression, unchanged full-queue rejection, and
+one-plus-four resend-limit removal.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and
 same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table

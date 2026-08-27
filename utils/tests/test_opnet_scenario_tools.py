@@ -730,6 +730,63 @@ class TraceComparatorTests(unittest.TestCase):
             )
             self.assertTrue(report["pass"])
 
+    def test_statistic_identity_aligns_queue_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            expected_path = Path(directory) / "opnet-statistics.csv"
+            actual_path = Path(directory) / "ns3-statistics.csv"
+            fieldnames = (
+                "Simulation Time",
+                "Action",
+                "Node ID",
+                "Statistic",
+                "Value",
+            )
+            hop = {
+                "Simulation Time": 1.0,
+                "Action": "statistic_sample",
+                "Node ID": 1,
+                "Statistic": "HOP.Resend Queue Size (packets)",
+                "Value": 3,
+            }
+            tx = dict(
+                hop,
+                Statistic="MAC.Tx Queue Size (packets)",
+                Value=7,
+            )
+            for path, rows in (
+                (expected_path, [hop, tx]),
+                (actual_path, [tx]),
+            ):
+                with path.open("w", encoding="utf-8", newline="") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+            expected = COMPARATOR.order_coincident_events(
+                COMPARATOR.normalize_trace(expected_path), 1.0e-6
+            )
+            actual = COMPARATOR.order_coincident_events(
+                COMPARATOR.normalize_trace(actual_path), 1.0e-6
+            )
+            report = COMPARATOR.compare(
+                expected,
+                actual,
+                COMPARATOR.DEFAULT_KEY_FIELDS,
+                dict(COMPARATOR.DEFAULT_TOLERANCES),
+                set(),
+                20,
+            )
+
+            self.assertIn("statistic", report["key_fields"])
+            self.assertEqual(report["counts"]["matched_events"], 1)
+            self.assertEqual(report["counts"]["missing_in_ns3"], 1)
+            self.assertEqual(report["counts"]["replaced_events"], 0)
+            self.assertEqual(report["counts"]["field_mismatches"], 0)
+            self.assertEqual(
+                report["differences"][0]["key"]["statistic"],
+                "HOP.Resend Queue Size (packets)",
+            )
+
 
 class InstrumenterTests(unittest.TestCase):
     def test_numbered_upload_source_resolution(self) -> None:
