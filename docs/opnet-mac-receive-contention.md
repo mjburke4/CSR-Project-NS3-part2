@@ -1,6 +1,6 @@
 # OPNET MAC receive/contention parity
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 ## Scope
 
@@ -62,8 +62,23 @@ the selected payload rate. The ns-3 duration therefore uses:
 
 Both the pending local Tx countdown and learned neighbor reservation counters
 advance only while the MAC is in Search and no synchronization preamble is
-present. Idle, Track, Tx, and Search-with-SYNC keep the timer alive but freeze
-the counters.
+present. Track, Tx, and Search-with-SYNC keep the timer alive but freeze the
+counters. Idle cancels the persistent timer. An ordinary HOP arrival queues
+there, after which Idle's enter executive schedules an RTS on the next
+simulation-wide 13-ms boundary unless it lies within half a slot of WAKE.
+That RTS runs `prep_tx()` and continues the global phase; a periodic WAKE runs
+`start_search()` and establishes a wake-relative phase.
+
+The 300-ms transmit holdoff is independent from that shared slot clock and is
+restarted only by a real Idle-to-Search activation. Every transmitted frame
+selects and advertises the next slot, and the sender retains the same live
+counter even when its queues drain. Traffic arriving during Tx, during
+post-Tx Search, or after Track therefore reuses an unexpired advertisement;
+an expired Search-state reservation selects a new slot without another
+holdoff. Search activation deliberately occurs after that tick's decrement,
+while Track-to-Search activation occurs immediately as in `back2search()`.
+The Idle-RTS branch redraws a counter at zero because `prep_tx()` tests
+`<= 0`; Search activation redraws only after a counter has expired below zero.
 
 The longer airtime exposed a discovery ordering race that the old placeholder
 duration hid. Discovery completion now waits for queued/in-flight MAC control
@@ -90,8 +105,20 @@ recorded as a miss.
 - long-preamble wake versus short-preamble sleep miss;
 - half-duplex loss during Tx.
 
-The complete regression baseline is 28 focused smoke tests plus
-`csr-mac-demo-split`, all passing (29/29).
+`csr-mac-reservation-lifecycle-smoke.cc` additionally covers:
+
+- Idle queueing until its globally aligned RTS TSLOT, `prep_tx()` activation,
+  and the independent 300-ms holdoff;
+- next-slot advertisement, first-contact ordering, known-peer learning, and
+  persistent local countdown;
+- reservation reuse for arrivals during Tx, post-Tx Search, and Track return;
+- Search expiration/redraw ordering and Idle-RTS redraw at counter zero;
+- Search-with-SYNC activation with counter freeze;
+- a real HOP retry that consumes the preceding advertised slot; and
+- cancellation of a delayed packing retry on entry to Idle.
+
+The complete regression baseline is 29 focused smoke tests plus
+`csr-mac-demo-split`, all passing (30/30).
 
 ## Remaining PHY boundary
 
@@ -100,5 +127,5 @@ The following behavior is not claimed by this increment:
 - stochastic synchronization threshold variance;
 - promoted scenario-attribute import;
 - authoritative off-grid OPNET interpolation and external Earth-LOS/TMM;
-- authoritative DQPSK collision curves. The opt-in owner-confirmed 500/1000
+- authoritative high-rate DPSK/DQPSK collision curves. The opt-in 500/1000
   kbit/s profile currently reconstructs the recorded jammer as payload noise.

@@ -167,9 +167,10 @@ main ()
                        &CheckInitialFrameBehindBlockers,
                        device,
                        hop);
-  // The initial frame follows all three blockers. Each HOP retry then enters
-  // a fresh 300-ms holdoff and slot countdown; these checkpoints cover every
-  // OPNET slot in [1,18].
+  // The initial frame follows all three blockers.  Its short 1--18-slot
+  // reservation expires before the two-second HOP retry, but MAC remains in
+  // post-TX Search, so each retry selects a new slot without restarting the
+  // 300-ms holdoff.  These checkpoints cover every OPNET slot in [1,18].
   Simulator::Schedule (Seconds (5.7),
                        &CheckBeforeFirstRetry,
                        device,

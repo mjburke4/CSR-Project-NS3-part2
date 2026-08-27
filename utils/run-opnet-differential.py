@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -34,11 +35,41 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="OPNET canonical/alias trace CSV",
     )
+    parser.add_argument(
+        "--opnet-manifest",
+        type=Path,
+        help="instrumentation/provenance manifest produced with the OPNET trace",
+    )
     parser.add_argument("--output-dir", required=True, type=Path, help="run artifacts directory")
     parser.add_argument("--stop", type=float, default=0.0, help="override imported stop time")
     parser.add_argument("--flow-limit", type=int, default=0, help="maximum packets per flow")
     parser.add_argument("--no-duty-cycling", action="store_true")
     parser.add_argument("--no-gateway-discovery", action="store_true")
+    parser.add_argument(
+        "--key-fields",
+        help="comma-separated comparator identity fields",
+    )
+    parser.add_argument(
+        "--event",
+        action="append",
+        default=[],
+        help="compare only this canonical event name (repeatable)",
+    )
+    parser.add_argument(
+        "--select",
+        action="append",
+        default=[],
+        metavar="EVENT:NODE",
+        help="compare only this event/node pair (repeatable)",
+    )
+    parser.add_argument("--time-start", type=float, help="comparison window start")
+    parser.add_argument("--time-stop", type=float, help="comparison window stop")
+    parser.add_argument(
+        "--coincident-tolerance",
+        type=float,
+        default=0.0,
+        help="canonicalize ordering of effectively simultaneous events",
+    )
     parser.add_argument(
         "--tolerance",
         action="append",
@@ -64,8 +95,35 @@ def main() -> None:
     ):
         if not path.is_file():
             raise SystemExit(f"error: {label} does not exist: {path}")
-    if arguments.stop < 0.0 or arguments.flow_limit < 0:
+    if arguments.opnet_manifest is not None and not arguments.opnet_manifest.is_file():
+        raise SystemExit(
+            f"error: OPNET manifest does not exist: {arguments.opnet_manifest}"
+        )
+    if (
+        not math.isfinite(arguments.stop)
+        or arguments.stop < 0.0
+        or arguments.flow_limit < 0
+    ):
         raise SystemExit("error: --stop and --flow-limit must be nonnegative")
+    if (
+        not math.isfinite(arguments.coincident_tolerance)
+        or arguments.coincident_tolerance < 0.0
+    ):
+        raise SystemExit(
+            "error: --coincident-tolerance must be finite and nonnegative"
+        )
+    for boundary, label in (
+        (arguments.time_start, "--time-start"),
+        (arguments.time_stop, "--time-stop"),
+    ):
+        if boundary is not None and not math.isfinite(boundary):
+            raise SystemExit(f"error: {label} must be finite")
+    if (
+        arguments.time_start is not None
+        and arguments.time_stop is not None
+        and arguments.time_start > arguments.time_stop
+    ):
+        raise SystemExit("error: --time-start must not exceed --time-stop")
 
     arguments.output_dir.mkdir(parents=True, exist_ok=True)
     ns3_trace = arguments.output_dir / "ns3-trace.csv"
@@ -112,6 +170,20 @@ def main() -> None:
         compare_command.extend(("--tolerance", tolerance))
     for field in arguments.ignore_field:
         compare_command.extend(("--ignore-field", field))
+    if arguments.key_fields:
+        compare_command.extend(("--key-fields", arguments.key_fields))
+    for event in arguments.event:
+        compare_command.extend(("--event", event))
+    for selector in arguments.select:
+        compare_command.extend(("--select", selector))
+    if arguments.time_start is not None:
+        compare_command.extend(("--time-start", str(arguments.time_start)))
+    if arguments.time_stop is not None:
+        compare_command.extend(("--time-stop", str(arguments.time_stop)))
+    if arguments.coincident_tolerance > 0.0:
+        compare_command.extend(
+            ("--coincident-tolerance", str(arguments.coincident_tolerance))
+        )
     comparison = subprocess.run(compare_command, text=True, check=False)
 
     manifest = {
@@ -120,6 +192,16 @@ def main() -> None:
         "scenario_sha256": digest(arguments.scenario),
         "opnet_trace": str(arguments.opnet_trace.resolve()),
         "opnet_trace_sha256": digest(arguments.opnet_trace),
+        "opnet_manifest": (
+            None
+            if arguments.opnet_manifest is None
+            else str(arguments.opnet_manifest.resolve())
+        ),
+        "opnet_manifest_sha256": (
+            None
+            if arguments.opnet_manifest is None
+            else digest(arguments.opnet_manifest)
+        ),
         "runner": str(arguments.runner.resolve()),
         "runner_command": runner_command,
         "comparator_command": compare_command,

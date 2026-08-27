@@ -1,6 +1,6 @@
 # OPNET scenario importer and differential harness
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 ## Purpose
 
@@ -15,6 +15,11 @@ comparison runs. It has three independent parts:
    ns-3 trace, aligns their event identities, and reports ordering or field
    differences. `utils/run-opnet-differential.py` runs steps 2 and 3 together
    and records a reproducibility manifest.
+
+The deterministic reservation/collision reference additionally uses
+`utils/instrument-opnet-reservation-trace.py` and
+`utils/validate-opnet-reservation-collision.py`. Its exact runbook is in
+`docs/opnet-reservation-collision-reference.md`.
 
 The importer reads ZIP members directly; the project archive does not need to
 be unpacked first.
@@ -46,18 +51,21 @@ does not promote it per node. The runner therefore applies that source-backed
 node-model default. TMM terrain runs are rejected explicitly rather than
 silently falling back to the non-terrain propagation model.
 
-The supplied `*.ov` files are Modeler output-vector databases containing
-aggregate statistics. They are useful as aggregate drop/count checkpoints,
-but they do not expose the packet-level ordering needed by the differential
-event comparator. An OPNET event export in CSV form is still required for an
-event-by-event certification run.
+Historical Modeler runs commonly produce `*.ov` output-vector databases with
+aggregate statistics, but no result database is present in the supplied
+archives. If one is recovered, it can provide aggregate drop/count
+checkpoints; it will not expose the packet-level ordering needed by the
+differential event comparator. An OPNET event export in CSV form is still
+required for an event-by-event certification run.
 
 ## Canonical scenario schema
 
 Every row uses schema `csr-opnet-scenario-v1` and one of three record types:
 
-- `run`: scenario digest, duration, seed, TMM flag, and coordinate scale.
-- `node`: one imported CSR node and all calibrated radio/link attributes.
+- `run`: scenario digest, duration, seed, TMM flag, coordinate scale, and an
+  optional reservation-control activation time.
+- `node`: one imported CSR node, all calibrated radio/link attributes, and an
+  optional controlled reservation slot.
 - `flow`: one explicit deterministic application flow.
 
 The file is deliberately rectangular so both Python and the C++ runner reject
@@ -86,6 +94,8 @@ and simulation timestamp. Its current observation points are:
 
 - scenario node/link construction and application sends;
 - MAC Idle/Search/Track/Tx state transitions;
+- MAC reservation preparation, holdoff completion, per-slot countdown, and
+  next-reservation advertisement;
 - OTA transmission starts;
 - PHY/MAC receive acceptance and rejection, including closure, receiver state,
   path loss, received power, noise, SNR, JSR, and interval error counts;
@@ -93,8 +103,10 @@ and simulation timestamp. Its current observation points are:
 - packet identity, rate, modeled size, sequence, and security count wherever
   that information exists.
 
-The trace contains observation only. Opening or closing it does not change
-queueing, random draws, packet delivery, or simulator event scheduling.
+The trace writer contains observation only. Opening or closing it does not
+change queueing, random draws, packet delivery, or simulator event scheduling.
+Controlled reservation fields in a scenario are separate, explicit test
+inputs and are disabled in ordinary imported scenarios.
 
 OPNET CSV exports may use canonical names or common aliases such as `Time`,
 `Action`, `Node ID`, `Tx Node`, `Pkt Type`, `Seq`, `SNR`, and `Accepted`. Event
@@ -125,6 +137,12 @@ otherwise matching comparison into a failure. Missing, extra, replaced, or
 field-mismatched events do fail and make the comparator exit with status 1.
 Tolerances can be overridden per field, and known unavailable fields can be
 ignored explicitly; both choices are captured in the report/manifest.
+Repeatable `--event` arguments and inclusive `--time-start`/`--time-stop`
+values isolate a certification window. Repeatable `--select EVENT:NODE`
+arguments further isolate exact observation points. `--coincident-tolerance`
+canonicalizes the arbitrary execution order of events that occur at
+effectively the same simulation time while preserving order between distinct
+event times.
 
 ## Running the harness
 
@@ -141,6 +159,7 @@ python3 utils/run-opnet-differential.py \
   --scenario imported-scenario.csv \
   --runner ../ns-3-dev/build/scratch/ns3-dev-csr-opnet-scenario-runner-default \
   --opnet-trace opnet-events.csv \
+  --opnet-manifest opnet-instrumentation-manifest.json \
   --output-dir differential-run
 ```
 
@@ -159,8 +178,10 @@ missing-event reporting, and the complete runner/comparator workflow.
 ## Remaining certification boundary
 
 This harness makes differences reproducible; it does not manufacture an
-OPNET reference trace. Exact certification still needs at least one CSV export
-from an OPNET run containing the packet/control events of interest. Terrain
+OPNET reference trace. The source-checked instrumentation, deterministic
+reservation/collision scenario, validator, and ns-3 side are complete, but
+exact certification still needs the CSV exported by a licensed Modeler run.
+Terrain
 closure also remains external because the supplied TMM database and callable
 terrain model were not recovered. Aggregate `*.ov` statistics can be compared
 separately once their vector identities are mapped, but they cannot establish

@@ -17,7 +17,7 @@ using CsrRateKey = uint16_t;
 enum class CsrRateProfile
 {
   LEGACY_SOURCE_EXACT, ///< Source-exact 8-128-kbit/s spread-rate set.
-  EXTENDED_DQPSK      ///< Add owner-confirmed 500/1000-kbit/s modes.
+  EXTENDED_DQPSK      ///< Add recovered 500-DPSK/1000-DQPSK modes (compatibility name).
 };
 
 // These ns-3 headers are compact compatibility envelopes, not the OPNET

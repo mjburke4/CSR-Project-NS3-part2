@@ -26,6 +26,7 @@ constexpr const char *SCENARIO_SCHEMA = "csr-opnet-scenario-v1";
 struct ImportedNode
 {
   CsrNodeId id {0};
+  int forcedReservationSlot {-1};
   std::string name;
   std::string type;
   double xMeters {0.0};
@@ -55,6 +56,7 @@ struct ImportedScenario
 {
   std::string name;
   double durationSeconds {60.0};
+  double reservationControlStartSeconds {0.0};
   uint32_t seed {128};
   bool tmm {false};
   std::vector<ImportedNode> nodes;
@@ -195,6 +197,11 @@ LoadScenario (const std::string &path)
           scenario.durationSeconds = ParseDouble (row, "duration_s");
           scenario.seed = static_cast<uint32_t> (ParseUnsigned (row, "seed"));
           scenario.tmm = ParseUnsigned (row, "tmm") != 0;
+          if (!GetField (row, "reservation_control_start_s").empty ())
+            {
+              scenario.reservationControlStartSeconds = ParseDouble (
+                row, "reservation_control_start_s");
+            }
         }
       else if (record == "node")
         {
@@ -206,6 +213,14 @@ LoadScenario (const std::string &path)
           NS_ABORT_MSG_IF (nodeIds.find (node.id) != nodeIds.end (),
                            "scenario contains duplicate node ID " << node.id);
           nodeIds[node.id] = true;
+          if (!GetField (row, "forced_reservation_slot").empty ())
+            {
+              uint64_t forcedSlot = ParseUnsigned (
+                row, "forced_reservation_slot");
+              NS_ABORT_MSG_IF (forcedSlot < 1 || forcedSlot > 255,
+                               "forced reservation slot must be in 1..255");
+              node.forcedReservationSlot = static_cast<int> (forcedSlot);
+            }
           node.name = GetField (row, "name");
           node.type = GetField (row, "node_type");
           node.xMeters = ParseDouble (row, "x_m");
@@ -255,6 +270,10 @@ LoadScenario (const std::string &path)
   NS_ABORT_MSG_IF (!sawRun, "scenario CSV has no run row");
   NS_ABORT_MSG_IF (scenario.durationSeconds <= 0.0,
                    "scenario duration must be positive");
+  NS_ABORT_MSG_IF (scenario.reservationControlStartSeconds < 0.0 ||
+                   scenario.reservationControlStartSeconds >
+                     scenario.durationSeconds,
+                   "reservation control start must be within the run");
   NS_ABORT_MSG_IF (scenario.nodes.empty (), "scenario CSV has no nodes");
   std::sort (scenario.nodes.begin (), scenario.nodes.end (),
              [] (const ImportedNode &first, const ImportedNode &second) {
@@ -304,6 +323,18 @@ ConnectStack (RuntimeNode &node)
     node.configuration.linkMarginDb);
   node.device->GetMac ().SetRxCallback (
     MakeCallback (&CsrHopLayer::ReceiveFromMac, node.hop));
+}
+
+void
+EnableReservationControl (Ptr<CsrNetDevice> device, int slot)
+{
+  device->GetMac ().SetReservationSlotOverrideForDifferentialRun (slot);
+  CsrDifferentialTraceEvent event;
+  event.event = "reservation_control";
+  event.node = CsrTraceInteger (device->GetId ());
+  event.reservationSlot = CsrTraceSignedInteger (slot);
+  event.detail = "enabled";
+  WriteDifferentialTrace (event);
 }
 
 void
@@ -412,6 +443,14 @@ main (int argc, char *argv[])
       RuntimeNode runtime;
       runtime.configuration = configuration;
       runtime.device = CreateObject<CsrNetDevice> (configuration.id);
+      if (configuration.forcedReservationSlot > 0)
+        {
+          Simulator::Schedule (
+            Seconds (scenario.reservationControlStartSeconds),
+            &EnableReservationControl,
+            runtime.device,
+            configuration.forcedReservationSlot);
+        }
       runtime.hop = CreateObject<CsrHopLayer> ();
       runtime.network = CreateObject<CsrNetLayer> ();
 

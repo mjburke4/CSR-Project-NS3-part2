@@ -42,6 +42,8 @@ TRACE_COLUMNS = (
     "route_cost",
     "next_hop",
     "security_count",
+    "reservation_slot",
+    "reservation_counter",
     "detail",
 )
 
@@ -70,6 +72,16 @@ ALIASES = {
     "route_cost": ("route_cost", "cost"),
     "next_hop": ("next_hop", "nexthop"),
     "security_count": ("security_count", "security_epoch"),
+    "reservation_slot": (
+        "reservation_slot",
+        "reserve_tslot",
+        "reserved_slot",
+    ),
+    "reservation_counter": (
+        "reservation_counter",
+        "txslot_counter",
+        "slot_counter",
+    ),
     "detail": ("detail", "message", "description"),
 }
 
@@ -110,6 +122,8 @@ NUMERIC_FIELDS = {
     "route_cost",
     "next_hop",
     "security_count",
+    "reservation_slot",
+    "reservation_counter",
 }
 
 DEFAULT_TOLERANCES = {
@@ -197,6 +211,8 @@ def _canonical_number(field: str, value: str) -> str:
         "total_errors",
         "next_hop",
         "security_count",
+        "reservation_slot",
+        "reservation_counter",
     }:
         integer = int(number)
         if number != integer:
@@ -262,6 +278,88 @@ def write_normalized(path: Path, events: Iterable[Event]) -> None:
         writer.writeheader()
         for event in events:
             writer.writerow(event.values)
+
+
+def filter_trace(
+    events: Iterable[Event],
+    included_events: set[str],
+    time_start: float | None,
+    time_stop: float | None,
+    selectors: set[tuple[str, str]] | None = None,
+) -> list[Event]:
+    """Select an event family and time window without changing source order."""
+    selected: list[Event] = []
+    for event in events:
+        event_name = event.values["event"]
+        time_s = float(event.values["time_s"])
+        if included_events and event_name not in included_events:
+            continue
+        if selectors and (event_name, event.values["node"]) not in selectors:
+            continue
+        if time_start is not None and time_s < time_start:
+            continue
+        if time_stop is not None and time_s > time_stop:
+            continue
+        selected.append(event)
+    return selected
+
+
+def parse_selector(specification: str) -> tuple[str, str]:
+    """Parse EVENT:NODE for a focused differential comparison."""
+    if ":" not in specification:
+        raise argparse.ArgumentTypeError("selector must be EVENT:NODE")
+    raw_event, raw_node = specification.rsplit(":", 1)
+    event = _normalized_header(raw_event)
+    event = EVENT_ALIASES.get(event, event)
+    if not event:
+        raise argparse.ArgumentTypeError("selector event must not be empty")
+    try:
+        node = int(raw_node, 0)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if node < 0:
+        raise argparse.ArgumentTypeError("selector node must be nonnegative")
+    return event, str(node)
+
+
+def order_coincident_events(
+    events: Iterable[Event], tolerance_s: float
+) -> list[Event]:
+    """Canonicalize ordering inside a group of effectively simultaneous events."""
+    ordered = list(events)
+    if tolerance_s <= 0.0 or len(ordered) < 2:
+        return ordered
+    result: list[Event] = []
+    start = 0
+    sort_fields = (
+        "event",
+        "node",
+        "peer",
+        "src",
+        "dst",
+        "sequence",
+        "reservation_slot",
+        "reservation_counter",
+    )
+    while start < len(ordered):
+        group_time = float(ordered[start].values["time_s"])
+        stop = start + 1
+        while (
+            stop < len(ordered)
+            and float(ordered[stop].values["time_s"]) - group_time
+            <= tolerance_s
+        ):
+            stop += 1
+        result.extend(
+            sorted(
+                ordered[start:stop],
+                key=lambda event: tuple(
+                    event.values[field] for field in sort_fields
+                ),
+            )
+        )
+        start = stop
+    return result
 
 
 def parse_tolerance(specification: str) -> tuple[str, float]:
@@ -488,6 +586,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="canonical field to exclude from matched-row comparison",
     )
     parser.add_argument(
+        "--event",
+        action="append",
+        default=[],
+        help="include only this canonical event name (repeatable)",
+    )
+    parser.add_argument(
+        "--select",
+        action="append",
+        default=[],
+        type=parse_selector,
+        metavar="EVENT:NODE",
+        help="include only this event/node pair (repeatable)",
+    )
+    parser.add_argument(
+        "--time-start",
+        type=float,
+        help="include events at or after this simulation time",
+    )
+    parser.add_argument(
+        "--time-stop",
+        type=float,
+        help="include events at or before this simulation time",
+    )
+    parser.add_argument(
+        "--coincident-tolerance",
+        type=float,
+        default=0.0,
+        help="canonicalize event order within this simultaneous-time tolerance",
+    )
+    parser.add_argument(
         "--max-differences", type=int, default=200, help="maximum detailed differences"
     )
     return parser
@@ -496,8 +624,49 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     arguments = build_parser().parse_args()
     try:
-        opnet = normalize_trace(arguments.opnet_trace)
-        ns3 = normalize_trace(arguments.ns3_trace)
+        included_events: set[str] = set()
+        for raw_event in arguments.event:
+            event = re.sub(
+                r"[^a-z0-9]+", "_", raw_event.strip().lower()
+            ).strip("_")
+            if not event:
+                raise TraceError("event filters must not be empty")
+            included_events.add(EVENT_ALIASES.get(event, event))
+        for boundary, label in (
+            (arguments.time_start, "--time-start"),
+            (arguments.time_stop, "--time-stop"),
+            (arguments.coincident_tolerance, "--coincident-tolerance"),
+        ):
+            if boundary is not None and not math.isfinite(boundary):
+                raise TraceError(f"{label} must be finite")
+        if arguments.coincident_tolerance < 0.0:
+            raise TraceError("--coincident-tolerance must be nonnegative")
+        if (
+            arguments.time_start is not None
+            and arguments.time_stop is not None
+            and arguments.time_start > arguments.time_stop
+        ):
+            raise TraceError("--time-start must not exceed --time-stop")
+        opnet = order_coincident_events(
+            filter_trace(
+                normalize_trace(arguments.opnet_trace),
+                included_events,
+                arguments.time_start,
+                arguments.time_stop,
+                set(arguments.select),
+            ),
+            arguments.coincident_tolerance,
+        )
+        ns3 = order_coincident_events(
+            filter_trace(
+                normalize_trace(arguments.ns3_trace),
+                included_events,
+                arguments.time_start,
+                arguments.time_stop,
+                set(arguments.select),
+            ),
+            arguments.coincident_tolerance,
+        )
         if arguments.normalized_opnet:
             write_normalized(arguments.normalized_opnet, opnet)
         if arguments.normalized_ns3:
@@ -523,6 +692,16 @@ def main() -> None:
             ignored_fields,
             arguments.max_differences,
         )
+        report["event_filter"] = sorted(included_events)
+        report["event_node_filter"] = [
+            {"event": event, "node": node}
+            for event, node in sorted(set(arguments.select))
+        ]
+        report["time_window"] = {
+            "start": arguments.time_start,
+            "stop": arguments.time_stop,
+        }
+        report["coincident_tolerance_s"] = arguments.coincident_tolerance
     except (OSError, TraceError, csv.Error) as error:
         raise SystemExit(f"error: {error}") from error
 

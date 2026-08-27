@@ -150,6 +150,40 @@ TestExactRates ()
 }
 
 void
+TestHighRateModeClassification ()
+{
+  Require (CsrIsDpskRate (500) &&
+           !CsrIsDpskRate (1000) &&
+           !CsrIsDpskRate (128),
+           "500-kbps DPSK classification changed");
+  Require (CsrUsesDqpskBer (1000) &&
+           !CsrUsesDqpskBer (500) &&
+           !CsrUsesDqpskBer (128),
+           "1000-kbps DQPSK classification changed");
+  Require (CsrIsHighRateDifferentialMode (500) &&
+           CsrIsHighRateDifferentialMode (1000) &&
+           !CsrIsHighRateDifferentialMode (128),
+           "high-rate differential-mode classification changed");
+
+  // This public helper returned true for both extension keys before the
+  // DPSK/DQPSK split was recovered. Preserve that behavior for callers that
+  // used it as the old high-rate-profile predicate.
+  Require (CsrIsDqpskRate (500) &&
+           CsrIsDqpskRate (1000) &&
+           !CsrIsDqpskRate (128),
+           "legacy CsrIsDqpskRate compatibility changed");
+
+  RequireNear (CsrGetHighRateDifferentialBer (500, 0.0),
+               CsrOpnetBerTables::GetDpskBer (0.0),
+               0.0,
+               "high-rate BER dispatcher did not select DPSK");
+  RequireNear (CsrGetHighRateDifferentialBer (1000, 0.0),
+               CsrOpnetBerTables::GetDqpskBer (0.0),
+               0.0,
+               "high-rate BER dispatcher did not select DQPSK");
+}
+
+void
 TestHighRateHeaderRoundTrip ()
 {
   RequireEqual (CsrEncodeRateKey (500),
@@ -277,6 +311,22 @@ TestIndependentBerVectors ()
                    vector.ber,
                    1.0e-15,
                    "standard csr modulation-table vector changed");
+    }
+
+  const StandardVector dpskVectors[] = {
+    {-20.0, 0.49502491687458405},
+    {-10.0, 0.45241870901797976},
+    {0.0, 0.18393972058572117},
+    {5.0, 0.021164609811602494},
+    {10.0, 2.2699964881242427e-5}
+  };
+  for (const auto &vector : dpskVectors)
+    {
+      RequireNear (CsrOpnetBerTables::GetDpskBer (
+                     vector.effectiveSnrDb),
+                   vector.ber,
+                   1.0e-15,
+                   "DPSK_PB analytical vector changed");
     }
 
   struct DqpskVector
@@ -423,20 +473,20 @@ TestBerSelectionAndProcessingGain ()
                1.0e-15,
                "same-rate collision table was not selected");
 
-  CsrBerInterval dqpsk;
-  dqpsk.noisePowerWatts = 1.0;
-  values = phy.CalculateBer (frontEnd, 500, dqpsk);
+  CsrBerInterval highRate;
+  highRate.noisePowerWatts = 1.0;
+  values = phy.CalculateBer (frontEnd, 500, highRate);
   RequireNear (values.payloadEffectiveSnrDb,
                0.0,
                1.0e-12,
                "500-kbps processing gain changed");
   RequireNear (values.payloadBer,
-               0.204905205908,
+               0.18393972058572117,
                1.0e-15,
-               "500-kbps payload did not select DQPSK");
+               "500-kbps payload did not select DPSK_PB");
 
-  dqpsk.noisePowerWatts = 0.5;
-  values = phy.CalculateBer (frontEnd, 1000, dqpsk);
+  highRate.noisePowerWatts = 0.5;
+  values = phy.CalculateBer (frontEnd, 1000, highRate);
   RequireNear (values.payloadEffectiveSnrDb,
                0.0,
                1.0e-12,
@@ -446,20 +496,36 @@ TestBerSelectionAndProcessingGain ()
                1.0e-15,
                "1000-kbps payload did not select DQPSK");
 
-  dqpsk.noisePowerWatts = 1.0;
-  dqpsk.collisionCount = 1;
-  dqpsk.sameRateInterference = true;
-  dqpsk.jsrDb = 0.0;
-  values = phy.CalculateBer (frontEnd, 500, dqpsk);
+  highRate.noisePowerWatts = 1.0;
+  highRate.collisionCount = 1;
+  highRate.sameRateInterference = true;
+  highRate.jsrDb = 0.0;
+  highRate.highRatePayloadJammer = true;
+  highRate.highRatePayloadJsrDb = 0.0;
+  values = phy.CalculateBer (frontEnd, 500, highRate);
   RequireNear (values.payloadEffectiveSnrDb,
                -3.010299956639812,
                1.0e-12,
-               "same-rate DQPSK jammer was not treated as payload noise");
+               "same-rate DPSK jammer was not treated as payload noise");
   RequireNear (values.payloadBer,
-               CsrOpnetBerTables::GetDqpskBer (
+               CsrOpnetBerTables::GetDpskBer (
                  -3.010299956639812),
                1.0e-15,
                "same-rate high-rate overlap selected a spread collision curve");
+
+  highRate.noisePowerWatts = 0.5;
+  values = phy.CalculateBer (frontEnd, 1000, highRate);
+  double expectedDqpskEffectiveSnrDb =
+    10.0 * std::log10 (1.0 / 1.5) - 3.010299956639812;
+  RequireNear (values.payloadEffectiveSnrDb,
+               expectedDqpskEffectiveSnrDb,
+               1.0e-12,
+               "same-rate DQPSK jammer changed the Eb/N0 conversion");
+  RequireNear (values.payloadBer,
+               CsrOpnetBerTables::GetDqpskBer (
+                 expectedDqpskEffectiveSnrDb),
+               1.0e-15,
+               "1000-kbps overlap did not retain the DQPSK curve");
 }
 
 void
@@ -767,6 +833,7 @@ int
 main ()
 {
   TestExactRates ();
+  TestHighRateModeClassification ();
   TestHighRateHeaderRoundTrip ();
   TestJsrAndOffsetQuantization ();
   TestIndependentBerVectors ();

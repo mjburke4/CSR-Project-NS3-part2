@@ -23,11 +23,23 @@ public:
   static double GetStandardBer (double effectiveSnrDb);
 
   /**
-   * Look up the recovered DQPSK curve used by the extended high-rate profile.
+   * Evaluate the recovered 500-kbit/s differential-BPSK BER law.
    *
-   * The curve samples are exact. Their mapping to the owner-confirmed 500 and
-   * 1000-kbit/s hardware modes is an explicit extension because the supplied
-   * C receive pipeline does not reference dqpsk directly.
+   * DPSK_PB.m defines PB = exp(-Eb/No) / 2.  Unlike the 1000-kbit/s
+   * DQPSK mode, no separate OPNET lookup-table file was supplied for this
+   * mode, so the original analytical expression is evaluated directly.
+   *
+   * @param effectiveSnrDb Eb/N0 in decibels.
+   * @return Differential-BPSK bit-error probability.
+   */
+  static double GetDpskBer (double effectiveSnrDb);
+
+  /**
+   * Look up the recovered DQPSK curve used by the 1000-kbit/s mode.
+   *
+   * The curve samples agree with the default equation in DQPSK_PB.m to the
+   * table's decimal precision.  Its 1000-kbit/s mapping is an extension
+   * because the supplied C receive pipeline does not reference dqpsk directly.
    *
    * @param effectiveSnrDb Effective Eb/N0-style input in decibels.
    * @return Interpolated BER from the dqpsk table.
@@ -72,7 +84,7 @@ public:
   /**
    * Return the four-bit payload interval used by runtime rate accounting.
    *
-   * The spread-rate intervals are source-defined. The two DQPSK accounting
+   * The spread-rate intervals are source-defined. The DPSK/DQPSK accounting
    * intervals are derived from the owner-confirmed high-rate bit rates.
    *
    * @param rateKbps Legacy payload-rate key.

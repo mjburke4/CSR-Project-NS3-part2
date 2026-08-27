@@ -273,7 +273,7 @@ TestAutomaticQueuedMacRateSelection ()
 }
 
 void
-RunLiveDqpskSuccess (CsrRateKey rateKbps, double rawSnrDb)
+RunLiveHighRateSuccess (CsrRateKey rateKbps, double rawSnrDb)
 {
   ResetReception ();
   Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (1);
@@ -306,23 +306,25 @@ RunLiveDqpskSuccess (CsrRateKey rateKbps, double rawSnrDb)
   Simulator::Stop (duration + MilliSeconds (10));
   Simulator::Run ();
   Require (g_receiveCount == 1 && receiver->HasLastRxDecision (),
-           "live DQPSK frame did not complete the receive pipeline");
+           "live DPSK/DQPSK frame did not complete the receive pipeline");
   const CsrRxDecision &decision = receiver->GetLastRxDecision ();
   double processingGainDb = 10.0 * std::log10 (
     receiver->GetPhy ().profile.rxBwHz /
     (2.0 * CsrRateKeyToBps (rateKbps)));
-  double expectedDqpskBer = CsrOpnetBerTables::GetDqpskBer (
-    decision.snrDb + processingGainDb);
+  double effectiveSnrDb = decision.snrDb + processingGainDb;
+  double expectedHighRateBer = rateKbps == 500
+    ? CsrOpnetBerTables::GetDpskBer (effectiveSnrDb)
+    : CsrOpnetBerTables::GetDqpskBer (effectiveSnrDb);
   double standardBer = CsrOpnetBerTables::GetStandardBer (
     decision.snrDb + processingGainDb);
   Require (decision.success && !decision.eccDropped,
-           "moderate-SNR DQPSK frame failed ECC unexpectedly");
+           "moderate-SNR DPSK/DQPSK frame failed ECC unexpectedly");
   RequireNear (decision.payloadBer,
-               expectedDqpskBer,
+               expectedHighRateBer,
                1.0e-12,
-               "live payload did not use the recovered DQPSK table");
-  Require (expectedDqpskBer > standardBer,
-           "live DQPSK curve did not remain distinct from CSR");
+               "live payload did not use its recovered high-rate BER law");
+  Require (expectedHighRateBer > standardBer,
+           "live high-rate curve did not remain distinct from CSR");
   Simulator::Destroy ();
 }
 
@@ -338,11 +340,14 @@ TestLiveDqpskEccDrop ()
   receiver->GetPhy ().SetLinkDistanceMeters (1, 2, 0.0);
   receiver->GetMac ().SetRxCallback (MakeCallback (&RecordReception));
 
-  Ptr<Packet> frame = BuildFrame (1, 2, 20, 500, 512);
-  double txPowerDbm = receiver->GetPhy ().profile.noiseFloorDbm - 10.0;
+  Ptr<Packet> frame = BuildFrame (1, 2, 20, 1000, 512);
+  // 1000 kbit/s has -3.0103 dB processing gain, so this produces an
+  // effective Eb/N0 of -10 dB and exercises the recovered DQPSK p > 0.5 tail.
+  double txPowerDbm = receiver->GetPhy ().profile.noiseFloorDbm
+                    - 6.989700043360188;
   Time duration = sender->SendToPeer (frame,
                                       2,
-                                      500,
+                                      1000,
                                       txPowerDbm,
                                       PREAMBLE_SHORT,
                                       3,
@@ -364,7 +369,7 @@ TestLiveDqpskEccDrop ()
 }
 
 void
-TestLiveSameRateDqpskCollision ()
+TestLiveStrongerShorterDpskJammer ()
 {
   ResetReception ();
   Ptr<CsrNetDevice> desired = CreateObject<CsrNetDevice> (1);
@@ -379,7 +384,7 @@ TestLiveSameRateDqpskCollision ()
   receiver->GetPhy ().SetLinkDistanceMeters (2, 3, 0.0);
   receiver->GetMac ().SetRxCallback (MakeCallback (&RecordReception));
 
-  Ptr<Packet> desiredFrame = BuildFrame (1, 3, 30, 500, 512);
+  Ptr<Packet> desiredFrame = BuildFrame (1, 3, 30, 500, 4096);
   Time desiredDuration = desired->SendToPeer (desiredFrame,
                                               3,
                                               500,
@@ -390,10 +395,10 @@ TestLiveSameRateDqpskCollision ()
   Simulator::Schedule (
     Seconds (0.00765),
     [jammer] () {
-      jammer->SendToPeer (BuildFrame (2, 3, 31, 500, 512),
+      jammer->SendToPeer (BuildFrame (2, 3, 31, 500, 2048),
                           3,
                           500,
-                          0.0,
+                          6.0,
                           PREAMBLE_SHORT,
                           4,
                           false);
@@ -402,20 +407,20 @@ TestLiveSameRateDqpskCollision ()
   Simulator::Run ();
 
   Require (g_receiveCount == 0 && receiver->HasLastRxDecision (),
-           "equal-power DQPSK collision reached MAC delivery");
+           "stronger-jammer DPSK collision reached MAC delivery");
   const CsrRxDecision &decision = receiver->GetLastRxDecision ();
   Require (decision.sameRateInterference,
            "live high-rate overlap did not record same-rate interference");
   RequireNear (decision.jsrDb,
-               0.0,
+               6.0,
                1.0e-9,
-               "equal-power DQPSK overlap did not record 0-dB JSR");
+               "DPSK overlap lost the signed stronger-jammer JSR");
   RequireNear (decision.payloadBer,
-               CsrOpnetBerTables::GetDqpskBer (0.0),
-               1.0e-9,
-               "same-rate high-rate overlap did not use jammer-as-noise DQPSK");
+               0.0,
+               1.0e-15,
+               "shorter DPSK jammer leaked into the post-overlap interval");
   Require (!decision.success && decision.eccDropped,
-           "same-rate DQPSK overlap was hard-dropped before BER/ECC");
+           "same-rate DPSK overlap was hard-dropped before BER/ECC");
   Simulator::Destroy ();
 }
 
@@ -468,13 +473,13 @@ main ()
   RunLinkControlCase (1000, 1000, 25.0);
   TestAutomaticMacRateSelection ();
   TestAutomaticQueuedMacRateSelection ();
-  RunLiveDqpskSuccess (500, 10.0);
-  RunLiveDqpskSuccess (1000, 13.010299956639812);
+  RunLiveHighRateSuccess (500, 10.0);
+  RunLiveHighRateSuccess (1000, 13.010299956639812);
   TestLiveDqpskEccDrop ();
-  TestLiveSameRateDqpskCollision ();
+  TestLiveStrongerShorterDpskJammer ();
   TestHighRateQueueHeadProgress ();
 
-  std::cout << "PASS: live owner-confirmed high-rate/DQPSK integration test"
+  std::cout << "PASS: live high-rate DPSK/DQPSK integration test"
             << std::endl;
   return 0;
 }

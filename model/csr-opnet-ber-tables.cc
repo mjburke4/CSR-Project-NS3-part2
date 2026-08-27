@@ -154,6 +154,23 @@ CsrOpnetBerTables::GetStandardBer (double effectiveSnrDb)
 }
 
 double
+CsrOpnetBerTables::GetDpskBer (double effectiveSnrDb)
+{
+  if (std::isnan (effectiveSnrDb) ||
+      effectiveSnrDb == -std::numeric_limits<double>::infinity ())
+    {
+      return 0.5;
+    }
+  if (effectiveSnrDb == std::numeric_limits<double>::infinity ())
+    {
+      return 0.0;
+    }
+
+  double ebNo = std::pow (10.0, effectiveSnrDb / 10.0);
+  return 0.5 * std::exp (-ebNo);
+}
+
+double
 CsrOpnetBerTables::GetDqpskBer (double effectiveSnrDb)
 {
   return Interpolate (CSR_DQPSK_VALUES,

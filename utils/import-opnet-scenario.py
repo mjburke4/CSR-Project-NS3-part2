@@ -64,7 +64,9 @@ SCENARIO_COLUMNS = (
     "seed",
     "tmm",
     "coordinate_scale_m_per_unit",
+    "reservation_control_start_s",
     "node_id",
+    "forced_reservation_slot",
     "name",
     "node_type",
     "x_m",
@@ -466,6 +468,23 @@ def parse_flow(specification: str) -> Flow:
     return flow
 
 
+def parse_reservation_slot_override(specification: str) -> tuple[int, int]:
+    """Parse NODE:SLOT for a controlled differential reservation run."""
+    parts = specification.split(":")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("reservation override must be NODE:SLOT")
+    try:
+        node_id = int(parts[0], 0)
+        slot = int(parts[1], 0)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if node_id < 0 or node_id > 0xFFFFFF or slot < 1 or slot > 255:
+        raise argparse.ArgumentTypeError(
+            "reservation override requires a 24-bit node and slot 1..255"
+        )
+    return node_id, slot
+
+
 def infer_ring_flows(nodes: list[Node]) -> list[Flow]:
     """Create deterministic explicit flows from promoted app attributes."""
     if len(nodes) < 2:
@@ -500,6 +519,7 @@ def write_scenario(
     coordinate_scale: float,
     nodes: Iterable[Node],
     flows: Iterable[Flow],
+    reservation_slot_overrides: dict[int, int],
 ) -> None:
     """Write the rectangular canonical scenario CSV."""
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -516,6 +536,11 @@ def write_scenario(
             seed=str(run["seed"]),
             tmm="1" if run["tmm"] else "0",
             coordinate_scale_m_per_unit=repr(coordinate_scale),
+            reservation_control_start_s=(
+                ""
+                if "reservation_control_start_s" not in run
+                else repr(run["reservation_control_start_s"])
+            ),
         )
         writer.writerow(row)
         for node in nodes:
@@ -524,6 +549,11 @@ def write_scenario(
                 record="node",
                 schema=SCHEMA_VERSION,
                 node_id=str(node.node_id),
+                forced_reservation_slot=(
+                    ""
+                    if node.node_id not in reservation_slot_overrides
+                    else str(reservation_slot_overrides[node.node_id])
+                ),
                 name=node.name,
                 node_type=node.node_type,
                 x_m=repr(node.x_m),
@@ -576,15 +606,51 @@ def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flo
             raise ImportErrorDetail(
                 f"flow {flow.source}->{flow.destination} references an unknown node"
             )
+    reservation_slot_overrides: dict[int, int] = {}
+    for node_id, slot in arguments.force_reservation_slot:
+        if node_id not in known_ids:
+            raise ImportErrorDetail(
+                f"reservation override references unknown node {node_id}"
+            )
+        if node_id in reservation_slot_overrides:
+            raise ImportErrorDetail(
+                f"reservation override repeats node {node_id}"
+            )
+        reservation_slot_overrides[node_id] = slot
+    run = parse_environment(environment_data)
+    if arguments.duration is not None:
+        if not math.isfinite(arguments.duration) or arguments.duration <= 0.0:
+            raise ImportErrorDetail("--duration must be finite and positive")
+        run["duration_s"] = arguments.duration
+    if arguments.seed is not None:
+        if arguments.seed < 0 or arguments.seed > 0xFFFFFFFF:
+            raise ImportErrorDetail("--seed must be in 0..4294967295")
+        run["seed"] = arguments.seed
+    if arguments.reservation_control_start is not None:
+        control_start = arguments.reservation_control_start
+        if not math.isfinite(control_start) or control_start < 0.0:
+            raise ImportErrorDetail(
+                "--reservation-control-start must be finite and nonnegative"
+            )
+        if not reservation_slot_overrides:
+            raise ImportErrorDetail(
+                "--reservation-control-start requires a reservation override"
+            )
+        if control_start > run["duration_s"]:
+            raise ImportErrorDetail(
+                "--reservation-control-start exceeds the run duration"
+            )
+        run["reservation_control_start_s"] = control_start
     digest = hashlib.sha256(network_data + b"\0" + (environment_data or b"")).hexdigest()
     write_scenario(
         arguments.output,
         resolved.scenario_name,
         digest,
-        parse_environment(environment_data),
+        run,
         arguments.coordinate_scale,
         nodes,
         flows,
+        reservation_slot_overrides,
     )
     if resolved.environment_name is None:
         print(
@@ -617,6 +683,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_flow,
         metavar="SRC:DST:START:INTERVAL:BYTES:DSCP",
         help="append an explicit deterministic traffic flow",
+    )
+    parser.add_argument(
+        "--force-reservation-slot",
+        action="append",
+        default=[],
+        type=parse_reservation_slot_override,
+        metavar="NODE:SLOT",
+        help="control a node's reservation slot/counter for a differential run",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        help="override the paired DES duration in the canonical run row",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="override the paired DES random seed in the canonical run row",
+    )
+    parser.add_argument(
+        "--reservation-control-start",
+        type=float,
+        help="simulation time at which forced reservation controls become active",
     )
     parser.add_argument(
         "--infer-ring-flows",

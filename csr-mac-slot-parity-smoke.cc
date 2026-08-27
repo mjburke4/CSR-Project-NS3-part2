@@ -2,6 +2,7 @@
 #include "ns3/csr-common.h"
 #include "ns3/csr-net-device.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -56,7 +57,13 @@ CheckHoldoff (Ptr<CsrNetDevice> device)
 void
 CheckReservationMidCountdown (Ptr<CsrNetDevice> device)
 {
-  Require (device->GetMac ().GetNeighborReservationCounter (9) == 0,
+  int32_t counter =
+    device->GetMac ().GetNeighborReservationCounter (9);
+  if (counter != 0)
+    {
+      std::cerr << "neighbor counter at 45 ms=" << counter << std::endl;
+    }
+  Require (counter == 0,
            "neighbor reservation did not count down once per 13-ms slot");
 }
 
@@ -78,10 +85,14 @@ CheckFirstOpportunity (Ptr<CsrNetDevice> device)
   Require (g_txTimes[0] == g_txTimes[1],
            "queued DATA frames did not share one OTA transmission");
 
-  // active_nodes=1 selects a free-slot ordinal in [1,18].  The first frame
-  // must therefore start after 0.3 + 2*0.013 and no later than the largest
-  // normal offset plus the one occupied neighbor reservation in this test.
-  Require (g_txTimes[0] >= 0.326 && g_txTimes[0] <= 0.560,
+  // The 300-ms holdoff and already-running 13-ms slot clock are independent.
+  // active_nodes=1 selects an ordinal in [1,18], so the first opportunity is
+  // an absolute slot boundary in the source-backed 0.325--0.559-s window.
+  int64_t txNanoseconds =
+    static_cast<int64_t> (std::llround (g_txTimes[0] * 1e9));
+  Require (txNanoseconds % 13000000 == 0,
+           "first TX did not retain the shared absolute 13-ms phase");
+  Require (g_txTimes[0] >= 0.325 && g_txTimes[0] <= 0.559,
            "first TX time is outside the OPNET holdoff/slot window");
 }
 
@@ -101,8 +112,8 @@ CheckReservationPausedInTx (Ptr<CsrNetDevice> device)
 void
 CheckReservationResumedAfterTx (Ptr<CsrNetDevice> device)
 {
-  Require (device->GetMac ().GetNeighborReservationCounter (10) == -1,
-           "neighbor reservation did not resume after MAC left Tx_st");
+  Require (device->GetMac ().GetNeighborReservationCounter (10) == -2,
+           "neighbor counter did not keep advancing after expiration");
 }
 
 void
@@ -165,7 +176,8 @@ main ()
                        &CheckReservationPausedInTx,
                        device);
   // Exact br_OTA airtime keeps this long-preamble aggregate in Tx until
-  // roughly 1.55 seconds; five Search ticks then expire the reservation.
+  // roughly 1.55 seconds.  The source keeps decrementing after expiration,
+  // so this checkpoint observes -2 rather than clamping at -1.
   Simulator::Schedule (Seconds (1.65),
                        &CheckReservationResumedAfterTx,
                        device);
