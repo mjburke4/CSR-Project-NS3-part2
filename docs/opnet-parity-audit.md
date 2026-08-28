@@ -35,7 +35,7 @@ OPNET/ns-3 event-trace comparison.
 | Visible NWK wrapper behavior | 94-97% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, automatic changed-route propagation, and fixed packet/control envelopes are covered. |
 | Full NWK routing behavior | 86-91% | ARL byte-stream exchange, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing and untested edge cases rather than an unavailable routing implementation. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 93-96% | ACK/DACK windows, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
+| HOP | 93-96% | ACK/DACK windows, exact DACK expiration ordering, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
 | Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
 | Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and differential traces. |
@@ -61,6 +61,9 @@ completion.
 - OPNET ARL local-only link-cost calculation: RoutingInfo is retained as
   transaction data but does not create non-legacy bidirectional negotiation.
 - NWK/HOP admission, NSDP ACK/DACK selection, and global pending-DATA state.
+- Exact DACK custody ordering: nominal 20-/40-second holds, one per-entry timer
+  at `hold + TIC`, list-wide expiry scans, and source-equivalent pending-event
+  coalescing for the subsequent NWK queue check.
 - Source-backed ARL neighbor admission: unauthenticated Discover triggers a
   no-ACK KeyRequest; valid KeyUpdate triggers a reciprocal reliable KeyUpdate;
   only its ACK marks the outbound group key sent; and a NeighborCheck proof
@@ -421,10 +424,11 @@ only 9.68% of deliveries but contribute 85.79% of cumulative delay. These are
 ns-3 isolation measurements, not OPNET numeric parity: the recovered `*.ov`
 results do not contain NWK queue vectors or packet-path event order.
 
-The opt-in application/NWK/HOP ledger now closes that source-order boundary.
-Its post-fix canonical 6,000-second trace contains 2,875,403 events with
+The opt-in application/NWK/HOP ledger now closes both that source-order
+boundary and the recovered DACK-expiration boundary. Its canonical
+6,000-second trace contains 2,875,403 events with
 SHA-256
-`5518de948721ab4b3370a6c02ac7efe3909e5a0b3e2406928f3ad95e9214b518`.
+`4f85672a78044db4176a0866dc2e225e4f4652e95b5aa636a1b1f7234518a8ef`.
 All 1,710,000 application attempts reconcile to 14,566 admissions and
 1,695,434 blocks. NWK records 18,331 admissions, 686,581 per-neighbor holds,
 3,251 global-capacity holds, and zero no-route holds. The largest directed-leg
@@ -439,12 +443,32 @@ valid incomplete prefixes, and zero invalid packets. The joined inventory is
 220 open NWK packets, 443 final `no_ack`, 32 open resends, 12 completed ACKs,
 and 5 completed DACKs.
 
-The corrected eight-series aggregate comparison still aligns all 800 points,
+Each DACK entry now schedules its list-wide expiry scan at the nominal 20- or
+40-second deadline plus one OPNET `TIC`. At ns-3's nanosecond resolution, the
+source value `1 / 36 MHz` is 28 ns. A scan releases every entry already past
+its nominal deadline, so entries less than one `TIC` apart can coalesce: the
+effective per-entry offset is in `[0,TIC]`, and every release must coincide
+with an actual scheduled DACK timer. All 2,156 releases in the canonical run
+are isolated and occur at `hold + TIC`. Focused event-order tests cover the
+normal and maximum-resend 40-second production paths, prove capacity remains
+held immediately after the nominal deadline, exercise a two-entry coalesced
+scan, and prove isolated NWK readmission at `hold + 2*TIC`. A previously
+pending NWK check can coalesce that final wake exactly as OPNET's
+`op_ev_pending()` does.
+
+The corrected aggregate CSV has SHA-256
+`35b0b694322186ff217d1612877f257cd11321e7bed11ee3e9ceb3a810936b8b`.
+The eight-series aggregate comparison still aligns all 800 points,
 contains 665 exact-tolerance numeric mismatches, and preserves 20 OPNET
 no-sample values. Corrected ns-3 means are 2.42767 packets/s sent, 2.30900
-packets/s received, and 79.9450 seconds end-to-end delay. The source-order fix
-therefore changes the deterministic trajectory but does not erase the larger
-aggregate calibration gap.
+packets/s received, and 79.9450 seconds end-to-end delay. Neither corrected
+ordering erases the larger aggregate calibration gap.
+
+Relative to the preceding pre-enqueue-only checkpoint, all admission,
+completion, delivery, and core-comparison values are unchanged. The added
+28-ns boundary changes only 95 MAC and 95 NWK queue-delay bucket means, each
+by less than 5.6 ns; this is the expected redistribution between adjacent
+queue-residence intervals rather than a packet-trajectory change.
 
 The retained pre-fix trace has SHA-256
 `cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`
@@ -488,12 +512,10 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Correct the remaining source-proven DACK timer boundary. Recovered HOP
-   checks expiry at the nominal 20/40-second hold plus one `TIC` and wakes NWK
-   one additional `TIC` later, whereas ns-3 currently releases capacity at the
-   nominal hold. Add an exact event-order regression and rerun the canonical
-   ledger and aggregate/path checks without weakening the now-clean
-   pre-enqueue ACK/DACK assertions.
+1. Close the adjacent source-proven HOP timer/wake boundaries. Recovered HOP
+   schedules resend expiry one `TIC` after its nominal deadline and requests a
+   generic NWK queue check after even an unknown or stale ACK/DACK; verify and
+   reproduce those two orderings without changing valid-feedback semantics.
 2. Compare route convergence and admission semantics against any newer
    `br_nwk.pr.c`, recovered runtime source, or historical evidence that becomes
    available. In particular, verify the node-7 five-hop gateway route selected
@@ -542,7 +564,7 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 All 32 CSR executable targets build on this audit revision. The 30 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (32/32). All 138 focused Python tests pass; the suite additionally
+workflow pass (32/32). All 143 focused Python tests pass; the suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end

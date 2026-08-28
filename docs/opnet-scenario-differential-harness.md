@@ -339,8 +339,10 @@ python3 utils/analyze-ns3-admission-ledger.py ns3-admission-trace.csv \
 
 Strict mode is a source-semantics assertion, not merely a CSV parser. The
 pre-enqueue ACK/DACK correction now passes this assertion. The retained
-pre-fix trace still exits nonzero on its 138 early-DACK boundary decisions and
-remains useful before/after evidence.
+pre-fix trace still exits nonzero, including on its 138 early-DACK boundary
+decisions; its former bare-deadline DACK releases are also reported. It remains
+useful before/after evidence even though those older rows predate the explicit
+scheduled/effective-offset trace fields.
 
 The analyzer reconciles every `app_admission` decision with the compact
 per-flow diagnostics, validates NWK and HOP state transitions, correlates
@@ -349,9 +351,9 @@ leg, and writes both a bounded JSON summary and a packet-leg CSV. Structurally
 valid open NWK, resend, and DACK-hold states are inventoried rather than
 silently converted to failures.
 
-The post-fix canonical 6,000-second multihop trace contains 2,875,403 events
-and has SHA-256
-`5518de948721ab4b3370a6c02ac7efe3909e5a0b3e2406928f3ad95e9214b518`.
+The exact-order canonical 6,000-second multihop trace contains 2,875,403
+events and has SHA-256
+`4f85672a78044db4176a0866dc2e225e4f4652e95b5aa636a1b1f7234518a8ef`.
 Its application ledger exactly partitions 1,710,000 attempts into 14,566
 admissions, 2,000 discovery blocks, 4,112 empty-topology blocks, 462
 gateway-route blocks, and 1,688,860 NSDP blocks. NWK decisions are:
@@ -382,11 +384,19 @@ The pre-fix trace contained 3,228,471 events with SHA-256
 Its 138 pre-15/post-16 DACK findings establish the behavioral delta; they are
 not relabeled as passing evidence.
 
-The recorded 20-/40-second values are the configured ns-3 hold intervals, not
-an assertion of exact timer-event parity. Recovered `br_hop.pr.c` schedules its
-DACK check one `TIC` after the nominal expiration and schedules the subsequent
-NWK queue wake one more `TIC` later. That sub-microsecond ordering difference
-is deliberately left unchanged by this observation-only ledger step.
+The recorded `dack_hold_seconds` values remain the source's nominal 20-/40-
+second custody intervals. Each entry schedules a list-wide expiry scan one
+OPNET `TIC` later. Since `TIC = 1 / 36 MHz`, ns-3's nanosecond resolution
+represents the scheduled offset as 28 ns. A scan releases every nominally
+expired entry, so nearby expiries can coalesce with an effective offset in
+`[0,TIC]`. Trace details distinguish
+`dack_scheduled_timer_offset_seconds` from
+`dack_effective_timer_offset_seconds`; strict ledger analysis requires the
+release to remain in range and to coincide with an actual scheduled DACK
+timer. Focused regressions cover isolated 20- and 40-second holds, reject the
+former bare-deadline behavior, exercise a coalesced two-entry scan, and prove
+integrated isolated NWK readmission at `hold + 2*TIC`. As in OPNET, an already
+pending NWK check can coalesce the final one-`TIC` wake.
 
 Recovered `br_hop.pr.c` obtains the NSDP entry, sends the relay packet to the
 separate NWK process, and tests the still-pre-enqueue count: 15 selects ACK
