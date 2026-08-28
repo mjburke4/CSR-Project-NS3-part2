@@ -23,6 +23,19 @@
 
 using namespace ns3;
 
+/**
+ * Return one legacy OPNET model clock quantum.
+ *
+ * br_support.h defines TIC as 1 / 36 MHz.  Keep the expression in one place
+ * so HOP self interrupts and NWK remote interrupts use the same ns-3 Time
+ * quantization (28 ns when the simulator resolution is nanoseconds).
+ */
+static inline Time
+CsrOpnetTic ()
+{
+  return Seconds (1.0 / 36.0e6);
+}
+
 static std::ofstream g_rxCsv;
 
 static void

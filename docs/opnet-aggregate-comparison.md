@@ -354,9 +354,9 @@ state, and the correlated `(src,dst,sequence)` identity wherever the modeled
 packet carries it. Enabling the ledger does not change modeled bytes, queue
 order, route selection, random draws, or event scheduling.
 
-The post-fix canonical 6,000-second multihop ledger has 2,875,403 events and
-SHA-256
-`5518de948721ab4b3370a6c02ac7efe3909e5a0b3e2406928f3ad95e9214b518`.
+The exact-order canonical 6,000-second multihop ledger has 2,875,403 events
+and SHA-256
+`4f85672a78044db4176a0866dc2e225e4f4652e95b5aa636a1b1f7234518a8ef`.
 Its 1,710,000 application decisions reconcile exactly to the compact
 diagnostics: 14,566 admissions and 1,695,434 source-ordered blocks. At the NWK
 boundary it records 18,331 admissions, 686,581 `neighbor_capacity` holds,
@@ -386,7 +386,7 @@ packets. The incomplete inventory is 220 open in NWK, 443 final `no_ack`, 32
 open resend, 12 completed ACK, and 5 completed DACK packets.
 
 The corrected aggregate CSV has SHA-256
-`b2310bc5fa68e0b4e92d2b6a10b783a2490321f74f8f99349b0df1ed1475475c`.
+`35b0b694322186ff217d1612877f257cd11321e7bed11ee3e9ceb3a810936b8b`.
 The selected eight-series historical comparison still aligns all 800 points,
 reports 665 exact-tolerance numeric mismatches, and preserves 20 OPNET
 no-sample values. Its corrected ns-3 means are 2.42767 packets/s sent, 2.30900
@@ -394,11 +394,22 @@ packets/s received, and 79.9450 seconds end-to-end delay, versus OPNET's
 2.01200, 1.90167, and 112.748 respectively. Thus clearing the source-order
 violation does not by itself establish aggregate parity.
 
-The 20-/40-second hold values above describe the configured ns-3 intervals.
-Recovered `br_hop.pr.c` schedules the actual DACK expiry check at the nominal
-hold plus one `TIC`, then wakes NWK one additional `TIC` later; the
-observation-only ledger does not change or claim parity for that tiny timer
-offset.
+The 20-/40-second values above are the nominal custody intervals. Recovered
+`br_hop.pr.c` schedules one DACK-list scan per entry at the nominal hold plus
+one `TIC`; each scan releases all entries whose nominal deadline has passed.
+ns-3 now preserves both the timer and list-scan ordering. An isolated entry
+releases at `hold + TIC`, while entries less than one `TIC` apart can coalesce
+with an effective offset in `[0,TIC]`. One source `TIC` is represented as
+28 ns at ns-3's nanosecond resolution. Strict ledger analysis validates that
+range and requires every release to coincide with a scheduled DACK timer, so a
+bare nominal-only implementation does not pass. The subsequent NWK check is
+nominally one more `TIC` later but can coalesce with an already-pending check,
+matching OPNET's pending-event guard.
+
+Compared with the preceding pre-enqueue-only checkpoint, the corrected timer
+leaves all packet counts and all eight core aggregate series unchanged. It
+changes 95 MAC and 95 NWK queue-delay bucket means by less than 5.6 ns, which
+is the expected queue-residence redistribution from the added event quantum.
 
 The retained pre-fix trace has SHA-256
 `cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.

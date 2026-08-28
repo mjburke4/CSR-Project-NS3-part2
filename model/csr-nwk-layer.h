@@ -1928,7 +1928,7 @@ private:
       {
         m_checkNwkQueueEvent =
           Simulator::Schedule (
-            Seconds (1.0 / 36.0e6),
+            CsrOpnetTic (),
             &CsrNetLayer::CheckNwkQueue,
             this);
       }

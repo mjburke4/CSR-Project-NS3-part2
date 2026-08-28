@@ -1587,6 +1587,10 @@ TestAdmissionLedgerDackSplitRelease ()
   constexpr CsrNodeId destinationNode = 352;
   constexpr uint64_t firstSequence = 7501;
   constexpr uint64_t secondSequence = 7502;
+  const Time dackAt = Seconds (2.0);
+  const Time nominalExpiry = dackAt + Seconds (20.0);
+  const Time capacityReleaseAt = nominalExpiry + CsrOpnetTic ();
+  const Time nwkReadmissionAt = capacityReleaseAt + CsrOpnetTic ();
 
   TraceFile trace ("admission-dack-split");
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceNode);
@@ -1610,7 +1614,7 @@ TestAdmissionLedgerDackSplitRelease ()
              BuildTaggedPayload (16, secondSequence),
              true);
 
-  Simulator::Schedule (Seconds (2.0), [hop, nwk] () {
+  Simulator::Schedule (dackAt, [hop, nwk] () {
     Require (nwk->GetNwkQueueSize () == 1 &&
                nwk->GetNsdpCount (sourceNode, destinationNode) == 2 &&
                hop->GetPendingDataCount () == 1 &&
@@ -1628,22 +1632,30 @@ TestAdmissionLedgerDackSplitRelease ()
              "DACK did not release NSDP while retaining HOP capacity");
   });
 
-  Simulator::Schedule (Seconds (21.9), [hop, nwk] () {
+  Simulator::Schedule (nominalExpiry + NanoSeconds (1), [hop, nwk] () {
     Require (nwk->GetNwkQueueSize () == 1 &&
                hop->GetPendingDataCount () == 1 &&
                hop->GetOutstandingDataCount (destinationNode) == 1,
-             "DACK HOP capacity was released before its 20-second expiry");
+             "DACK HOP capacity was released at its nominal expiry instead of expiry plus TIC");
   });
 
-  Simulator::Schedule (Seconds (22.1), [hop, nwk] () {
+  Simulator::Schedule (capacityReleaseAt + NanoSeconds (1), [hop, nwk] () {
+    Require (nwk->GetNwkQueueSize () == 1 &&
+               nwk->GetNsdpCount (sourceNode, destinationNode) == 1 &&
+               hop->GetPendingDataCount () == 0 &&
+               hop->GetOutstandingDataCount (destinationNode) == 0,
+             "NWK ran synchronously with the DACK capacity release");
+  });
+
+  Simulator::Schedule (nwkReadmissionAt + NanoSeconds (1), [hop, nwk] () {
     Require (nwk->GetNwkQueueSize () == 0 &&
                nwk->GetNsdpCount (sourceNode, destinationNode) == 1 &&
                hop->GetPendingDataCount () == 1 &&
                hop->GetOutstandingDataCount (destinationNode) == 1,
-             "DACK expiry did not release and re-admit the held packet");
+             "NWK did not re-admit the held packet one TIC after DACK release");
   });
 
-  Simulator::Stop (Seconds (22.2));
+  Simulator::Stop (nwkReadmissionAt + NanoSeconds (2));
   Simulator::Run ();
   CloseDifferentialTraceCsv ();
 
@@ -1684,11 +1696,27 @@ TestAdmissionLedgerDackSplitRelease ()
                  "outstanding_after",
                  "0",
                  "DACK capacity release");
+  RequireDetail (capacityReleases[0],
+                 "dack_hold_seconds",
+                 "20",
+                 "DACK capacity release");
+  RequireDetail (capacityReleases[0],
+                 "dack_scheduled_timer_offset_seconds",
+                 CsrTraceDouble (CsrOpnetTic ().GetSeconds ()),
+                 "DACK capacity release");
+  RequireDetail (capacityReleases[0],
+                 "dack_effective_timer_offset_seconds",
+                 CsrTraceDouble (CsrOpnetTic ().GetSeconds ()),
+                 "DACK capacity release");
+  RequireDetail (capacityReleases[0],
+                 "nwk_wake_nominal_delay_seconds",
+                 CsrTraceDouble (CsrOpnetTic ().GetSeconds ()),
+                 "DACK capacity release");
   Require (NearlyEqual (capacityReleases[0].timeSeconds -
                           completions[0].timeSeconds,
-                        20.0,
+                        20.0 + CsrOpnetTic ().GetSeconds (),
                         1e-12),
-           "DACK capacity release did not use the configured 20-second ns-3 hold");
+           "DACK capacity release was not at the nominal hold plus one TIC");
   Require (releases[0].eventIndex < completions[0].eventIndex &&
              completions[0].eventIndex < capacityReleases[0].eventIndex,
            "DACK split-release rows are not source ordered");
@@ -1702,6 +1730,11 @@ TestAdmissionLedgerDackSplitRelease ()
              secondNwkAdmissions.back ().eventIndex <
                secondHopAdmissions[0].eventIndex,
            "held packet was not admitted after DACK capacity release");
+  Require (NearlyEqual (secondNwkAdmissions.back ().timeSeconds -
+                          capacityReleases[0].timeSeconds,
+                        CsrOpnetTic ().GetSeconds (),
+                        1e-12),
+           "NWK readmission was not one TIC after DACK capacity release");
 
   Simulator::Destroy ();
 }

@@ -35,11 +35,11 @@ MAC/HOP sent-time parity test:
 3. Run: ./ns3 run csr-hop-mac-sent-time-smoke
 4. Expected: PASS: MAC/HOP sent-time parity test
 
-Staggered DACK hold parity test:
+Exact DACK timer parity test:
 1. Copy csr-hop-dack-hold-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-hop-dack-hold-smoke
 3. Run: ./ns3 run csr-hop-dack-hold-smoke
-4. Expected: PASS: staggered DACK hold parity test
+4. Expected: PASS: exact 20/40-second DACK timer parity test
 
 OPNET MAC slot scheduling parity test:
 1. Copy csr-mac-slot-parity-smoke.cc to ns-3-dev/scratch/

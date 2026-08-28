@@ -258,12 +258,13 @@ def dack_rows() -> list[dict[str, str]]:
                 "pending_limit=16;outstanding_before=1;outstanding_after=1;"
                 "threshold_before=0;threshold_after=0;resend_queue_before=1;"
                 "resend_queue_after=0;dack_hold_seconds=20;"
+                f"dack_scheduled_timer_offset_seconds={analyzer.OPNET_TIC_SECONDS};"
                 "nsdp_released=1;capacity_released=0"
             ),
         ),
         packet_row(
             7,
-            20.2,
+            20.2 + analyzer.OPNET_TIC_SECONDS,
             "hop_capacity_release",
             node=0,
             peer=1,
@@ -273,6 +274,8 @@ def dack_rows() -> list[dict[str, str]]:
                 "hop_sequence=7;resend_count=0;pending_before=1;pending_after=0;"
                 "pending_limit=16;outstanding_before=1;outstanding_after=0;"
                 "threshold_before=0;threshold_after=0;dack_hold_seconds=20;"
+                f"dack_scheduled_timer_offset_seconds={analyzer.OPNET_TIC_SECONDS};"
+                f"dack_effective_timer_offset_seconds={analyzer.OPNET_TIC_SECONDS};"
                 "nsdp_released=0;capacity_released=1"
             ),
         ),
@@ -348,7 +351,200 @@ class AnalyzeAdmissionLedgerTests(unittest.TestCase):
             self.assertEqual(report["hop"]["completions_by_reason"], {"dack": 1})
             self.assertEqual(report["hop"]["capacity_releases"], 1)
             self.assertEqual(legs[0].dack_hold_seconds, 20.0)
-            self.assertEqual(legs[0].capacity_release_time_s, 20.2)
+            self.assertAlmostEqual(
+                legs[0].capacity_release_time_s,
+                20.2 + analyzer.OPNET_TIC_SECONDS,
+            )
+
+    def test_dack_expiry_at_nominal_hold_is_a_strict_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            rows = dack_rows()
+            rows[7]["time_s"] = "20.2"
+            rows[7]["detail"] = rows[7]["detail"].replace(
+                f"dack_effective_timer_offset_seconds={analyzer.OPNET_TIC_SECONDS}",
+                "dack_effective_timer_offset_seconds=0",
+            )
+            write_trace(trace, rows)
+
+            legs, report = analyzer.analyze(trace)
+
+            self.assertFalse(report["pass"])
+            self.assertIn(
+                "dack_expiry_time_mismatch",
+                {issue["code"] for issue in legs[0].issues},
+            )
+
+    def test_legacy_dack_trace_without_offsets_remains_analyzable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            rows = dack_rows()
+            rows[6]["detail"] = ";".join(
+                token
+                for token in rows[6]["detail"].split(";")
+                if not token.startswith("dack_scheduled_timer_offset_seconds=")
+            )
+            rows[7]["time_s"] = "20.2"
+            rows[7]["detail"] = ";".join(
+                token
+                for token in rows[7]["detail"].split(";")
+                if not token.startswith(
+                    (
+                        "dack_scheduled_timer_offset_seconds=",
+                        "dack_effective_timer_offset_seconds=",
+                    )
+                )
+            )
+            write_trace(trace, rows)
+
+            legs, report = analyzer.analyze(trace)
+
+            self.assertFalse(report["pass"])
+            self.assertEqual(
+                legs[0].dack_scheduled_timer_offset_seconds,
+                analyzer.OPNET_TIC_SECONDS,
+            )
+            self.assertAlmostEqual(legs[0].dack_effective_timer_offset_seconds, 0.0)
+            self.assertIn(
+                "dack_expiry_time_mismatch",
+                {issue["code"] for issue in legs[0].issues},
+            )
+
+    def test_max_resend_dack_uses_40_second_hold_plus_tic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            rows = dack_rows()
+            rows[6]["detail"] = rows[6]["detail"].replace(
+                "resend_count=0", "resend_count=2"
+            ).replace("dack_hold_seconds=20", "dack_hold_seconds=40")
+            rows[7]["detail"] = rows[7]["detail"].replace(
+                "resend_count=0", "resend_count=2"
+            ).replace("dack_hold_seconds=20", "dack_hold_seconds=40")
+            rows[7]["time_s"] = str(40.2 + analyzer.OPNET_TIC_SECONDS)
+            write_trace(trace, rows)
+
+            legs, report = analyzer.analyze(trace)
+
+            self.assertTrue(report["pass"])
+            self.assertEqual(legs[0].resend_count, 2)
+            self.assertEqual(legs[0].dack_hold_seconds, 40.0)
+            self.assertAlmostEqual(
+                legs[0].capacity_release_time_s,
+                40.2 + analyzer.OPNET_TIC_SECONDS,
+            )
+
+    def test_dack_trigger_validation_accepts_coalesced_release(self) -> None:
+        tic = analyzer.OPNET_TIC_SECONDS
+        release_time = 20.2 + tic
+
+        def release_event(index: int, sequence: int) -> object:
+            return analyzer.Event(
+                index=index,
+                time_s=release_time,
+                name="hop_capacity_release",
+                node=0,
+                peer=1,
+                next_hop=1,
+                source=0,
+                destination=2,
+                packet=analyzer.PacketKey(0, 2, sequence),
+                reason="dack_expiry",
+                detail={},
+                input_row=index + 2,
+            )
+
+        first = analyzer.Leg(
+            packet=analyzer.PacketKey(0, 2, 100),
+            leg_index=0,
+            node=0,
+            next_hop=1,
+            first_event_index=0,
+            completion_time_s=0.2,
+            completion_reason="dack",
+            capacity_release_time_s=release_time,
+            dack_hold_seconds=20.0,
+            dack_scheduled_timer_offset_seconds=tic,
+            dack_effective_timer_offset_seconds=tic,
+            capacity_release_event=release_event(7, 100),
+        )
+        second = analyzer.Leg(
+            packet=analyzer.PacketKey(0, 2, 101),
+            leg_index=0,
+            node=0,
+            next_hop=1,
+            first_event_index=8,
+            completion_time_s=0.2 + tic / 2.0,
+            completion_reason="dack",
+            capacity_release_time_s=release_time,
+            dack_hold_seconds=20.0,
+            dack_scheduled_timer_offset_seconds=tic,
+            dack_effective_timer_offset_seconds=tic / 2.0,
+            capacity_release_event=release_event(15, 101),
+        )
+        state = analyzer.AnalysisState(legs=[first, second])
+
+        analyzer._validate_dack_timer_triggers(state)
+
+        self.assertEqual(first.issues, [])
+        self.assertEqual(second.issues, [])
+
+    def test_dack_trigger_validation_rejects_other_nodes_timer(self) -> None:
+        tic = analyzer.OPNET_TIC_SECONDS
+        release_time = 20.2 + tic
+
+        def release_event(index: int, node: int, sequence: int) -> object:
+            return analyzer.Event(
+                index=index,
+                time_s=release_time,
+                name="hop_capacity_release",
+                node=node,
+                peer=1,
+                next_hop=1,
+                source=0,
+                destination=2,
+                packet=analyzer.PacketKey(0, 2, sequence),
+                reason="dack_expiry",
+                detail={},
+                input_row=index + 2,
+            )
+
+        valid = analyzer.Leg(
+            packet=analyzer.PacketKey(0, 2, 100),
+            leg_index=0,
+            node=0,
+            next_hop=1,
+            first_event_index=0,
+            completion_time_s=0.2,
+            completion_reason="dack",
+            capacity_release_time_s=release_time,
+            dack_hold_seconds=20.0,
+            dack_scheduled_timer_offset_seconds=tic,
+            dack_effective_timer_offset_seconds=tic,
+            capacity_release_event=release_event(7, 0, 100),
+        )
+        invalid = analyzer.Leg(
+            packet=analyzer.PacketKey(0, 2, 101),
+            leg_index=0,
+            node=2,
+            next_hop=1,
+            first_event_index=8,
+            completion_time_s=0.2 + tic / 2.0,
+            completion_reason="dack",
+            capacity_release_time_s=release_time,
+            dack_hold_seconds=20.0,
+            dack_scheduled_timer_offset_seconds=tic,
+            dack_effective_timer_offset_seconds=tic / 2.0,
+            capacity_release_event=release_event(15, 2, 101),
+        )
+        state = analyzer.AnalysisState(legs=[valid, invalid])
+
+        analyzer._validate_dack_timer_triggers(state)
+
+        self.assertEqual(valid.issues, [])
+        self.assertIn(
+            "dack_expiry_time_mismatch",
+            {issue["code"] for issue in invalid.issues},
+        )
 
     def test_tagless_duplicate_feedback_uses_hop_identity_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

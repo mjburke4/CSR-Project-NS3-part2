@@ -19,6 +19,7 @@ from typing import Iterable, Iterator
 TRACE_SCHEMA = "csr-differential-trace-v1"
 REPORT_SCHEMA = "csr-admission-ledger-analysis-v1"
 APP_DIAGNOSTICS_SCHEMA = "csr-app-admission-diagnostics-v1"
+OPNET_TIC_SECONDS = 1.0 / 36.0e6
 LEDGER_EVENTS = {
     "app_admission",
     "nwk_admission",
@@ -100,6 +101,8 @@ LEG_CSV_COLUMNS = (
     "completion_reason",
     "capacity_release_time_s",
     "dack_hold_seconds",
+    "dack_scheduled_timer_offset_seconds",
+    "dack_effective_timer_offset_seconds",
     "resend_count",
     "resend_overflow",
     "no_route_holds",
@@ -167,6 +170,9 @@ class Leg:
     completion_reason: str = ""
     capacity_release_time_s: float | None = None
     dack_hold_seconds: float | None = None
+    dack_scheduled_timer_offset_seconds: float | None = None
+    dack_effective_timer_offset_seconds: float | None = None
+    capacity_release_event: Event | None = None
     resend_count: int | None = None
     resend_overflow: bool = False
     holds: Counter[str] = field(default_factory=Counter)
@@ -1096,7 +1102,34 @@ def _handle_completion(event: Event, state: AnalysisState) -> None:
         )
         if hold not in {20.0, 40.0}:
             _issue(leg.issues, "unexpected_dack_hold", "DACK hold is not the current ns-3 configured 20/40-second interval", [event])
+        # Traces produced before exact DACK timer instrumentation omit this
+        # field.  Preserve their value as regression evidence by applying the
+        # source-defined scheduled offset; the release-time post-pass below
+        # will still reject a legacy bare-deadline release.
+        scheduled_text = detail.get("dack_scheduled_timer_offset_seconds")
+        scheduled_offset = (
+            OPNET_TIC_SECONDS
+            if scheduled_text is None
+            else _number(
+                scheduled_text,
+                "dack_scheduled_timer_offset_seconds",
+                event.input_row,
+            )
+        )
+        if not math.isclose(
+            scheduled_offset,
+            OPNET_TIC_SECONDS,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        ):
+            _issue(
+                leg.issues,
+                "unexpected_dack_scheduled_offset",
+                "DACK timer is not scheduled one OPNET TIC after nominal expiry",
+                [event],
+            )
         leg.dack_hold_seconds = hold
+        leg.dack_scheduled_timer_offset_seconds = scheduled_offset
         if capacity_released or pending_after != pending_before or outstanding_after != outstanding_before:
             _issue(leg.issues, "dack_released_capacity_early", "DACK must retain HOP capacity until expiry", [event])
         if threshold_after != threshold_before:
@@ -1149,6 +1182,31 @@ def _handle_capacity_release(event: Event, state: AnalysisState) -> None:
     threshold_before = _detail_int(detail, "threshold_before", event)
     threshold_after = _detail_int(detail, "threshold_after", event)
     hold = _number(_required(detail, "dack_hold_seconds", event), "dack_hold_seconds", event.input_row)
+    scheduled_text = detail.get("dack_scheduled_timer_offset_seconds")
+    scheduled_offset = (
+        leg.dack_scheduled_timer_offset_seconds
+        if scheduled_text is None
+        and leg.dack_scheduled_timer_offset_seconds is not None
+        else OPNET_TIC_SECONDS
+        if scheduled_text is None
+        else _number(
+            scheduled_text,
+            "dack_scheduled_timer_offset_seconds",
+            event.input_row,
+        )
+    )
+    effective_text = detail.get("dack_effective_timer_offset_seconds")
+    effective_offset = (
+        event.time_s - leg.completion_time_s - hold
+        if effective_text is None and leg.completion_time_s is not None
+        else 0.0
+        if effective_text is None
+        else _number(
+            effective_text,
+            "dack_effective_timer_offset_seconds",
+            event.input_row,
+        )
+    )
     nsdp_released = _detail_bool(detail, "nsdp_released", event)
     capacity_released = _detail_bool(detail, "capacity_released", event)
     if peer != leg.next_hop:
@@ -1171,22 +1229,109 @@ def _handle_capacity_release(event: Event, state: AnalysisState) -> None:
         _issue(leg.issues, "bad_dack_release_flags", "DACK expiry must release capacity but not NSDP", [event])
     if hold not in {20.0, 40.0}:
         _issue(leg.issues, "unexpected_dack_hold", "DACK hold is not the current ns-3 observed 20/40-second interval", [event])
-    # This is an internal ns-3 ledger-consistency check, not an OPNET timing
-    # claim: the recovered OPNET process schedules DACK_TIMER at dack_time+TIC.
-    if leg.completion_time_s is not None and not math.isclose(
-        event.time_s - leg.completion_time_s, hold, rel_tol=0.0, abs_tol=1.0e-9
+    # Each entry schedules a timer one TIC after nominal expiry, but every
+    # timer scans the complete DACK list.  A nearby or stale timer may therefore
+    # release another nominally expired entry with an effective offset in
+    # [0, TIC].  A post-pass below also requires every release timestamp to
+    # coincide with one of the scheduled per-entry timer timestamps.
+    if not math.isclose(
+        scheduled_offset,
+        OPNET_TIC_SECONDS,
+        rel_tol=0.0,
+        abs_tol=1.0e-9,
     ):
-        _issue(leg.issues, "dack_expiry_time_mismatch", "ns-3 DACK capacity release does not match its recorded interval", [event])
+        _issue(
+            leg.issues,
+            "unexpected_dack_scheduled_offset",
+            "DACK timer is not scheduled one OPNET TIC after nominal expiry",
+            [event],
+        )
+    if effective_offset < -1.0e-9 or effective_offset > OPNET_TIC_SECONDS + 1.0e-9:
+        _issue(
+            leg.issues,
+            "dack_effective_offset_out_of_range",
+            "DACK effective timer offset is outside zero through one OPNET TIC",
+            [event],
+        )
+    if leg.completion_time_s is not None and not math.isclose(
+        event.time_s - leg.completion_time_s,
+        hold + effective_offset,
+        rel_tol=0.0,
+        abs_tol=1.0e-9,
+    ):
+        _issue(
+            leg.issues,
+            "dack_expiry_time_mismatch",
+            "DACK release time does not equal its nominal hold plus effective timer offset",
+            [event],
+        )
     if leg.dack_hold_seconds is not None and not math.isclose(
         hold, leg.dack_hold_seconds, rel_tol=0.0, abs_tol=1.0e-9
     ):
         _issue(leg.issues, "dack_hold_mismatch", "DACK expiry hold differs from completion", [event])
+    if (
+        leg.dack_scheduled_timer_offset_seconds is not None
+        and not math.isclose(
+            scheduled_offset,
+            leg.dack_scheduled_timer_offset_seconds,
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        )
+    ):
+        _issue(
+            leg.issues,
+            "dack_scheduled_offset_mismatch",
+            "DACK expiry scheduled offset differs from completion",
+            [event],
+        )
     if leg.capacity_release_time_s is not None:
         _issue(leg.issues, "duplicate_capacity_release", "leg released DACK capacity more than once", [event])
     leg.capacity_release_time_s = event.time_s
     leg.dack_hold_seconds = hold
+    leg.dack_scheduled_timer_offset_seconds = scheduled_offset
+    leg.dack_effective_timer_offset_seconds = effective_offset
+    leg.capacity_release_event = event
     _unindex_hop_leg(leg, state)
     state.active_leg.pop((leg.packet, leg.node), None)
+
+
+def _validate_dack_timer_triggers(state: AnalysisState) -> None:
+    # CheckDack scans one CsrHopLayer's list.  A timer on another node cannot
+    # release this node's entries even when both timestamps happen to match.
+    timer_times_by_node: dict[int, list[float]] = defaultdict(list)
+    for leg in state.legs:
+        if (
+            leg.completion_reason == "dack"
+            and leg.completion_time_s is not None
+            and leg.dack_hold_seconds is not None
+            and leg.dack_scheduled_timer_offset_seconds is not None
+        ):
+            timer_times_by_node[leg.node].append(
+                leg.completion_time_s
+                + leg.dack_hold_seconds
+                + leg.dack_scheduled_timer_offset_seconds
+            )
+    for leg in state.legs:
+        if (
+            leg.capacity_release_time_s is None
+            or leg.capacity_release_event is None
+            or any(
+                math.isclose(
+                    leg.capacity_release_time_s,
+                    timer_time,
+                    rel_tol=0.0,
+                    abs_tol=1.0e-9,
+                )
+                for timer_time in timer_times_by_node.get(leg.node, [])
+            )
+        ):
+            continue
+        _issue(
+            leg.issues,
+            "dack_expiry_time_mismatch",
+            "DACK capacity release did not coincide with any scheduled DACK timer",
+            [leg.capacity_release_event],
+        )
 
 
 def _process(events: Iterable[Event]) -> AnalysisState:
@@ -1259,6 +1404,7 @@ def _process(events: Iterable[Event]) -> AnalysisState:
             "trace ended before the flow-level NSDP release was paired with completion",
             [state.pending_nsdp_release],
         )
+    _validate_dack_timer_triggers(state)
     return state
 
 
@@ -1632,6 +1778,12 @@ def write_outputs(
                     "completion_reason": leg.completion_reason,
                     "capacity_release_time_s": _csv_value(leg.capacity_release_time_s),
                     "dack_hold_seconds": _csv_value(leg.dack_hold_seconds),
+                    "dack_scheduled_timer_offset_seconds": _csv_value(
+                        leg.dack_scheduled_timer_offset_seconds
+                    ),
+                    "dack_effective_timer_offset_seconds": _csv_value(
+                        leg.dack_effective_timer_offset_seconds
+                    ),
                     "resend_count": _csv_value(leg.resend_count),
                     "resend_overflow": "1" if leg.resend_overflow else "0",
                     "no_route_holds": leg.holds["no_route"],

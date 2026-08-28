@@ -3367,13 +3367,22 @@ CsrHopLayer::CheckDack ()
                 ";threshold_after=" +
                   CsrTraceInteger (capacityAfter.neighborThreshold) +
                 ";dack_hold_seconds=" +
-                  CsrTraceDouble ((now - it->receivedAt).GetSeconds ()) +
+                  CsrTraceDouble (
+                    (it->expiry - it->receivedAt).GetSeconds ()) +
+                ";dack_scheduled_timer_offset_seconds=" +
+                  CsrTraceDouble (CsrOpnetTic ().GetSeconds ()) +
+                ";dack_effective_timer_offset_seconds=" +
+                  CsrTraceDouble ((now - it->expiry).GetSeconds ()) +
+                ";nwk_wake_nominal_delay_seconds=" +
+                  CsrTraceDouble (CsrOpnetTic ().GetSeconds ()) +
                 ";nsdp_released=0;capacity_released=1";
               WriteDifferentialAdmissionTrace (releaseEvent);
             }
 
-          // Legacy check_dack() wakes the Network layer
-          // whenever a delayed HOP flow-control slot is released.
+          // Legacy check_dack() schedules the Network-layer queue interrupt
+          // one additional TIC after this delayed HOP slot is released.  The
+          // callback is CsrNetLayer::ScheduleCheckNwkQueue(), which preserves
+          // that second offset rather than running the scan synchronously.
           if (!m_nwkQueueWakeCb.IsNull ())
             {
               std::cout << "[HOP " << m_nodeId
@@ -3487,12 +3496,13 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
 
   m_dackList.push_back (de);
 
-  // OPNET schedules one DACK_TIMER interrupt for each DACK entry at its
-  // absolute expiry.  Do not quantize staggered entries onto a shared polling
-  // cadence: each delayed flow-control slot must be released at its own
-  // 20-second (or doubled 40-second) deadline.
+  // OPNET stores the nominal 20-second (or doubled 40-second) expiry in the
+  // DACK entry, then schedules one DACK_TIMER interrupt at expiry + TIC.  Do
+  // not quantize entries onto a shared polling cadence.  As in check_dack(),
+  // any timer scans all nominally expired entries, so expiries separated by
+  // less than one TIC can coalesce onto the earlier timer invocation.
   Simulator::Schedule (
-    holdTime,
+    holdTime + CsrOpnetTic (),
     &CsrHopLayer::CheckDack,
     this);
 
@@ -3548,6 +3558,10 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
         ";resend_queue_after=" +
           CsrTraceInteger (m_resendQueue.size ()) +
         ";dack_hold_seconds=" + CsrTraceDouble (holdTime.GetSeconds ()) +
+        ";dack_scheduled_timer_offset_seconds=" +
+          CsrTraceDouble (CsrOpnetTic ().GetSeconds ()) +
+        ";nwk_wake_nominal_delay_seconds=" +
+          CsrTraceDouble (CsrOpnetTic ().GetSeconds ()) +
         ";nsdp_released=1;capacity_released=0";
       WriteDifferentialAdmissionTrace (completionEvent);
     }
