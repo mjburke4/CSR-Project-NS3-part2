@@ -952,7 +952,7 @@ public:
         m_hop->SetNwkQueueWakeCallback (
           MakeCallback (
             &CsrNetLayer::
-              ScheduleCheckNwkQueue,
+              CheckNwkQueue,
             this));
       }
   }
@@ -1095,17 +1095,15 @@ public:
             WriteDifferentialAdmissionTrace (releaseEvent);
           }
 
-        // Legacy HOP schedules a NWK queue check whenever
-        // ACK/DACK/final-timeout processing releases flow
-        // control capacity.
+        // HOP owns the source-equivalent remote queue-wake event.  Do not
+        // schedule the NWK-local event here: those two process-local handles
+        // are independent in OPNET and must not be collapsed into one guard.
         std::cout << "[NWK " << m_nodeId
                   << "] HOP completion released NSDP slot;"
-                  << " scheduling NWK queue check"
+                  << " awaiting HOP queue wake"
                   << " flow=" << src
                   << "->" << dst
                   << std::endl;
-
-        ScheduleCheckNwkQueue ();
       }
   }
 

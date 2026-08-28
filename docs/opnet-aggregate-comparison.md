@@ -354,27 +354,28 @@ state, and the correlated `(src,dst,sequence)` identity wherever the modeled
 packet carries it. Enabling the ledger does not change modeled bytes, queue
 order, route selection, random draws, or event scheduling.
 
-The exact-order canonical 6,000-second multihop ledger has 2,875,403 events
+The exact-order canonical 6,000-second multihop ledger has 3,394,651 events
 and SHA-256
-`4f85672a78044db4176a0866dc2e225e4f4652e95b5aa636a1b1f7234518a8ef`.
+`701272f6499f4d32c7bad8549a3956c72971ab677d1c1d6f5a72b2a1be999a93`.
 Its 1,710,000 application decisions reconcile exactly to the compact
 diagnostics: 14,566 admissions and 1,695,434 source-ordered blocks. At the NWK
-boundary it records 18,331 admissions, 686,581 `neighbor_capacity` holds,
-3,251 `global_capacity` holds, and zero `no_route` holds. The neighbor holds
+boundary it records 18,331 admissions, 1,204,924 `neighbor_capacity` holds,
+4,152 `global_capacity` holds, and zero `no_route` holds. The neighbor holds
 identify the congested directed legs:
 
 | Directed leg | `neighbor_capacity` holds |
 | --- | ---: |
-| `2>4` | 335,294 |
-| `4>5` | 168,733 |
-| `8>2` | 122,552 |
-| `5>1` | 31,065 |
-| `7>8` | 28,130 |
-| `3>1` | 807 |
+| `2>4` | 592,227 |
+| `4>5` | 268,430 |
+| `8>2` | 242,476 |
+| `7>8` | 60,138 |
+| `5>1` | 40,620 |
+| `3>1` | 1,033 |
 
 These hold totals count repeated queue-scan decisions, not unique packets or
-time-weighted occupancy. Their directed-leg distribution identifies the gate
-that repeatedly prevents progress.
+time-weighted occupancy. The increase from the DACK-ordering checkpoint is the
+expected evidence of generic HOP-origin ACK/DACK and expiry wakes; application
+admissions, HOP completions, and packet outcomes remain unchanged.
 
 HOP records 14,892 ACK completions, 2,162 DACK completions, and 1,244
 `no_ack` completions; 2,156 delayed DACK-capacity holds expire. Receiver
@@ -385,8 +386,10 @@ DACKs, and zero 15-to-16 DACK decisions. Strict path analysis also passes with
 packets. The incomplete inventory is 220 open in NWK, 443 final `no_ack`, 32
 open resend, 12 completed ACK, and 5 completed DACK packets.
 
-The corrected aggregate CSV has SHA-256
-`35b0b694322186ff217d1612877f257cd11321e7bed11ee3e9ceb3a810936b8b`.
+The final rerun's aggregate trace has SHA-256
+`8498d2bec10292df73ce60d1bd7823408dcfab614475559b27f8bd03bf264ed9`,
+and its generated ns-3 aggregate CSV has SHA-256
+`ec20882a5419834d6920303c38f0528096aee445539d4d5d80def6f2ccf64012`.
 The selected eight-series historical comparison still aligns all 800 points,
 reports 665 exact-tolerance numeric mismatches, and preserves 20 OPNET
 no-sample values. Its corrected ns-3 means are 2.42767 packets/s sent, 2.30900
@@ -402,14 +405,15 @@ releases at `hold + TIC`, while entries less than one `TIC` apart can coalesce
 with an effective offset in `[0,TIC]`. One source `TIC` is represented as
 28 ns at ns-3's nanosecond resolution. Strict ledger analysis validates that
 range and requires every release to coincide with a scheduled DACK timer, so a
-bare nominal-only implementation does not pass. The subsequent NWK check is
-nominally one more `TIC` later but can coalesce with an already-pending check,
-matching OPNET's pending-event guard.
+bare nominal-only implementation does not pass. The subsequent HOP-origin NWK
+wake is nominally one more `TIC` later and can coalesce with an already-pending
+HOP wake. Its event handle remains distinct from NWK's local queue-check
+handle, matching the two OPNET processes.
 
-Compared with the preceding pre-enqueue-only checkpoint, the corrected timer
+Compared with the DACK-ordering checkpoint, the resend/generic-wake correction
 leaves all packet counts and all eight core aggregate series unchanged. It
-changes 95 MAC and 95 NWK queue-delay bucket means by less than 5.6 ns, which
-is the expected queue-residence redistribution from the added event quantum.
+adds the source-required NWK scans reflected in the larger hold-row totals
+above, without changing admissions or packet trajectories.
 
 The retained pre-fix trace has SHA-256
 `cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
