@@ -351,33 +351,50 @@ leg, and writes both a bounded JSON summary and a packet-leg CSV. Structurally
 valid open NWK, resend, and DACK-hold states are inventoried rather than
 silently converted to failures.
 
-The exact-order canonical 6,000-second multihop trace contains 3,394,651
+The exact-order canonical 6,000-second multihop trace contains 3,271,308
 events and has SHA-256
-`701272f6499f4d32c7bad8549a3956c72971ab677d1c1d6f5a72b2a1be999a93`.
-Its application ledger exactly partitions 1,710,000 attempts into 14,566
-admissions, 2,000 discovery blocks, 4,112 empty-topology blocks, 462
-gateway-route blocks, and 1,688,860 NSDP blocks. NWK decisions are:
+`64bf81c8b2155cd10e3688b468219c6d7d018dee73097c3cb0a45456339231f2`.
+The paired application diagnostics have SHA-256
+`9844d77e33f0f7a8a2e222d5ee8c32816b1d2acd9fb1f3abcdea621a554eb76c`,
+and the strict admission summary has SHA-256
+`4e495ab06071b6b7f94e864cf664f43eaf3fab815cf964482eaec6f306d6069a`.
+The application ledger exactly partitions 1,710,000 attempts into 14,551
+admissions and 1,695,449 NSDP blocks. The application diagnostics record zero
+destination, discovery, empty-topology, or gateway-route blocks, including no
+discovery, topology, or gateway-route blocks after traffic starts. NWK
+decisions are:
 
 | NWK decision | Count |
 | --- | ---: |
-| Admitted | 18,331 |
-| `neighbor_capacity` | 1,204,924 |
-| `global_capacity` | 4,152 |
+| Admitted | 18,713 |
+| `neighbor_capacity` | 1,073,828 |
+| `global_capacity` | 4,057 |
 | `no_route` | 0 |
 
-The per-neighbor holds are 592,227 on `2>4`, 268,430 on `4>5`, 242,476 on
-`8>2`, 60,138 on `7>8`, 40,620 on `5>1`, and 1,033 on `3>1`. Those hold counts
+The per-neighbor holds are 433,191 on `2>4`, 295,107 on `4>5`, 228,055 on
+`8>2`, 59,749 on `7>8`, 56,640 on `5>1`, and 1,086 on `3>1`. Those hold counts
 are repeated queue-scan decisions rather than unique packets or time-weighted
-occupancy. HOP completion counts are 14,892 ACK, 2,162 DACK, and 1,244 final
-`no_ack`; 2,156 delayed DACK-capacity holds expire.
+occupancy. There are zero exact-same-time duplicate NWK hold scans in this
+trace after removing the route-, admission-, and discovery-triggered NWK-local
+wakes. HOP also records 18,713 admissions. Completion counts are 15,321 ACK,
+2,076 DACK, and 1,281 final `no_ack`; 2,070 delayed DACK-capacity holds expire.
 
-Receiver feedback contains 15,747 ACK and 2,161 DACK decisions. Every DACK
+Receiver feedback contains 16,200 ACK and 2,067 DACK decisions. Every DACK
 uses a pre-enqueue NSDP count of at least 16: both the analyzer's pre-limit
 finding count and its 15-to-16 DACK boundary count are zero. The strict
-packet-path result also passes with 13,854 valid deliveries, 712 valid
-incomplete prefixes, and zero invalid packets. The joined inventory classifies
-those prefixes as 220 open in NWK, 443 completed by final `no_ack`, 32 open
-resends, 12 completed ACKs, and 5 completed DACKs.
+packet-path result also passes with 13,817 valid deliveries, 734 valid
+incomplete prefixes, zero invalid packets, and zero route-context mismatches.
+The joined inventory classifies those prefixes as 201 open in NWK, 471
+completed by final `no_ack`, 34 open resends, 24 completed ACKs, 3 completed
+DACKs, and 1 packet with no NWK observation.
+
+The convergence trace records node 7 admitting direct neighbor 8 at
+`88.848492442 s` with one-hop cost 7,450, followed at the same timestamp by
+transit-candidate updates for destinations 2, 4, 5, and 1. The resulting
+gateway route uses next hop 8, normalized path `8>2>4>5>1`, and cost 37,250.
+This timestamp is an exact ns-3 convergence diagnostic only; without a
+corresponding chronological OPNET event export it is not convergence-time
+parity evidence.
 
 The pre-fix trace contained 3,228,471 events with SHA-256
 `cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
@@ -424,8 +441,11 @@ requests an NWK queue wake, even when the expired frame carries no NSDP or
 routing metadata.
 
 HOP owns one remote NWK-wake event distinct from NWK's local queue-check event.
-It runs one `TIC` after the first request, coalesces only with another pending
-HOP-origin request, and is not postponed by later requests. Every readable,
+NWK-owned queue wakes now come only from application enqueue and relay
+enqueue; route changes, route admission, and discovery transitions do not arm
+an NWK-local wake. HOP-origin generic wakes retain their source ordering: they
+run one `TIC` after the first request, coalesce only with another pending
+HOP-origin request, and are not postponed by later requests. Every readable,
 locally addressed ACK or DACK requests this wake after feedback processing,
 including unknown, stale, duplicate, zero-bit cumulative, and other no-op
 feedback. A readable ACK/DACK for another HOP destination does not. Final
@@ -572,7 +592,7 @@ not parity passes:
 | --- | ---: | --- | --- | --- |
 | `blue_radio_campus-2_nodes` | 800 | All 100 buckets | Sent 16.4417 vs 16.3597 packet/s; received 16.4373 vs 16.3474 packet/s; delay 1.45125 vs 1.42737 s | 696 numeric mismatches; no missing or extra points |
 | `blue_radio_campus-hidden_nodes_symmetrical` | 800 | All 100 buckets | Sent 12.1707 vs 12.7283 packet/s; received 11.4370 vs 12.0342 packet/s; delay 9.17976 vs 8.40223 s | 700 numeric mismatches; no missing or extra points |
-| `blue_radio_campus-multihop` | 800 | All 95 measured buckets; 5 OPNET no-sample buckets preserved | Sent 2.0120 vs 2.42767 packet/s; received 1.90167 vs 2.30900 packet/s; delay 112.748 vs 79.9450 s | 665 numeric mismatches; no missing or extra points; 20 missing values skipped |
+| `blue_radio_campus-multihop` | 800 | All 95 measured buckets; 5 OPNET no-sample buckets preserved | Sent 2.0120 vs 2.42517 packet/s; received 1.90167 vs 2.30283 packet/s; delay 112.748 vs 74.9794 s | 665 numeric mismatches; no missing or extra points; 20 missing values skipped |
 
 These failures were not hidden by widening tolerances. The exact packet-size
 matches validate vector decoding and the source-level modeled size, while the
@@ -592,13 +612,13 @@ values were missing. For bucket ends strictly after 300 seconds, ns-3 is
 Tx size, and 12.39% high in MAC Tx queuing delay. Because MAC queuing delay is
 higher while end-to-end delay is lower, the path ledger remains the stronger
 diagnostic boundary. It finds one stable loop-free route per source, zero
-route-context mismatches, 13,854 valid deliveries, and 712 valid incomplete
-prefixes. Its packet-weighted 79.7413 seconds decomposes exactly into 66.7034
-seconds of NWK residence and 13.0380 seconds of post-NWK leg service/transit.
+route-context mismatches, 13,817 valid deliveries, and 734 valid incomplete
+prefixes. Its packet-weighted 74.7152 seconds decomposes exactly into 61.7828
+seconds of NWK residence and 12.9324 seconds of post-NWK leg service/transit.
 
-The completed admission ledger records 1,204,924 per-neighbor holds and 4,152
-global holds, led by 592,227 on `2>4`, 268,430 on `4>5`, and 242,476 on
-`8>2`, with no no-route holds. All 2,161 receiver DACK decisions use a
+The completed admission ledger records 1,073,828 per-neighbor holds and 4,057
+global holds, led by 433,191 on `2>4`, 295,107 on `4>5`, and 228,055 on
+`8>2`, with no no-route holds. All 2,067 receiver DACK decisions use a
 pre-enqueue NSDP count of at least 16. Strict admission analysis now passes
 with no invalid legs or global issues; the retained pre-fix trace remains the
 evidence for the corrected 138 early-DACK decisions.

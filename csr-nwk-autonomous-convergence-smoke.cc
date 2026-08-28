@@ -260,13 +260,15 @@ main ()
   // one-hop SNMP START/DONE messages must start the remaining nodes in order.
   nwk0->ScheduleGatewayStartupDiscovery ();
 
-  Simulator::Schedule (Seconds (40.0),
+  // Three serialized 15-second discovery windows begin with the gateway at
+  // 10 seconds, then hand off gateway -> relay -> destination through SNMP.
+  Simulator::Schedule (Seconds (70.0),
                        &CheckConvergence,
                        nwk0,
                        nwk1,
                        nwk2);
 
-  Simulator::Stop (Seconds (55.0));
+  Simulator::Stop (Seconds (85.0));
   Simulator::Run ();
 
   CheckFinalState (nwk0, nwk1, hop0, hop1);

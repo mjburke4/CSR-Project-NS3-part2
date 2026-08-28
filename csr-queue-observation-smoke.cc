@@ -824,15 +824,18 @@ RequireNwkSizeAndDelaySamples (const std::vector<TraceRow> &rows,
 }
 
 void
-TestDirectHeldThenReleasedPath ()
+TestDirectHeldUntilIndependentWakePath ()
 {
   constexpr CsrNodeId sourceNode = 101;
   constexpr CsrNodeId destinationNode = 102;
+  constexpr CsrNodeId wakeDestinationNode = 103;
   constexpr uint64_t appSequence = 7001;
+  constexpr uint64_t wakeSequence = 7003;
   constexpr uint32_t payloadBytes = 24;
   const Time routeLearnTime = MilliSeconds (1);
+  const Time wakeTriggerTime = MilliSeconds (2);
   const double expectedResidence =
-    (routeLearnTime + NwkTic ()).GetSeconds ();
+    (wakeTriggerTime + NwkTic ()).GetSeconds ();
 
   TraceFile trace ("nwk-direct-held");
 
@@ -856,6 +859,12 @@ TestDirectHeldThenReleasedPath ()
                    destinationNode);
   sourceNwk->SetNodeType (CsrNodeType::Gateway);
   destinationNwk->SetNodeType (CsrNodeType::Routable);
+  sourceNwk->AddStaticRouteWithPathloss (
+    wakeDestinationNode,
+    wakeDestinationNode,
+    70.0,
+    true,
+    static_cast<uint8_t> (CsrNodeType::Routable));
 
   g_nwkDeliveryCount = 0;
   g_expectedNwkSource = sourceNode;
@@ -879,18 +888,59 @@ TestDirectHeldThenReleasedPath ()
                            70.0,
                            30.0);
                        });
+  Simulator::Schedule (routeLearnTime + MicroSeconds (1),
+                       [sourceNwk, sourceHop, destinationNode] () {
+                         uint32_t routeCost = 0;
+                         Require (sourceNwk->GetSelectedRouteCost (
+                                    destinationNode, routeCost),
+                                  "direct route was not selected synchronously");
+                         Require (sourceNwk->GetNwkQueueSize () == 1,
+                                  "route receipt incorrectly woke the NWK queue");
+                         Require (sourceHop->GetPendingDataCount () == 0,
+                                  "route receipt moved held DATA into HOP");
+                         Require (g_nwkDeliveryCount == 0,
+                                  "route receipt delivered held DATA without a queue wake");
+                       });
+  Simulator::Schedule (wakeTriggerTime,
+                       [sourceNwk,
+                        wakeDestinationNode,
+                        wakeSequence] () {
+                         sourceNwk->Send (
+                           wakeDestinationNode,
+                           0,
+                           BuildTaggedPayload (16, wakeSequence),
+                           true);
+                       });
+  Simulator::Schedule (wakeTriggerTime + MicroSeconds (1),
+                       [sourceNwk,
+                        sourceHop,
+                        destinationNode,
+                        wakeDestinationNode] () {
+                         Require (sourceNwk->GetNwkQueueSize () == 0,
+                                  "independent local enqueue did not wake the NWK queue");
+                         Require (sourceHop->GetOutstandingDataCount (
+                                    destinationNode) == 1,
+                                  "independent wake did not release held direct DATA");
+                         Require (sourceHop->GetOutstandingDataCount (
+                                    wakeDestinationNode) == 1,
+                                  "independent wake did not admit its trigger DATA");
+                       });
 
   Simulator::Stop (Seconds (12));
   Simulator::Run ();
   Require (g_nwkDeliveryCount == 1,
-           "held direct packet was not delivered exactly once after route learning");
+           "held direct packet was not delivered exactly once after an independent wake");
 
   CloseDifferentialTraceCsv ();
   std::vector<TraceRow> rows = ReadTrace (trace.Path ());
   std::vector<TraceRow> enqueues =
     RowsForEventAndSequence (rows, "nwk_enqueue", appSequence);
+  std::vector<TraceRow> wakeEnqueues =
+    RowsForEventAndSequence (rows, "nwk_enqueue", wakeSequence);
   std::vector<TraceRow> forwards =
     RowsForEventAndSequence (rows, "nwk_forward", appSequence);
+  std::vector<TraceRow> wakeForwards =
+    RowsForEventAndSequence (rows, "nwk_forward", wakeSequence);
   std::vector<TraceRow> deliveries =
     RowsForEventAndSequence (rows, "nwk_delivery", appSequence);
   std::vector<TraceRow> feedback =
@@ -903,13 +953,36 @@ TestDirectHeldThenReleasedPath ()
     RowsForStatisticAtNode (rows, CSR_STAT_NWK_QUEUE_DELAY, sourceNode);
 
   Require (enqueues.size () == 1 &&
+             wakeEnqueues.size () == 1 &&
              forwards.size () == 1 &&
+             wakeForwards.size () == 1 &&
              deliveries.size () == 1 &&
              feedback.size () == 1 &&
              routeChanges.size () == 1,
-           "direct lifecycle did not emit one enqueue/route/forward/delivery/feedback chain");
-  RequireNwkSizeAndDelaySamples (
-    rows, sourceNode, expectedResidence, "held direct packet");
+           "independent-wake lifecycle did not emit its correlated packet chains");
+  Require (sizes.size () == 4 &&
+             NearlyEqual (SampleValue (sizes[0]), 1.0) &&
+             NearlyEqual (SampleValue (sizes[1]), 2.0) &&
+             NearlyEqual (SampleValue (sizes[2]), 1.0) &&
+             NearlyEqual (SampleValue (sizes[3]), 0.0),
+           "independent wake did not emit source-exact NWK sizes [1,2,1,0]");
+  Require (delays.size () == 2 &&
+             NearlyEqual (SampleValue (delays[0]),
+                          expectedResidence,
+                          1e-12) &&
+             NearlyEqual (SampleValue (delays[1]),
+                          NwkTic ().GetSeconds (),
+                          1e-12),
+           "independent wake did not preserve held and trigger residence times");
+  Require (sizes[2].eventIndex < delays[0].eventIndex &&
+             sizes[3].eventIndex < delays[1].eventIndex &&
+             NearlyEqual (sizes[2].timeSeconds,
+                          delays[0].timeSeconds,
+                          1e-12) &&
+             NearlyEqual (sizes[3].timeSeconds,
+                          delays[1].timeSeconds,
+                          1e-12),
+           "independent wake did not write each post-removal size before delay");
 
   const uint32_t networkBytes =
     payloadBytes + CsrNetHeader ().GetSerializedSize ();
@@ -955,8 +1028,13 @@ TestDirectHeldThenReleasedPath ()
   Require (sizes[0].eventIndex < enqueues[0].eventIndex &&
              enqueues[0].eventIndex < routeChanges[0].eventIndex &&
              routeChanges[0].eventIndex < sizes[1].eventIndex &&
-             sizes[1].eventIndex < delays[0].eventIndex &&
+             sizes[1].eventIndex < wakeEnqueues[0].eventIndex &&
+             wakeEnqueues[0].eventIndex < sizes[2].eventIndex &&
+             sizes[2].eventIndex < delays[0].eventIndex &&
              delays[0].eventIndex < forwards[0].eventIndex &&
+             forwards[0].eventIndex < sizes[3].eventIndex &&
+             sizes[3].eventIndex < delays[1].eventIndex &&
+             delays[1].eventIndex < wakeForwards[0].eventIndex &&
              forwards[0].eventIndex < deliveries[0].eventIndex,
            "direct NWK lifecycle is not in source/event order");
   Require (deliveries[0].eventIndex < feedback[0].eventIndex,
@@ -964,7 +1042,7 @@ TestDirectHeldThenReleasedPath ()
   Require (NearlyEqual (forwards[0].timeSeconds,
                         expectedResidence,
                         1e-12),
-           "direct packet was not released one TIC after route learning");
+           "direct packet was not released one TIC after the independent wake");
 
   Simulator::Destroy ();
 }
@@ -2051,7 +2129,7 @@ main ()
       TestMacSelectionSizeDelayOrdering ();
       TestAckAdmissionAndOverflowSampling ();
       TestAckRemovalSampling ();
-      TestDirectHeldThenReleasedPath ();
+      TestDirectHeldUntilIndependentWakePath ();
       TestForcedTwoHopPath ();
       TestAdmissionLedgerNoRouteAndSuccessfulAdmission ();
       TestApplicationNsdpAdmissionBoundary ();

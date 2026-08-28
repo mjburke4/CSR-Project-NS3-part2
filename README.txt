@@ -114,8 +114,21 @@ Gateway-driven discovery/SNMP convergence test:
 4. Expected: PASS: gateway-driven discovery/SNMP convergence test
 
 This scenario starts only the Gateway at the legacy 10-second offset. It
-checks the three-broadcast local-discovery cadence, ordered one-hop SNMP
-START/DONE handoffs, autonomous ARL convergence, and two-hop DATA delivery.
+checks three serialized 15-second local-discovery windows, ordered one-hop
+SNMP START/DONE handoffs, autonomous ARL convergence, and two-hop DATA
+delivery.
+
+OPNET discovery cadence/completion and destination-order test:
+1. Copy csr-nwk-discovery-ordering-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-nwk-discovery-ordering-smoke
+3. Run: ./ns3 run csr-nwk-discovery-ordering-smoke
+4. Expected: PASS: OPNET discovery cadence/completion and destination order
+
+This locks Gateway discovery broadcasts at 10, 15, and 20 seconds, completion
+on the fourth discovery tick at 25 seconds, and newest-first logical
+destination handoff. A reverse-only destination must emit SNMP START through
+its selected reverse HOP neighbor while retaining the original final SNMP
+destination.
 
 Exact 24-bit node-ID wire serialization test:
 1. Copy csr-wire-format-smoke.cc to ns-3-dev/scratch/
