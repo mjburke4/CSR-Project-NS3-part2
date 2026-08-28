@@ -6,6 +6,52 @@
 #include <cmath>
 #include <set>
 #include <algorithm>
+#include <sstream>
+
+
+inline std::string
+CsrNwkRouteTraceDetail (
+  uint8_t numHop,
+  CsrNodeId nextHop,
+  CsrNodeId destination,
+  const std::vector<CsrNodeId> &path)
+{
+  std::vector<CsrNodeId> effectivePath;
+  effectivePath.reserve (numHop);
+  for (CsrNodeId pathNode : path)
+    {
+      if (effectivePath.size () >= numHop)
+        {
+          break;
+        }
+      effectivePath.push_back (pathNode);
+    }
+  if (effectivePath.empty () && numHop > 0)
+    {
+      effectivePath.push_back (nextHop);
+    }
+  // Static and older test routes can store only their next hop.  Match the
+  // ARL serialization rule: trace exactly numHop nodes and end any partial
+  // path at the selected destination.
+  while (effectivePath.size () < numHop)
+    {
+      effectivePath.push_back (destination);
+    }
+
+  std::ostringstream detail;
+  detail << "num_hop="
+         << static_cast<unsigned> (numHop)
+         << ";path=";
+  for (std::size_t index = 0; index < effectivePath.size (); ++index)
+    {
+      if (index != 0)
+        {
+          detail << '>';
+        }
+      detail << effectivePath[index];
+    }
+  return detail.str ();
+}
 
 
 class CsrNetLayer : public Object
@@ -965,6 +1011,8 @@ public:
     // OPNET does not numerically sort positive DSCP values here.  Every
     // positive-DSCP arrival is inserted at the head, while DSCP zero is
     // appended at the tail.  This intentionally makes positive traffic LIFO.
+    e.enqueueTime = Simulator::Now ();
+    e.locallyOriginated = true;
     if (dscp > 0)
       {
         m_nwkQueue.push_front (e);
@@ -973,6 +1021,29 @@ public:
       {
         m_nwkQueue.push_back (e);
       }
+
+    // br_nwk.proc_app_pk() writes the post-insertion queue size to the
+    // global discrete statistic.  Keep this sample source-ordered.
+    WriteDifferentialStatisticSample (
+      m_nodeId,
+      CSR_STAT_NWK_QUEUE_SIZE,
+      static_cast<double> (m_nwkQueue.size ()));
+
+    CsrDifferentialTraceEvent enqueueEvent;
+    enqueueEvent.event = "nwk_enqueue";
+    enqueueEvent.node = CsrTraceInteger (m_nodeId);
+    enqueueEvent.packetType = "data";
+    enqueueEvent.source = CsrTraceInteger (e.nwkSrc);
+    enqueueEvent.destination = CsrTraceInteger (e.nwkDst);
+    CsrDifferentialAppTag appTag;
+    if (e.payload->PeekPacketTag (appTag))
+      {
+        enqueueEvent.sequence = CsrTraceInteger (appTag.GetSequence ());
+      }
+    enqueueEvent.sizeBytes = CsrTraceInteger (e.payload->GetSize ());
+    enqueueEvent.success = "1";
+    enqueueEvent.reason = "local";
+    WriteDifferentialTrace (enqueueEvent);
 
     ScheduleCheckNwkQueue ();
   }
@@ -1100,6 +1171,9 @@ public:
 
         // Match proc_hop_pk(): all positive DSCP relay traffic goes to the
         // head, and best-effort traffic goes to the tail.
+        e.enqueueTime = Simulator::Now ();
+        e.ingressPeer = hopSrc;
+        e.locallyOriginated = false;
         if (dscp > 0)
           {
             m_nwkQueue.push_front (e);
@@ -1108,6 +1182,30 @@ public:
           {
             m_nwkQueue.push_back (e);
           }
+
+        // br_nwk.proc_hop_pk() writes the post-insertion queue size to the
+        // global discrete statistic for relayed DATA as well.
+        WriteDifferentialStatisticSample (
+          m_nodeId,
+          CSR_STAT_NWK_QUEUE_SIZE,
+          static_cast<double> (m_nwkQueue.size ()));
+
+        CsrDifferentialTraceEvent enqueueEvent;
+        enqueueEvent.event = "nwk_enqueue";
+        enqueueEvent.node = CsrTraceInteger (m_nodeId);
+        enqueueEvent.peer = CsrTraceInteger (hopSrc);
+        enqueueEvent.packetType = "data";
+        enqueueEvent.source = CsrTraceInteger (e.nwkSrc);
+        enqueueEvent.destination = CsrTraceInteger (e.nwkDst);
+        CsrDifferentialAppTag appTag;
+        if (e.payload->PeekPacketTag (appTag))
+          {
+            enqueueEvent.sequence = CsrTraceInteger (appTag.GetSequence ());
+          }
+        enqueueEvent.sizeBytes = CsrTraceInteger (e.payload->GetSize ());
+        enqueueEvent.success = "1";
+        enqueueEvent.reason = "relay";
+        WriteDifferentialTrace (enqueueEvent);
 
         ScheduleCheckNwkQueue ();
       }
@@ -1628,6 +1726,11 @@ private:
     uint8_t    dscp;
     bool       ack;
     Ptr<Packet> payload;
+    // Observation-only metadata.  These fields never enter packet headers or
+    // alter queue ordering, route selection, or transmission timing.
+    Time enqueueTime {Seconds (0.0)};
+    CsrNodeId ingressPeer {CSR_BROADCAST_ID};
+    bool locallyOriginated {false};
   };
 
   struct NwkNeighborEntry
@@ -1826,7 +1929,12 @@ private:
           }
 
         CsrNodeId hopDest;
-        if (!LookupNextHop (it->nwkDst, hopDest))
+        const RouteEntry *selectedRoute = nullptr;
+        bool usedReverseRoute = false;
+        if (!LookupNextHop (it->nwkDst,
+                            hopDest,
+                            &selectedRoute,
+                            &usedReverseRoute))
           {
             std::cout << "[NWK " << m_nodeId
                       << "] No route to nwkDst="
@@ -1847,6 +1955,63 @@ private:
         NwkQueueEntry entry = *it;
         it = m_nwkQueue.erase (it);
 
+        // Match br_nwk.check_nwk_queue(): after a successful removal, write
+        // the post-removal size and that packet's NWK residence before HOP
+        // admission.  enqueueTime is observation-only and never serialized.
+        WriteDifferentialStatisticSample (
+          m_nodeId,
+          CSR_STAT_NWK_QUEUE_SIZE,
+          static_cast<double> (m_nwkQueue.size ()));
+        const double queueDelaySeconds =
+          (Simulator::Now () - entry.enqueueTime).GetSeconds ();
+        WriteDifferentialStatisticSample (
+          m_nodeId,
+          CSR_STAT_NWK_QUEUE_DELAY,
+          queueDelaySeconds);
+
+        if (IsDifferentialTraceOpen ())
+          {
+            CsrDifferentialTraceEvent forwardEvent;
+            forwardEvent.event = "nwk_forward";
+            forwardEvent.node = CsrTraceInteger (m_nodeId);
+            if (!entry.locallyOriginated &&
+                entry.ingressPeer != CSR_BROADCAST_ID)
+              {
+                forwardEvent.peer = CsrTraceInteger (entry.ingressPeer);
+              }
+            forwardEvent.packetType = "data";
+            forwardEvent.source = CsrTraceInteger (entry.nwkSrc);
+            forwardEvent.destination = CsrTraceInteger (entry.nwkDst);
+            CsrDifferentialAppTag appTag;
+            if (entry.payload->PeekPacketTag (appTag))
+              {
+                forwardEvent.sequence = CsrTraceInteger (appTag.GetSequence ());
+              }
+            forwardEvent.sizeBytes = CsrTraceInteger (entry.payload->GetSize ());
+            forwardEvent.success = "1";
+            forwardEvent.reason =
+              entry.locallyOriginated ? "local" : "relay";
+            forwardEvent.nextHop = CsrTraceInteger (hopDest);
+
+            // Reverse-route decisions have no selected RouteEntry cost, even
+            // when a dormant forward candidate exists.
+            if (selectedRoute != nullptr)
+              {
+                forwardEvent.routeCost =
+                  CsrTraceInteger (selectedRoute->cost);
+                forwardEvent.detail = CsrNwkRouteTraceDetail (
+                  selectedRoute->numHop,
+                  selectedRoute->nextHop,
+                  selectedRoute->nwkDst,
+                  selectedRoute->path);
+              }
+            else if (usedReverseRoute)
+              {
+                forwardEvent.detail = "route=reverse";
+              }
+            WriteDifferentialTrace (forwardEvent);
+          }
+
         m_hop->SendData (
           hopDest,
           entry.dscp,
@@ -1858,8 +2023,19 @@ private:
   bool
   LookupNextHop (
     CsrNodeId nwkDst,
-    CsrNodeId &nextHopOut)
+    CsrNodeId &nextHopOut,
+    const RouteEntry **selectedRouteOut = nullptr,
+    bool *usedReverseRouteOut = nullptr)
   {
+    if (selectedRouteOut != nullptr)
+      {
+        *selectedRouteOut = nullptr;
+      }
+    if (usedReverseRouteOut != nullptr)
+      {
+        *usedReverseRouteOut = false;
+      }
+
     const RouteEntry *best =
       FindBestRoute (
         nwkDst);
@@ -1874,6 +2050,11 @@ private:
       {
         nextHopOut =
           best->nextHop;
+
+        if (selectedRouteOut != nullptr)
+          {
+            *selectedRouteOut = best;
+          }
 
         return true;
       }
@@ -1912,6 +2093,11 @@ private:
             nextHopOut =
               reverseHop;
 
+            if (usedReverseRouteOut != nullptr)
+              {
+                *usedReverseRouteOut = true;
+              }
+
             std::cout << "[NWK " << m_nodeId
                       << "] Using reverse route"
                       << " dst=" << nwkDst
@@ -1939,6 +2125,11 @@ private:
       {
         nextHopOut =
           best->nextHop;
+
+        if (selectedRouteOut != nullptr)
+          {
+            *selectedRouteOut = best;
+          }
 
         return true;
       }
@@ -8547,6 +8738,11 @@ CsrNetLayer::MarkSelectedRouteChanged (
     {
       traceEvent.nextHop = CsrTraceInteger (selectedRoute->nextHop);
       traceEvent.routeCost = CsrTraceInteger (selectedRoute->cost);
+      traceEvent.detail = CsrNwkRouteTraceDetail (
+        selectedRoute->numHop,
+        selectedRoute->nextHop,
+        selectedRoute->nwkDst,
+        selectedRoute->path);
     }
   WriteDifferentialTrace (traceEvent);
 

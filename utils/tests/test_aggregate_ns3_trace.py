@@ -340,6 +340,106 @@ class AggregateNs3TraceTests(unittest.TestCase):
             self.assertEqual(detail["in_window_sample_count"], 0)
             self.assertEqual(detail["excluded_at_stop_count"], 1)
 
+    def test_pools_source_exact_nwk_queue_size_and_delay_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(
+                        0,
+                        0,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.NWK_QUEUE_SIZE,
+                        value="0",
+                    ),
+                    trace_row(
+                        1,
+                        1,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.NWK_QUEUE_DELAY,
+                        value="0.25",
+                    ),
+                    trace_row(
+                        2,
+                        2,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="2",
+                        statistic=aggregate.NWK_QUEUE_SIZE,
+                        value="4",
+                    ),
+                    trace_row(
+                        3,
+                        4,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="2",
+                        statistic=aggregate.NWK_QUEUE_DELAY,
+                        value="0.75",
+                    ),
+                    trace_row(
+                        4,
+                        5,
+                        aggregate.STATISTIC_SAMPLE_EVENT,
+                        node="1",
+                        statistic=aggregate.NWK_QUEUE_SIZE,
+                        value="3",
+                    ),
+                ],
+            )
+
+            rows, provenance = aggregate.derive_series(
+                trace, "nwk-queue-samples", 5.0, 10.0
+            )
+            values = {
+                (row["statistic"], float(row["time_s"])): row for row in rows
+            }
+
+            self.assertEqual(len(rows), 22)
+            self.assertEqual(values[(aggregate.NWK_QUEUE_SIZE, 5.0)]["value"], "2")
+            self.assertEqual(values[(aggregate.NWK_QUEUE_SIZE, 10.0)]["value"], "3")
+            self.assertEqual(values[(aggregate.NWK_QUEUE_DELAY, 5.0)]["value"], "0.5")
+            self.assertEqual(
+                values[(aggregate.NWK_QUEUE_DELAY, 10.0)]["value_status"],
+                "missing",
+            )
+            self.assertEqual(
+                values[(aggregate.NWK_QUEUE_SIZE, 5.0)]["unit"], "packets"
+            )
+            self.assertEqual(values[(aggregate.NWK_QUEUE_DELAY, 5.0)]["unit"], "s")
+            self.assertEqual(
+                values[(aggregate.NWK_QUEUE_SIZE, 5.0)]["aggregation"],
+                "bucket_sample_mean",
+            )
+            self.assertEqual(
+                values[(aggregate.NWK_QUEUE_DELAY, 5.0)]["aggregation"],
+                "bucket_sample_mean",
+            )
+
+            details = {
+                record["statistic"]: record
+                for record in provenance["statistic_sample_derivation"][
+                    "active_statistics"
+                ]
+            }
+            self.assertTrue(
+                details[aggregate.NWK_QUEUE_SIZE]["integral_samples_required"]
+            )
+            self.assertFalse(
+                details[aggregate.NWK_QUEUE_DELAY]["integral_samples_required"]
+            )
+            self.assertEqual(
+                details[aggregate.NWK_QUEUE_SIZE]["samples_by_node"],
+                {"1": 2, "2": 1},
+            )
+            self.assertEqual(
+                details[aggregate.NWK_QUEUE_DELAY][
+                    "missing_sample_mean_bucket_ends_s"
+                ],
+                [10.0],
+            )
+
     def test_rejects_malformed_or_unsupported_statistic_samples(self) -> None:
         cases = (
             ({"node": "1", "statistic": "MAC.Unknown", "value": "1"}, "unsupported"),
@@ -372,6 +472,30 @@ class AggregateNs3TraceTests(unittest.TestCase):
                     "node": "1",
                     "statistic": aggregate.MAC_TX_QUEUE_DELAY,
                     "value": "nan",
+                },
+                "finite and nonnegative",
+            ),
+            (
+                {
+                    "node": "1",
+                    "statistic": aggregate.NWK_QUEUE_SIZE,
+                    "value": "1.5",
+                },
+                "integer packet count",
+            ),
+            (
+                {
+                    "node": "1",
+                    "statistic": aggregate.NWK_QUEUE_DELAY,
+                    "value": "-0.1",
+                },
+                "finite and nonnegative",
+            ),
+            (
+                {
+                    "node": "1",
+                    "statistic": aggregate.NWK_QUEUE_DELAY,
+                    "value": "inf",
                 },
                 "finite and nonnegative",
             ),

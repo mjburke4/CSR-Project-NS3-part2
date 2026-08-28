@@ -403,8 +403,18 @@ HOP resend size, MAC ACK size, MAC Tx size, and MAC Tx queuing delay. It
 compares 394 numeric pairs and preserves six no-sample cases. For bucket ends
 strictly after 300 seconds, ns-3 is 16.10% high in HOP resend size, 12.57% low
 in ACK size, 13.66% high in Tx size, and 8.85% high in Tx queuing delay. MAC
-queuing delay is therefore higher while end-to-end delay is lower, moving the
-next isolation boundary to route/path identity and NWK/HOP residence.
+queuing delay is therefore higher while end-to-end delay is lower, so the
+route/path and NWK-residence ledger was added before changing service timing.
+
+That ledger validates 13,740 complete deliveries and 1,000 structurally valid
+packets still in flight at the exclusive 6,000-second stop, with no invalid
+chains, route-context mismatches, loops, or end-to-end decomposition errors.
+Every source uses one stable delivered path. The packet-weighted 91.5210-second
+mean decomposes exactly into 78.4605 seconds of NWK residence and 13.0605
+seconds of post-NWK leg service/transit. Packets taking more than one hop are
+only 9.68% of deliveries but contribute 85.79% of cumulative delay. These are
+ns-3 isolation measurements, not OPNET numeric parity: the recovered `*.ov`
+results do not contain NWK queue vectors or packet-path event order.
 
 The hidden-node ECC-drop probe also exposes a deliberately unresolved identity
 mapping: Modeler records 10.84105
@@ -431,17 +441,18 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Add source-ordered delivered-hop/path, NWK queue/admission, and HOP/NWK
-   residence observers for the recovered multihop case. The completed queue
-   comparison puts ns-3 16.10% high in HOP resend size, 13.66% high in MAC Tx
-   size, and 8.85% high in MAC Tx queuing delay after startup, even though its
-   end-to-end delay is 18.93% low; the remaining delay is therefore not a
-   simple fast-MAC-service residual.
-2. Compare route convergence, path selection, and application
-   source/destination admission against the recovered route tables and
-   executable-era runtime semantics. Keep ECC/prior-stage rejection accounting
-   as a separate statistic-identity problem rather than folding it into queue
-   calibration.
+1. Add a source-ordered application/NWK/HOP admission-state ledger. Correlate
+   every send attempt, admission, hold, and block with gateway-route state,
+   NSDP count/limit, global HOP capacity, per-neighbor `flow_ctrl_spad`,
+   ACK/DACK completion, and the queue receiving the packet. The completed path
+   ledger localizes the residual to admission and backlog on the far multihop
+   chain rather than route churn or another MAC service-rate adjustment.
+2. Compare route convergence and admission semantics against any newer
+   `br_nwk.pr.c`, recovered runtime source, or historical evidence that becomes
+   available. In particular, verify the node-7 five-hop gateway route selected
+   at 386.106492 seconds and the surrounding discovery sequence. Keep
+   ECC/prior-stage rejection accounting as a separate statistic-identity
+   problem rather than folding it into queue calibration.
 3. When licensed Modeler access is available, execute the prepared
    reservation/collision case, retain its CSV and provenance manifest,
    validate it, and run the event-order differential comparison.
@@ -485,7 +496,8 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 All 32 CSR executable targets build on this audit revision. The 30 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (32/32). The focused Python suite additionally covers the
+workflow pass (32/32). All 122 focused Python tests pass; the suite additionally
+covers the packet-path analyzer as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
 aggregate workflow. The importer decodes all 12 recovered campus network
@@ -519,7 +531,12 @@ SYNC/Track activation, real HOP retry reuse, and delayed-packing state gates.
 The queue-observation test adds exact source write-site and ordering checks for
 HOP enqueue/ACK removal, MAC data admission/selection delay, ACK duplicate and
 cumulative-update suppression, unchanged full-queue rejection, and
-one-plus-four resend-limit removal.
+one-plus-four resend-limit removal. It now also exercises the real compact
+aggregate writer, direct DATA held until route availability, a forced two-hop
+path, and exact NWK queue-size and residence-delay samples at each forwarding
+node. The strict packet-path analyzer validates delivered and in-flight event
+grammars, route context, next-hop continuity, loops, and the end-to-end
+residence/transit decomposition.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and
 same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table

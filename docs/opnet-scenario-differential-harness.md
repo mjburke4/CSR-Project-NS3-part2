@@ -222,12 +222,13 @@ and simulation timestamp. Its current observation points are:
 - OTA transmission starts;
 - PHY/MAC receive acceptance and rejection, including closure, receiver state,
   path loss, received power, noise, SNR, JSR, and interval error counts;
-- NWK delivery and route changes;
+- NWK enqueue, actual next-hop forwarding, delivery, and selected-route
+  changes, including route cost, hop count, and normalized path;
 - packet identity, rate, modeled size, sequence, and security count wherever
   that information exists; and
-- source-ordered discrete HOP resend-size, MAC ACK-size, MAC Tx-size, and MAC
-  Tx queuing-delay samples, encoded as `statistic_sample` rows with `node`,
-  `statistic`, and `value` fields.
+- source-ordered discrete NWK queue-size/delay, HOP resend-size, MAC ACK-size,
+  MAC Tx-size, and MAC Tx queuing-delay samples, encoded as
+  `statistic_sample` rows with `node`, `statistic`, and `value` fields.
 
 The trace writer contains observation only. Opening or closing it does not
 change queueing, random draws, packet delivery, or simulator event scheduling.
@@ -235,10 +236,56 @@ Controlled reservation fields in a scenario are separate, explicit test
 inputs and are disabled in ordinary imported scenarios.
 
 `statistic_sample` is an additive v1 row type using `node`, `statistic`, and
-`value`. Recognized samples dynamically activate the four queue series in the
+`value`. Recognized samples dynamically activate the six queue series in the
 aggregate builder; legacy traces without those columns retain the original
 nine-statistic output. Strict aggregation requires finite nonnegative values
-and integral queue-size samples.
+and integral queue-size samples. Aggregate-only v1 traces preserve the
+original 12 columns in their original order and append `peer`, `next_hop`,
+`route_cost`, and `detail`; repository readers are name-based. The compact
+writer now retains `nwk_enqueue`, `nwk_forward`, and `route_change` in addition
+to its earlier aggregate events. Readers that require an exact header width or
+an unchanged event set must account for those additions.
+
+### Packet-path and NWK-residence ledger
+
+`analyze-ns3-packet-paths.py` consumes either the full or compact v1 header and
+correlates exact `(src,dst,sequence)` lifecycles. For a delivered packet it
+requires:
+
+```text
+app_send,(nwk_enqueue,nwk_forward)+,nwk_delivery
+```
+
+It rejects duplicate source admission, destination enqueue, loops, node or
+next-hop discontinuities, negative intervals, malformed delivered chains, and
+end-to-end decomposition errors. A simulation may legitimately stop with a
+packet queued or handed to HOP, so a structurally valid undelivered prefix is
+reported but does not fail strict mode.
+
+```bash
+python3 utils/analyze-ns3-packet-paths.py ns3-trace.csv \
+  --summary-json packet-path-summary.json \
+  --packet-csv packet-ledger.csv \
+  --startup-time 300 \
+  --bucket-width 60 \
+  --stop-time 6000 \
+  --strict
+```
+
+The JSON report contains overall and post-startup cohorts, flow/path
+distributions, per-node NWK residence, route-context checks, exact 60-second
+end-to-end buckets, and input/output hashes. The packet CSV contains the
+complete path, each per-node residence, each forward-to-arrival leg, and the
+exact end-to-end decomposition. HOP resend lifetime is deliberately not added
+as another component because it overlaps MAC queuing, transmission, and ACK
+service.
+
+On the canonical 6,000-second multihop run, strict analysis accepted all
+13,740 delivered lifecycles with zero invalid packets and preserved 1,000
+valid end-of-run prefixes. Its 95 nonempty end-to-end buckets were exactly
+identical to the aggregate builder. This validates the ns-3 ledger and
+isolates model behavior; it does not manufacture an OPNET packet path, because
+the recovered PB/OV result contains bucket aggregates only.
 
 OPNET CSV exports may use canonical names or common aliases such as `Time`,
 `Action`, `Node ID`, `Tx Node`, `Pkt Type`, `Seq`, `SNR`, and `Accepted`. Event
@@ -363,9 +410,14 @@ tolerance; four OPNET no-sample values were skipped and two additional ns-3
 values were missing. For bucket ends strictly after 300 seconds, ns-3 is
 16.10% high in HOP resend size, 12.57% low in MAC ACK size, 13.66% high in MAC
 Tx size, and 8.85% high in MAC Tx queuing delay. Because MAC queuing delay is
-higher while end-to-end delay is lower, the next isolation target is route
-and delivered-hop identity plus NWK/HOP admission and residence time, not
-another MAC service-rate adjustment.
+higher while end-to-end delay is lower, the path ledger was added rather than
+changing MAC service again. It finds one stable loop-free route per source,
+zero route-context mismatches, and an exact packet-weighted decomposition of
+91.5210 seconds into 78.4605 seconds of NWK residence and 13.0605 seconds of
+post-NWK leg service/transit. Multihop packets are only 9.68% of deliveries but
+contribute 85.79% of cumulative delay. The next isolation target is therefore
+application/NWK/HOP admission state, especially NSDP and neighbor/global HOP
+capacity on the `7>8>2>4>5>1` chain.
 
 ## Remaining certification boundary
 

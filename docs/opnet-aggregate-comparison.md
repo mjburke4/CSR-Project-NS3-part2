@@ -283,8 +283,70 @@ retransmitted load. The next diagnostic boundary is therefore above and
 across the MAC: delivered hop count/path, route convergence, and NWK/HOP
 admission and residence time.
 
-The corrected traces also retain complete correlation and size-integrity
-provenance:
+### Packet-path and NWK-residence diagnostic
+
+That boundary is now instrumented without changing modeled packet bytes,
+queue order, route selection, random draws, or event scheduling. The NWK
+queue-size and delay samples reproduce the supplied `br_nwk.pr.c` write sites:
+post-insert size for local and relay DATA, then post-remove size and per-hop
+residence immediately before HOP admission. The compact trace also retains
+correlated `nwk_enqueue`, `nwk_forward`, `nwk_delivery`, and `route_change`
+rows. Forward rows record the actual next hop and the selected route cost/path;
+stored partial static paths are normalized by the same rule used for ARL
+serialization.
+
+The strict 6,000-second multihop rerun produced 395,412 trace rows and 14,740
+packet keys. The packet-path analyzer accepted all 13,740 delivered chains,
+reported no incomplete delivery, loop, duplicate admission, next-hop mismatch,
+route-context mismatch, negative interval, or decomposition error, and retained
+1,000 valid end-of-run prefixes instead of misclassifying them as failures.
+Of those prefixes, 508 end in an NWK queue and 492 have already been handed to
+HOP without a subsequent relay enqueue or delivery. All 95 nonempty
+end-to-end-delay buckets match `aggregate-ns3-trace.py` exactly, with maximum
+absolute difference zero.
+
+The delivered paths are stable and source-specific:
+
+| Source | Delivered path | Hops | Packets | Packet-weighted mean E2E |
+| ---: | --- | ---: | ---: | ---: |
+| 2 | `2>4>5>1` | 3 | 245 | 441.115101 s |
+| 3 | `3>1` | 1 | 7,508 | 11.766925 s |
+| 4 | `4>5>1` | 2 | 475 | 168.650200 s |
+| 5 | `5>1` | 1 | 4,902 | 18.427855 s |
+| 7 | `7>8>2>4>5>1` | 5 | 483 | 1,648.481810 s |
+| 8 | `8>2>4>5>1` | 4 | 127 | 743.472364 s |
+
+Across delivered packets, the packet-weighted 91.521046-second mean decomposes
+exactly into 78.460522 seconds of NWK residence (85.73%) and 13.060524 seconds
+from NWK-to-HOP handoff through the next NWK enqueue or final delivery
+(14.27%). This packet-weighted value is intentionally distinct from the
+91.403103-second arithmetic mean of the 95 aggregate bucket means quoted
+above. The new steady-window bucket means are 22.694762 packets for NWK queue
+size and 88.032154 seconds for NWK queuing delay. They are source-grounded
+ns-3 diagnostics, not numeric OPNET parity results: the recovered multihop
+PB/OV selection contains no NWK vectors or packet-path events.
+
+Only 1,330 delivered packets (9.68%) use more than one hop, yet they contribute
+85.79% of cumulative delivered delay. Source 7 alone contributes 63.32% while
+representing 3.52% of deliveries. Mean per-visit NWK residence rises from
+0.073 seconds at node 3 and 5.361 seconds at node 5 to 153.224 seconds at node
+4, 287.907 seconds at node 2, and 919.847 seconds at node 8. Route discovery
+does explain source 7's late first admission: its five-hop gateway route is
+selected at 386.106 seconds. The route set stops changing by 389.955 seconds,
+however, and every delivered source uses one loop-free path thereafter.
+
+This narrows the next parity target. Route churn and a too-fast MAC are not the
+dominant ns-3 explanation. The next source-ordered ledger should correlate
+each application attempt with the NWK/HOP admission decision and state that
+made it pass or block: gateway-route availability, NSDP count/limit, global
+HOP DATA capacity, per-neighbor `flow_ctrl_spad`, ACK/DACK completion, and the
+eventual source queue. That is the shortest path to explaining both the 22.1%
+excess ns-3 offered traffic and the far-chain NWK backlog.
+
+The hash-bound core-comparison traces retain complete correlation and
+size-integrity provenance. These three traces predate the additive NWK/path
+events and remain the inputs to the published core aggregate comparator
+reports:
 
 | Scenario | Trace events | Exact deliveries | Unmatched sends | Unmatched deliveries | Size mismatches |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -308,6 +370,14 @@ and `57721b50d4dcad31d7da36d79ad5f7bd24147ea54d255490c0dd3ac321d90070`.
 The mandatory-hash canonical workflow was also executed end to end for the
 multihop case; its scoped status was `selected_comparison_failed`, with all
 four stages completing as designed and the comparator returning status 1.
+
+The separate path-enriched multihop diagnostic contains 395,412 events,
+13,740 exact deliveries, 1,000 unmatched end-of-run sends, no unmatched
+deliveries, and no size mismatches. Its SHA-256 is
+`002097d468a54d94416923b8c75d56fe93217e2c69cb318a1d7c0b2593114e76`.
+It was run through the scenario runner, strict packet-path analyzer, and ns-3
+aggregate builder. It has not replaced the older mandatory-hash comparator
+manifest or its 665-mismatch core report.
 
 At exact tolerance, the two-node report contains 696 numeric mismatches, the
 hidden-node report contains 700, and the multihop report contains 665 and

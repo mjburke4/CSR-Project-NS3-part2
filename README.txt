@@ -142,6 +142,15 @@ Historical OPNET aggregate comparison:
    source-level application packet sizing, measured historical mismatches,
    and the aggregate-versus-event evidence boundary.
 
+ns-3 packet-path and NWK-residence diagnostic:
+1. Run csr-opnet-scenario-runner with --aggregateTraceOnly=1 to retain compact
+   app_send, nwk_enqueue, nwk_forward, nwk_delivery, and route_change events.
+2. Run utils/analyze-ns3-packet-paths.py TRACE.csv --summary-json SUMMARY.json
+   --packet-csv PACKETS.csv --stop-time STOP_SECONDS --strict.
+3. The analyzer reconstructs each (source, destination, sequence) path and
+   checks route context, loops, NWK residence, per-leg transit, and exact
+   end-to-end decomposition. See docs/opnet-scenario-differential-harness.md.
+
 The deterministic three-node reservation/collision reference, SHA-checked
 OPNET instrumentation, evidence validator, and licensed-run handoff are in
 docs/opnet-reservation-collision-reference.md.

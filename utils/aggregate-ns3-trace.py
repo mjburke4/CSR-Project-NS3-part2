@@ -54,6 +54,8 @@ HOP_RESEND_QUEUE_SIZE = "HOP.Resend Queue Size (packets)"
 MAC_ACK_QUEUE_SIZE = "MAC.ACK Queue Size (packets)"
 MAC_TX_QUEUE_SIZE = "MAC.Tx Queue Size (packets)"
 MAC_TX_QUEUE_DELAY = "MAC.Tx Queuing Delay (sec)"
+NWK_QUEUE_SIZE = "NWK.Network Queue Size (packets)"
+NWK_QUEUE_DELAY = "NWK.Network Queuing Delay (sec)"
 
 STATISTIC_SAMPLE_EVENT = "statistic_sample"
 
@@ -78,6 +80,8 @@ STATISTIC_SAMPLE_STATISTICS = (
     (MAC_ACK_QUEUE_SIZE, "packets", "bucket_sample_mean", True),
     (MAC_TX_QUEUE_SIZE, "packets", "bucket_sample_mean", True),
     (MAC_TX_QUEUE_DELAY, "s", "bucket_sample_mean", False),
+    (NWK_QUEUE_SIZE, "packets", "bucket_sample_mean", True),
+    (NWK_QUEUE_DELAY, "s", "bucket_sample_mean", False),
 )
 STATISTIC_SAMPLE_SEMANTICS = {
     name: (unit, aggregation, integral)
@@ -289,6 +293,19 @@ def _bucket_index(time_s: float, bucket_width_s: float, bucket_count: int) -> in
     return index
 
 
+def _is_stop_boundary(
+    time_s: float, bucket_width_s: float, bucket_count: int
+) -> bool:
+    """Use the bucket mapper's quotient tolerance at the exclusive stop."""
+
+    return math.isclose(
+        time_s / bucket_width_s,
+        float(bucket_count),
+        rel_tol=0.0,
+        abs_tol=1.0e-12,
+    )
+
+
 def _validate_window(bucket_width_s: float, stop_time_s: float) -> int:
     if not math.isfinite(bucket_width_s) or bucket_width_s <= 0.0:
         raise TraceAggregationError("--bucket-width must be finite and positive")
@@ -431,14 +448,17 @@ def derive_series(
             active_sample_statistics.add(statistic)
             statistic_sample_counts[statistic] += 1
             statistic_samples_by_node[(statistic, node)] += 1
-        if time_s >= stop_time_s:
+        at_stop_boundary = _is_stop_boundary(
+            time_s, bucket_width_s, bucket_count
+        )
+        if at_stop_boundary or time_s > stop_time_s:
             if event in {
                 "app_send",
                 "nwk_delivery",
                 "rx_drop",
                 STATISTIC_SAMPLE_EVENT,
             }:
-                if time_s == stop_time_s:
+                if at_stop_boundary:
                     excluded_at_stop[event] += 1
                     if parsed_statistic_sample is not None:
                         statistic_samples_excluded_at_stop[

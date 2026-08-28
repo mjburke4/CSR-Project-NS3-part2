@@ -113,6 +113,10 @@ inline constexpr const char* CSR_STAT_MAC_TX_QUEUE_SIZE =
   "MAC.Tx Queue Size (packets)";
 inline constexpr const char* CSR_STAT_MAC_TX_QUEUE_DELAY =
   "MAC.Tx Queuing Delay (sec)";
+inline constexpr const char* CSR_STAT_NWK_QUEUE_SIZE =
+  "NWK.Network Queue Size (packets)";
+inline constexpr const char* CSR_STAT_NWK_QUEUE_DELAY =
+  "NWK.Network Queuing Delay (sec)";
 
 inline std::ofstream g_csrDifferentialTrace;
 inline uint64_t g_csrDifferentialTraceIndex = 0;
@@ -188,7 +192,7 @@ OpenDifferentialTraceCsv (const std::string &path)
     {
       g_csrDifferentialTrace
         << "schema,event_index,time_s,event,src,dst,sequence,size_bytes,reason,"
-        << "node,statistic,value\n";
+        << "node,statistic,value,peer,next_hop,route_cost,detail\n";
       return;
     }
   g_csrDifferentialTrace
@@ -223,7 +227,10 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
     }
   if (g_csrDifferentialAggregateOnly &&
       event.event != "app_send" &&
+      event.event != "nwk_enqueue" &&
+      event.event != "nwk_forward" &&
       event.event != "nwk_delivery" &&
+      event.event != "route_change" &&
       event.event != "rx_drop" &&
       event.event != "statistic_sample")
     {
@@ -244,6 +251,10 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
         event.node,
         event.statistic,
         event.value,
+        event.peer,
+        event.nextHop,
+        event.routeCost,
+        event.detail,
       };
       for (std::size_t index = 0;
            index < sizeof (aggregateFields) / sizeof (aggregateFields[0]);
