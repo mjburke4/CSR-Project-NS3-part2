@@ -1,6 +1,6 @@
 # ARL neighbor admission and hop-security foundation
 
-Updated: 2026-08-24
+Updated: 2026-08-28
 
 ## Implemented scope
 
@@ -44,7 +44,11 @@ advertised.
 | Two key directions are required before NeighborCheck can activate the peer | `CsrNetLayer::TryMakeNeighborActive()` |
 | CHECK_DISCOVERY is deferred until outbound KeyUpdate ACK | `SendPendingDiscoveryCheck()` |
 | DATA from inactive peer is rejected and starts CHECK_MESSAGE | `AcceptFromNeighbor()` / `EnsureCheckMessage()` |
-| RoutingUpdate from inactive peer is processed while CHECK_MESSAGE starts | `ProcessArlRouteMessage()` |
+| RoutingUpdate from an inactive peer is retained while CHECK_MESSAGE starts, but its transit candidates remain selection-deferred | `ProcessArlRouteMessage()` / `CsrNetLayer::AddOrUpdateRoute()` |
+| Activating a neighbor recomputes only that direct-neighbor destination; cached transit candidates do not become selectable merely because the peer was admitted | `CsrNetLayer::TryMakeNeighborActive()` / `FindBestRoute()` |
+| A later source-owned recomputation of that destination reconsiders every cached candidate whose reporter is now active; a fresh accepted RoutingUpdate is one such trigger | `AddOrUpdateRoute()` / `RecomputeRoutesViaNextHop()` |
+| An accepted looped UPDATE is retained as invalid but still performs the source-owned destination recomputation, so an eligible alternate reporter can become selected | `ApplyCompleteArlRoutingMessage()` / `ProcessRoutesPayload()` |
+| Making a neighbor inactive deletes every transit candidate learned from that reporter even if it was not admitted yet; re-admission restores only the direct route until fresh route state arrives | `CsrNetLayer::MakeNeighborInactive()` / `TryMakeNeighborActive()` |
 | Remote security-count change invalidates old key/admission state after authentication | `CsrHopSecurityState::CommitAuthenticatedPairwise()` / `NoteSecurityCountChange()` |
 
 ## Security records
@@ -121,8 +125,15 @@ count is absent.
   trips, shared pairwise sequencing, ACK-only key-send completion,
   authenticated replay classification, and security-count reset.
 - `csr-nwk-arl-admission-security-smoke.cc` checks pre-admission DATA rejection,
-  reciprocal keys, NeighborCheck activation, admitted route selection, and
-  exactly-once post-admission delivery.
+  reciprocal keys, NeighborCheck activation, admitted direct-route selection,
+  a real ARL byte-stream UPDATE cached while its reporter is inactive,
+  remaining unselected through admission, and becoming selectable when a fresh
+  accepted UPDATE triggers the later destination recomputation. It also uses a
+  real looped UPDATE from a different reporter to prove that the same
+  recomputation releases an eligible cached alternate, then proves that
+  both pre-admission failure and active-peer failure delete learned transit
+  state. Re-admission cannot resurrect that state without a fresh UPDATE. The
+  test also retains exactly-once post-admission delivery.
 - `csr-hop-group-security-smoke.cc` checks independent golden records for all
   three group modes, both GroupEstablish tag halves, wrong-key and tamper
   rejection, deferred-record replacement/replay, callback ordering,
@@ -133,8 +144,8 @@ count is absent.
   trips; wrong-key, wrong-type, tamper, malformed, and replay rejection;
   authentication-before-ACK/delivery; exact-once AppNeighborcast; and live
   over-air sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
-- The complete build and regression pass: 24 focused smoke targets plus
-  `csr-mac-demo-split` (25/25).
+- The complete build and regression pass: 31 focused smoke targets,
+  `csr-mac-demo-split`, and the imported-scenario runner (33/33).
 
 ## Deliberate boundary
 
@@ -145,6 +156,14 @@ security wrapping for every remaining control message, the distinct
 network-security modes, and operational key-store behavior remain outside this
 step and require packet-type-table or differential-trace confirmation before
 they can be claimed as equivalent.
+
+This route-admission increment covers the inactive-peer selection boundary and
+source-owned destination recomputation after normal or looped UPDATEs,
+selected-route DELETE/FLUSH/stale fallback, inactive-reporter route deletion,
+and eligible link-cost reroutes.
+Self-route capability advertisement, grouped same-time changed-route
+propagation, and retry ownership for partially acknowledged destination sets
+remain separate parity work.
 
 The default ns-3 key arrays are deterministic and non-secret so existing
 scenarios remain runnable; parity or security experiments should explicitly

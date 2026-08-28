@@ -63,7 +63,9 @@ public:
   DiscoveryState m_discState { DiscoveryState::IDLE };
   EventId m_discoveryStartEvent, m_discoveryStopEvent;
   EventId m_discoveryHelloEvent;
-  Time m_discoveryHelloInterval { Seconds (1.0) };
+  // routesDiscoveryInitLocalTC() multiplies the recovered one-second base
+  // timer by TIME_FUDGE_FACTOR (5) before starting its three-broadcast walk.
+  Time m_discoveryHelloInterval { Seconds (5.0) };
   uint32_t m_routingSequence {0};
 
   static TypeId GetTypeId (void)
@@ -299,6 +301,12 @@ public:
         [] (const DiscoveryEntry &entry) {
           return entry.discoveryNeeded;
         }));
+  }
+
+  /** Return reachable logical destinations in routesListWalkNext() order. */
+  std::vector<CsrNodeId> GetKnownDiscoveryNodes () const
+  {
+    return CollectKnownDiscoveryNodes ();
   }
 
   CsrNodeId GetDiscoveryInitiatedBy () const
@@ -699,8 +707,6 @@ public:
       TryMakeNeighborActive (
         neighbor,
         "ACKed NeighborCheck");
-
-      ScheduleCheckNwkQueue ();
   }
 
   void
@@ -822,8 +828,6 @@ public:
           this);
       }
 
-    // Any queued packet must be reevaluated against the now-invalid routes.
-    ScheduleCheckNwkQueue ();
   }
 
   void
@@ -1254,11 +1258,12 @@ public:
     bool immediate,
     uint8_t numHop,
     double pathlossDb,
-	    uint32_t linkCostToNextHop,
-	    uint32_t advertisedCost,
-	    CsrNodeId learnedFrom,
-	    uint8_t capability = 0,
-	    const std::vector<CsrNodeId> &path = {})
+    uint32_t linkCostToNextHop,
+    uint32_t advertisedCost,
+    CsrNodeId learnedFrom,
+    uint8_t capability = 0,
+    const std::vector<CsrNodeId> &path = {},
+    bool receivedFromArlUpdate = false)
   {
     if (!CsrIsValidNodeId (nwkDst) ||
         !CsrIsValidNodeId (nextHop) ||
@@ -1268,6 +1273,23 @@ public:
         }))
       {
         return false;
+      }
+
+    const bool selectionDeferred =
+      receivedFromArlUpdate &&
+      !immediate &&
+      m_arlNeighborAdmissionEnabled &&
+      !IsArlNeighborUsable (nextHop);
+
+    // The recovered route library creates a logical destination whenever it
+    // runs routesFindBestRoute().  A transit UPDATE does so even if its
+    // reporter is inactive; a direct neighbor is created when admission
+    // invokes routesFindBestRoute(neighbor).
+    if (!immediate ||
+        !m_arlNeighborAdmissionEnabled ||
+        IsArlNeighborUsable (nextHop))
+      {
+        NoteDestinationCreated (nwkDst);
       }
 
     if (nwkDst == m_nodeId ||
@@ -1351,6 +1373,15 @@ public:
           Simulator::Now ();
 
         route.valid = true;
+        route.selectionDeferred = selectionDeferred;
+
+        // Every accepted ROUTING_UPDATE invokes routesFindBestRoute() for the
+        // destination.  That recomputation may select any cached candidate
+        // whose reporter has since become active, not only this reporter.
+        if (receivedFromArlUpdate)
+          {
+            ReleaseDeferredRouteCandidates (nwkDst);
+          }
 
         const RouteEntry *best =
           FindBestRoute (nwkDst);
@@ -1367,6 +1398,8 @@ public:
                   << " valid="
                   << (wasValid ? 1 : 0)
                   << "->1"
+                  << " selectionDeferred="
+                  << (route.selectionDeferred ? 1 : 0)
                   << " selected="
                   << (best == &route ? 1 : 0)
                   << std::endl;
@@ -1426,11 +1459,17 @@ public:
       Simulator::Now ();
 
     route.valid = true;
+    route.selectionDeferred = selectionDeferred;
 
     m_routes.push_back (route);
 
     RouteEntry *stored =
       &m_routes.back ();
+
+    if (receivedFromArlUpdate)
+      {
+        ReleaseDeferredRouteCandidates (nwkDst);
+      }
 
     const RouteEntry *best =
       FindBestRoute (nwkDst);
@@ -1448,6 +1487,8 @@ public:
               << advertisedCost
               << " learnedFrom="
               << learnedFrom
+              << " selectionDeferred="
+              << (stored->selectionDeferred ? 1 : 0)
               << " selected="
               << (best == stored ? 1 : 0)
               << std::endl;
@@ -1693,6 +1734,12 @@ private:
 
     Time     lastUpdated {Seconds (0.0)};
     bool     valid {true};
+    // routesParseRouting() retains UPDATEs received from an inactive
+    // neighbor, but routesFindBestRoute() cannot select them.  Admitting that
+    // neighbor recomputes only the direct-neighbor destination; the cached
+    // transit candidate participates when a later source-owned recomputation
+    // revisits its destination.
+    bool     selectionDeferred {false};
     uint32_t linkCostToNextHop {0};
     uint32_t advertisedCost {0};
     CsrNodeId learnedFrom {
@@ -2202,6 +2249,11 @@ private:
     const RouteEntry **selectedRouteOut = nullptr,
     bool *usedReverseRouteOut = nullptr)
   {
+    // routesGetRelay() calls routesFindDestination() before it evaluates
+    // forward or reverse availability, so an unsuccessful lookup still fixes
+    // this logical destination's position in the newest-first walk.
+    NoteDestinationCreated (nwkDst);
+
     if (selectedRouteOut != nullptr)
       {
         *selectedRouteOut = nullptr;
@@ -2822,6 +2874,9 @@ private:
   std::deque<NwkQueueEntry>             m_nwkQueue;
   EventId                               m_checkNwkQueueEvent;
   std::vector<RouteEntry>               m_routes;
+  // routesFindDestination() inserts new logical destinations at destHead.
+  // Keep that newest-first order independently of alternate route records.
+  std::deque<CsrNodeId>                 m_destinationCreationOrder;
   std::map<CsrNodeId, ReverseRouteEntry> m_reverseRoutes;
   std::map<CsrNodeId, NwkNeighborEntry>  m_nwkNeighbors;
   std::map<std::pair<CsrNodeId,CsrNodeId>, NsdpEntry> m_nsdp;
@@ -2857,7 +2912,6 @@ private:
 
   uint8_t m_discoveryBroadcastsRemaining {0};
   bool m_repeatDiscoveryHello {true};
-  bool m_discoveryCompletionQuietTickObserved {false};
 
   uint32_t m_discoveryStartCount {0};
   uint32_t m_discoveryBroadcastCount {0};
@@ -2910,6 +2964,10 @@ private:
   void SnmpReportTimeout ();
   void EnsureDiscoveryEntry (CsrNodeId node, bool discoveryNeeded);
   void MarkDiscoveryNotNeeded (CsrNodeId node);
+  void NoteDestinationCreated (CsrNodeId node);
+  void ReleaseDeferredRouteCandidates (CsrNodeId destination);
+  bool LookupDiscoveryNextHop (CsrNodeId destination,
+                               CsrNodeId &nextHopOut) const;
   std::vector<CsrNodeId> CollectKnownDiscoveryNodes () const;
 
   void SendHelloBroadcast (
@@ -3004,11 +3062,8 @@ private:
 
   bool ShouldAdvertiseRoute (const RouteEntry &re) const;
 
-  void TryDrainQueueAfterDiscovery ();
-
   void ScheduleDiscoveryHello ();
   void DiscoveryHelloTick ();
-  void VerifyUnresponsiveDiscoveryNeighbors ();
 
   void CheckNeighborFreshness ();
   void InvalidateRoutesViaNextHop (CsrNodeId nextHop, const char *reason);
@@ -3306,7 +3361,6 @@ CsrNetLayer::SetArlNeighborAdmissionEnabled (bool enable)
             << (enable ? "enabled" : "disabled")
             << std::endl;
 
-  ScheduleCheckNwkQueue ();
 }
 
 bool
@@ -3541,17 +3595,14 @@ CsrNetLayer::TryMakeNeighborActive (
       return;
     }
 
-  std::map<CsrNodeId, SelectedRouteState> selectedBefore;
-  for (const auto &route : m_routes)
-    {
-      if (route.nextHop == neighbor &&
-          selectedBefore.find (route.nwkDst) == selectedBefore.end ())
-        {
-          selectedBefore.emplace (
-            route.nwkDst,
-            CaptureSelectedRouteState (route.nwkDst));
-        }
-    }
+  NoteDestinationCreated (neighbor);
+
+  // routesMakeNeighborActive() recomputes only the destination represented by
+  // the neighbor itself.  Transit UPDATEs cached while the peer was inactive
+  // remain selection-deferred until a later source-owned recomputation visits
+  // their destination.
+  SelectedRouteState directRouteBefore =
+    CaptureSelectedRouteState (neighbor);
 
   entry.arlActive = true;
   entry.stale = false;
@@ -3571,21 +3622,19 @@ CsrNetLayer::TryMakeNeighborActive (
             << " keys=two-sided"
             << std::endl;
 
-  for (const auto &before : selectedBefore)
-    {
-      SelectedRouteState after =
-        CaptureSelectedRouteState (before.first);
+  ReleaseDeferredRouteCandidates (neighbor);
 
-      if (!SameSelectedRouteState (before.second, after))
-        {
-          MarkSelectedRouteChanged (before.first, "neighbor admitted");
-        }
+  SelectedRouteState directRouteAfter =
+    CaptureSelectedRouteState (neighbor);
+
+  if (!SameSelectedRouteState (directRouteBefore, directRouteAfter))
+    {
+      MarkSelectedRouteChanged (neighbor, "neighbor admitted");
     }
 
   // routesMakeNeighborActive() sets needsUpdate.  A complete reliable ARL
   // snapshot is this model's INFO/UPDATE/FLUSH equivalent of that flag.
-  Simulator::Schedule (
-    MilliSeconds (20),
+  Simulator::ScheduleNow (
     &CsrNetLayer::StartReliableRoutingSnapshot,
     this,
     neighbor);
@@ -3599,7 +3648,6 @@ CsrNetLayer::TryMakeNeighborActive (
         neighbor);
     }
 
-  ScheduleCheckNwkQueue ();
 }
 
 void
@@ -3608,7 +3656,7 @@ CsrNetLayer::MakeNeighborInactive (
   const char *reason)
 {
   auto it = m_nwkNeighbors.find (neighbor);
-  if (it == m_nwkNeighbors.end () || !it->second.arlActive)
+  if (it == m_nwkNeighbors.end ())
     {
       return;
     }
@@ -3626,18 +3674,51 @@ CsrNetLayer::MakeNeighborInactive (
     }
 
   NwkNeighborEntry &entry = it->second;
+  const bool wasActive = entry.arlActive;
   entry.arlActive = false;
   entry.checkMessageActive = false;
   entry.admissionDiscoveryCheckActive = false;
+  entry.arlRoutingReassemblies.clear ();
 
   std::cout << "[NWK " << m_nodeId
             << "] ARL neighbor INACTIVE"
             << " neighbor=" << neighbor
             << " reason=" << reason
+            << " wasActive=" << (wasActive ? 1 : 0)
             << std::endl;
+
+  // routesMakeNeighborInactive() calls routesDeleteNeighborRoutes() before
+  // recomputing affected destinations.  Direct-neighbor state remains, but
+  // every transit candidate learned from this reporter is discarded so it
+  // cannot silently resurrect if the neighbor is admitted again.
+  const auto oldRouteCount = m_routes.size ();
+  m_routes.erase (
+    std::remove_if (
+      m_routes.begin (),
+      m_routes.end (),
+      [neighbor] (const RouteEntry &route) {
+        return !route.immediate && route.learnedFrom == neighbor;
+      }),
+    m_routes.end ());
+
+  const auto deletedRouteCount = oldRouteCount - m_routes.size ();
+  if (deletedRouteCount != 0)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Deleted inactive-neighbor transit routes"
+                << " neighbor=" << neighbor
+                << " count=" << deletedRouteCount
+                << std::endl;
+    }
 
   for (const auto &before : selectedBefore)
     {
+      if (before.second.available &&
+          before.second.nextHop == neighbor)
+        {
+          ReleaseDeferredRouteCandidates (before.first);
+        }
+
       SelectedRouteState after =
         CaptureSelectedRouteState (before.first);
 
@@ -4117,8 +4198,6 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
 
     DumpRoutes ();
 
-    // Discovery/route update may have unblocked queued packets.
-    ScheduleCheckNwkQueue ();
 }
 
 const char*
@@ -4445,8 +4524,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
 
           if (m_routingSnapshotResponseEnabled)
             {
-              Simulator::Schedule (
-                MilliSeconds (20),
+              Simulator::ScheduleNow (
                 &CsrNetLayer::StartReliableRoutingSnapshot,
                 this,
                 helloSrc);
@@ -4563,6 +4641,12 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
 
             if (containsLocalNode)
               {
+                // routesParseRouting() still creates the destination and
+                // invokes routesFindBestRoute() after storing a looped
+                // UPDATE as invalid.  That source-owned recomputation may
+                // select a different candidate cached while its reporter
+                // was inactive.
+                NoteDestinationCreated (destination);
                 SelectedRouteState before =
                   CaptureSelectedRouteState (destination);
 
@@ -4590,6 +4674,8 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                     existingRoute->routingSequenceValid = true;
                     existingRoute->routingSequence = routingSequence;
                   }
+
+                ReleaseDeferredRouteCandidates (destination);
 
                 SelectedRouteState after =
                   CaptureSelectedRouteState (destination);
@@ -4620,7 +4706,8 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
               record.cost,
               helloSrc,
               record.capability,
-              candidatePath);
+              candidatePath,
+              true);
 
             for (auto &route : m_routes)
               {
@@ -4657,6 +4744,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
             SelectedRouteState before =
               CaptureSelectedRouteState (destination);
             RouteEntry *matchingRoute = nullptr;
+            bool routeInvalidated = false;
 
             for (auto &route : m_routes)
               {
@@ -4685,10 +4773,18 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                        matchingRoute->routingSequenceValid,
                        matchingRoute->routingSequence))
               {
+                routeInvalidated = matchingRoute->valid;
                 matchingRoute->valid = false;
                 matchingRoute->lastUpdated = Simulator::Now ();
                 matchingRoute->routingSequenceValid = true;
                 matchingRoute->routingSequence = routingSequence;
+              }
+
+            if (routeInvalidated &&
+                before.available &&
+                before.nextHop == helloSrc)
+              {
+                ReleaseDeferredRouteCandidates (destination);
               }
 
             SelectedRouteState after =
@@ -4754,6 +4850,12 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
 
             for (const auto &entry : beforeByDestination)
               {
+                if (entry.second.available &&
+                    entry.second.nextHop == helloSrc)
+                  {
+                    ReleaseDeferredRouteCandidates (entry.first);
+                  }
+
                 SelectedRouteState after =
                   CaptureSelectedRouteState (entry.first);
                 if (!SameSelectedRouteState (entry.second, after))
@@ -4806,7 +4908,6 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
         }
     }
 
-  ScheduleCheckNwkQueue ();
 }
 
 std::set<CsrNodeId>
@@ -4870,6 +4971,29 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
                       << " reason=local-node-in-path"
                       << std::endl;
 
+            if (ar.dst != CSR_BROADCAST_ID &&
+                ar.dst != m_nodeId &&
+                ar.dst != helloSrc)
+              {
+                // The compatibility envelope has no per-candidate routing
+                // sequence with which to retain an invalid tombstone, but
+                // the corresponding routesFindBestRoute() recomputation is
+                // still source-owned for an accepted looped advertisement.
+                NoteDestinationCreated (ar.dst);
+                SelectedRouteState before =
+                  CaptureSelectedRouteState (ar.dst);
+                ReleaseDeferredRouteCandidates (ar.dst);
+                SelectedRouteState after =
+                  CaptureSelectedRouteState (ar.dst);
+
+                if (!SameSelectedRouteState (before, after))
+                  {
+                    MarkSelectedRouteChanged (
+                      ar.dst,
+                      "looped compatibility UPDATE");
+                  }
+              }
+
             continue;
           }
 
@@ -4912,7 +5036,8 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
             ar.cost,
             helloSrc,
             ar.capability,
-            candidatePath);
+            candidatePath,
+            true);
 
         if (accepted)
           {
@@ -5201,8 +5326,7 @@ CsrNetLayer::ProcessRoutingUpdate (
             return;
           }
         // Reply specifically to the requesting neighbor.
-        Simulator::Schedule (
-          MilliSeconds (20),
+        Simulator::ScheduleNow (
           &CsrNetLayer::
             StartReliableRoutingSnapshot,
           this,
@@ -5593,6 +5717,13 @@ CsrNetLayer::ProcessRoutingUpdate (
                   << (routeInvalidated ? 1 : 0)
                   << std::endl;
 
+        if (routeInvalidated &&
+            selectedBefore.available &&
+            selectedBefore.nextHop == helloSrc)
+          {
+            ReleaseDeferredRouteCandidates (destination);
+          }
+
         SelectedRouteState selectedAfter =
           CaptureSelectedRouteState (
             destination);
@@ -5607,7 +5738,6 @@ CsrNetLayer::ProcessRoutingUpdate (
           }
 
         DumpRoutes ();
-        ScheduleCheckNwkQueue ();
 
         return;
       }
@@ -5696,6 +5826,11 @@ CsrNetLayer::ProcessRoutingUpdate (
 
             const SelectedRouteState &before =
               entry.second;
+
+            if (before.available && before.nextHop == helloSrc)
+              {
+                ReleaseDeferredRouteCandidates (destination);
+              }
 
             SelectedRouteState after =
               CaptureSelectedRouteState (
@@ -5792,7 +5927,6 @@ CsrNetLayer::ProcessRoutingUpdate (
           }
 
         DumpRoutes ();
-        ScheduleCheckNwkQueue ();
 
         return;
       }
@@ -5822,6 +5956,10 @@ CsrNetLayer::UpdateReverseRoute (CsrNodeId netSrc, CsrNodeId hopSrc)
       return;
     }
 
+  // routesUpdateReverse() first looks up the reporting hop, even when it
+  // ultimately rejects that hop as unknown.
+  NoteDestinationCreated (hopSrc);
+
   // Legacy ARL only accepts a reverse path through a known neighbor.
   auto nit = m_nwkNeighbors.find (hopSrc);
   if (nit == m_nwkNeighbors.end ())
@@ -5832,6 +5970,8 @@ CsrNetLayer::UpdateReverseRoute (CsrNodeId netSrc, CsrNodeId hopSrc)
                 << std::endl;
       return;
     }
+
+  NoteDestinationCreated (netSrc);
 
   ReverseRouteEntry &rr = m_reverseRoutes[netSrc];
   bool wasValid = rr.valid;
@@ -6146,6 +6286,11 @@ CsrNetLayer::InvalidateRoutesViaNextHop (
       const SelectedRouteState
         &before = entry.second;
 
+      if (before.available && before.nextHop == nextHop)
+        {
+          ReleaseDeferredRouteCandidates (destination);
+        }
+
       SelectedRouteState after =
         CaptureSelectedRouteState (
           destination);
@@ -6163,7 +6308,6 @@ CsrNetLayer::InvalidateRoutesViaNextHop (
   if (anyInvalidated)
     {
       DumpRoutes ();
-      ScheduleCheckNwkQueue ();
     }
 }
 
@@ -6562,6 +6706,10 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
             break;
           }
 
+        // CHECK_NO_PATH calls routesFindDestination() before inspecting the
+        // selected forward or reverse path.
+        NoteDestinationCreated (unreachableDest);
+
         // ----------------------------------------------------------
         // Forward-route check:
         // Is the NoPath reporter currently our next hop to this
@@ -6655,7 +6803,6 @@ CsrNetLayer::DiscoveryStart ()
   // the production default reproduces all three legacy broadcasts.
   m_discoveryBroadcastsRemaining =
     m_repeatDiscoveryHello ? 3 : 1;
-  m_discoveryCompletionQuietTickObserved = false;
 
   ++m_discoverySequence;
 
@@ -6720,86 +6867,12 @@ CsrNetLayer::DiscoveryStop ()
             << m_discoverySequence
             << std::endl;
 
-  VerifyUnresponsiveDiscoveryNeighbors ();
-
-  TryDrainQueueAfterDiscovery ();
-
   // Legacy discovery completion calls routesReroute():
   // recompute active-neighbor costs and request fresh
   // route state from every active neighbor.
   RefreshRoutesAfterDiscovery ();
 
   CompleteDiscoveryLifecycle ();
-}
-
-void
-CsrNetLayer::VerifyUnresponsiveDiscoveryNeighbors ()
-{
-  uint32_t verifiedCount = 0;
-  uint32_t verifyScheduledCount = 0;
-  uint32_t staleVerifyCount = 0;
-
-  Time verifyDelay = MilliSeconds (20);
-
-  for (auto &kv : m_nwkNeighbors)
-    {
-      NwkNeighborEntry &neighbor = kv.second;
-
-      if (neighbor.discoveryVerified)
-        {
-          verifiedCount++;
-          continue;
-        }
-
-      if (neighbor.stale)
-        {
-          staleVerifyCount++;
-
-          std::cout << "[NWK " << m_nodeId
-                    << "] Discovery completion includes stale neighbor="
-                    << neighbor.nodeId
-                    << " for Verify"
-                    << std::endl;
-        }
-
-      CsrNodeId neighborId = neighbor.nodeId;
-      Time thisDelay =
-        verifyDelay * static_cast<int64_t> (verifyScheduledCount + 1);
-
-      std::cout << "[NWK " << m_nodeId
-                << "] Scheduling Verify for unresponsive neighbor="
-                << neighborId
-                << " sequence=" << m_discoverySequence
-                << " delayMs=" << thisDelay.GetMilliSeconds ()
-                << std::endl;
-
-      Simulator::Schedule (
-        thisDelay,
-        &CsrNetLayer::SendNeighborCheck,
-        this,
-        neighborId,
-        CsrNeighborCheckType::Verify,
-        CSR_BROADCAST_ID,
-        m_discoverySequence);
-
-      verifyScheduledCount++;
-    }
-
-    std::cout << "[NWK " << m_nodeId
-              << "] Discovery verification summary"
-              << " sequence=" << m_discoverySequence
-              << " known=" << m_nwkNeighbors.size ()
-              << " verified=" << verifiedCount
-              << " verifyScheduled=" << verifyScheduledCount
-              << " staleIncluded=" << staleVerifyCount
-              << std::endl;
-}
-
-void
-CsrNetLayer::TryDrainQueueAfterDiscovery ()
-{
-    // OPNET-equivalent of re-entering the NWK process after discovery
-  CheckNwkQueue ();
 }
 
 void
@@ -6829,74 +6902,9 @@ CsrNetLayer::DiscoveryHelloTick ()
 
   if (m_discoveryBroadcastsRemaining == 0)
     {
-      if (m_arlNeighborAdmissionEnabled)
-        {
-          uint32_t pendingAdmissions = 0;
-
-          for (const auto &item : m_nwkNeighbors)
-            {
-              const NwkNeighborEntry &neighbor = item.second;
-
-              if (neighbor.arlActive || neighbor.stale)
-                {
-                  continue;
-                }
-
-              // In OPNET the key/check exchange normally finishes during
-              // the three-broadcast discovery window.  ns-3 can still have
-              // those reliable frames in flight when the one-second
-              // broadcaster expires.  Keep the lifecycle open so
-              // sensorAppEndedDiscovery() sees the same admitted neighbor;
-              // the separately scheduled DiscoveryStop remains the bound.
-              if (neighbor.admissionDiscoveryCheckPending ||
-                  neighbor.admissionDiscoveryCheckActive ||
-                  neighbor.keyRequestSentValid ||
-                  neighbor.keySendValid ||
-                  neighbor.keySendActive ||
-                  neighbor.keySendComplete ||
-                  neighbor.keyUpdateComplete)
-                {
-                  pendingAdmissions++;
-                }
-            }
-
-          if (pendingAdmissions > 0)
-            {
-              std::cout << "[NWK " << m_nodeId
-                        << "] Discovery completion waiting for ARL admission"
-                        << " pending=" << pendingAdmissions
-                        << std::endl;
-              ScheduleDiscoveryHello ();
-              return;
-            }
-        }
-
-      // The broadcaster timer can reach its fourth invocation while the
-      // final long-preamble Discover is still in the MAC or while its peer's
-      // response is about to start.  Wait for the local radio to clear and
-      // then observe one complete quiet discovery interval.  This preserves
-      // the legacy response/admission ordering without removing the explicit
-      // DiscoveryStop bound.
-      if (m_hop != nullptr && m_hop->IsMacBusyOrQueued ())
-        {
-          m_discoveryCompletionQuietTickObserved = false;
-          std::cout << "[NWK " << m_nodeId
-                    << "] Discovery completion waiting for MAC control"
-                    << std::endl;
-          ScheduleDiscoveryHello ();
-          return;
-        }
-
-      if (!m_discoveryCompletionQuietTickObserved)
-        {
-          m_discoveryCompletionQuietTickObserved = true;
-          std::cout << "[NWK " << m_nodeId
-                    << "] Discovery completion observing response interval"
-                    << std::endl;
-          ScheduleDiscoveryHello ();
-          return;
-        }
-
+      // The fourth broadcaster callback ends discovery immediately.  The
+      // nominal NWK +30-second stop remains only a fallback and is canceled
+      // by DiscoveryStop(), matching sensorAppEndedDiscovery().
       DiscoveryStop ();
       return;
     }
@@ -7267,28 +7275,118 @@ CsrNetLayer::MarkDiscoveryNotNeeded (CsrNodeId node)
   existing->discoveryNeeded = false;
 }
 
-std::vector<CsrNodeId>
-CsrNetLayer::CollectKnownDiscoveryNodes () const
+void
+CsrNetLayer::NoteDestinationCreated (CsrNodeId node)
 {
-  std::vector<CsrNodeId> nodes;
-  std::set<CsrNodeId> seen;
-
-  // routesListWalkNext() walks logical destinations, not every alternate
-  // path.  Preserve the first-seen route-table order while suppressing
-  // duplicate next-hop alternatives.
-  for (const RouteEntry &route : m_routes)
+  if (node == m_nodeId || node == CSR_BROADCAST_ID)
     {
-      CsrNodeId destination = route.nwkDst;
+      return;
+    }
 
-      if (destination == m_nodeId ||
-          destination == CSR_BROADCAST_ID ||
-          seen.find (destination) != seen.end () ||
-          FindBestRoute (destination) == nullptr)
+  if (std::find (m_destinationCreationOrder.begin (),
+                 m_destinationCreationOrder.end (),
+                 node) != m_destinationCreationOrder.end ())
+    {
+      return;
+    }
+
+  // routesFindDestination() links every new record at h->destHead.
+  m_destinationCreationOrder.push_front (node);
+}
+
+void
+CsrNetLayer::ReleaseDeferredRouteCandidates (CsrNodeId destination)
+{
+  for (auto &route : m_routes)
+    {
+      if (route.nwkDst != destination ||
+          !route.valid ||
+          !route.selectionDeferred ||
+          !IsArlNeighborUsable (route.nextHop))
         {
           continue;
         }
 
-      seen.insert (destination);
+      route.selectionDeferred = false;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Reconsidering cached route candidate"
+                << " dst=" << destination
+                << " nextHop=" << route.nextHop
+                << " learnedFrom=" << route.learnedFrom
+                << std::endl;
+    }
+}
+
+bool
+CsrNetLayer::LookupDiscoveryNextHop (
+  CsrNodeId destination,
+  CsrNodeId &nextHopOut) const
+{
+  const RouteEntry *forward = FindBestRoute (destination);
+  const bool includeReverse =
+    m_nodeType == CsrNodeType::Gateway ||
+    m_nodeType == CsrNodeType::Routable;
+
+  bool reverseValid = false;
+  CsrNodeId reverseHop = CSR_BROADCAST_ID;
+
+  if (includeReverse)
+    {
+      auto reverseIt = m_reverseRoutes.find (destination);
+
+      if (reverseIt != m_reverseRoutes.end () &&
+          reverseIt->second.valid)
+        {
+          reverseHop = reverseIt->second.reverseHop;
+          auto neighborIt = m_nwkNeighbors.find (reverseHop);
+
+          reverseValid =
+            neighborIt != m_nwkNeighbors.end () &&
+            neighborIt->second.lastHeardSec >= 0.0 &&
+            !neighborIt->second.stale &&
+            IsArlNeighborUsable (reverseHop);
+        }
+    }
+
+  if (forward == nullptr && !reverseValid)
+    {
+      return false;
+    }
+
+  // routesListWalkNext() selects a capable forward route first.  For an
+  // Ordinary destination it instead trusts a usable reverse route; with no
+  // reverse route, a direct/non-capable forward route remains usable.
+  if ((forward != nullptr && forward->capability != 0) || !reverseValid)
+    {
+      nextHopOut = forward->nextHop;
+    }
+  else
+    {
+      nextHopOut = reverseHop;
+    }
+
+  return true;
+}
+
+std::vector<CsrNodeId>
+CsrNetLayer::CollectKnownDiscoveryNodes () const
+{
+  std::vector<CsrNodeId> nodes;
+
+  // routesListWalkNext() walks destHead, whose newest logical destination is
+  // first.  Alternate candidates do not change this order.
+  for (CsrNodeId destination : m_destinationCreationOrder)
+    {
+      CsrNodeId nextHop = CSR_BROADCAST_ID;
+
+      if (destination == m_nodeId ||
+          destination == CSR_BROADCAST_ID ||
+          !LookupDiscoveryNextHop (destination, nextHop))
+        {
+          continue;
+        }
+
       nodes.push_back (destination);
 
       if (nodes.size () == CsrSnmpHeader::MAX_NODES)
@@ -7315,12 +7413,11 @@ CsrNetLayer::SendSnmp (
   CsrNodeId hopDestination = destination;
   if (destination != CSR_BROADCAST_ID)
     {
-      // send_snmp_pk() uses lookup_route(), not the DATA forwarding policy.
-      // Consequently a direct Ordinary/non-capable node is still a valid
-      // discovery target even though it cannot be used as a transit route.
-      const RouteEntry *route = FindBestRoute (destination);
-
-      if (route == nullptr)
+      // update_route_table() materializes routesListWalkNext()'s selected
+      // forward-or-reverse next hop before send_snmp_pk() calls
+      // lookup_route().  Use that same selection, rather than the DATA
+      // forwarding policy, for legacy discovery control.
+      if (!LookupDiscoveryNextHop (destination, hopDestination))
         {
           // The packet is destroyed immediately.  It is neither queued nor
           // allowed to trigger an implicit discovery.
@@ -7332,8 +7429,6 @@ CsrNetLayer::SendSnmp (
                     << std::endl;
           return false;
         }
-
-      hopDestination = route->nextHop;
     }
 
   CsrSnmpHeader header;
@@ -8759,7 +8854,9 @@ CsrNetLayer::FindBestRoute (
        m_routes)
     {
       if (route.nwkDst != destination ||
-          !route.valid)
+          !route.valid ||
+          (route.selectionDeferred &&
+           m_arlNeighborAdmissionEnabled))
         {
           continue;
         }
@@ -9524,6 +9621,14 @@ RecomputeRoutesViaNextHop (
 
       const SelectedRouteState &before =
         entry.second;
+
+      // routesReroute() revisits destinations that already have a selected
+      // path.  Its routesFindBestRoute() scan may now use a candidate cached
+      // while that candidate's reporter was inactive.
+      if (before.available)
+        {
+          ReleaseDeferredRouteCandidates (destination);
+        }
 
       SelectedRouteState after =
         CaptureSelectedRouteState (

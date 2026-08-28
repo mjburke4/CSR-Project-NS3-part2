@@ -1,6 +1,6 @@
 # OPNET MAC receive/contention parity
 
-Updated: 2026-08-27
+Updated: 2026-08-28
 
 ## Scope
 
@@ -81,9 +81,11 @@ The Idle-RTS branch redraws a counter at zero because `prep_tx()` tests
 `<= 0`; Search activation redraws only after a counter has expired below zero.
 
 The longer airtime exposed a discovery ordering race that the old placeholder
-duration hid. Discovery completion now waits for queued/in-flight MAC control
-to clear and then observes one quiet response interval. The existing scheduled
-DiscoveryStop remains the hard lifecycle bound.
+duration hid. The later route-library audit resolved that boundary directly:
+local discovery broadcasts at relative `+0`, `+5`, and `+10` seconds and ends
+on the fourth callback at `+15`, without waiting for queued/in-flight MAC
+control or an extra quiet interval. The independently scheduled 30-second
+DiscoveryStop is only a fallback.
 
 ## Duty-cycle behavior
 
@@ -117,8 +119,8 @@ recorded as a miss.
 - a real HOP retry that consumes the preceding advertised slot; and
 - cancellation of a delayed packing retry on entry to Idle.
 
-The complete regression baseline is 30 focused smoke tests plus
-`csr-mac-demo-split` and the imported-scenario runner, all passing (32/32).
+The complete regression baseline is 31 focused smoke tests plus
+`csr-mac-demo-split` and the imported-scenario runner, all passing (33/33).
 
 ## Remaining PHY boundary
 

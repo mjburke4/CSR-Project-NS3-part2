@@ -338,9 +338,25 @@ more than one hop, yet they contribute
 representing 3.52% of deliveries. Mean per-visit NWK residence rises from
 0.073 seconds at node 3 and 5.361 seconds at node 5 to 153.224 seconds at node
 4, 287.907 seconds at node 2, and 919.847 seconds at node 8. Route discovery
-does explain source 7's late first admission: its five-hop gateway route is
-selected at 386.106 seconds. The route set stops changing by 389.955 seconds,
-however, and every delivered source uses one loop-free path thereafter.
+does explain source 7's late first admission in that older ns-3 trajectory:
+its five-hop gateway route is selected at 386.106 seconds, and the route set
+stops changing by 389.955 seconds. Those timestamps are historical ns-3
+diagnostics, not OPNET event truth; the recovered PB/OV selection contains no
+route events.
+
+The current route-convergence rerun removes that startup admission lag. At
+88.548912442 seconds, node 8 selects the direct route to destination 7 with
+next hop 7, cost 7,450, path `7`, and reason `candidate update`. At
+88.848492442 seconds, node 7 admits neighbor 8 and selects the direct route to
+destination 8 with next hop 8, cost 7,450, path `8`, and reason
+`neighbor admitted`. The already cached transit candidates become selectable
+only when a fresh routing UPDATE from neighbor 8 is processed at the same
+timestamp; the resulting gateway route to destination 1 has next hop 8, cost
+37,250, and path `8>2>4>5>1`. The final global route change occurs at
+92.514939163 seconds (node 3 to destination 7 via next hop 5, cost 37,250,
+path `5>4>2>8>7`), so all 44 route changes complete before application traffic
+starts at 300 seconds. These exact times are likewise ns-3 diagnostic evidence,
+not OPNET route-event observations.
 
 ### Application/NWK/HOP admission-state diagnostic
 
@@ -354,48 +370,48 @@ state, and the correlated `(src,dst,sequence)` identity wherever the modeled
 packet carries it. Enabling the ledger does not change modeled bytes, queue
 order, route selection, random draws, or event scheduling.
 
-The exact-order canonical 6,000-second multihop ledger has 3,394,651 events
-and SHA-256
-`701272f6499f4d32c7bad8549a3956c72971ab677d1c1d6f5a72b2a1be999a93`.
+The current route-convergence 6,000-second trace has 3,271,308 events and
+SHA-256
+`64bf81c8b2155cd10e3688b468219c6d7d018dee73097c3cb0a45456339231f2`.
 Its 1,710,000 application decisions reconcile exactly to the compact
-diagnostics: 14,566 admissions and 1,695,434 source-ordered blocks. At the NWK
-boundary it records 18,331 admissions, 1,204,924 `neighbor_capacity` holds,
-4,152 `global_capacity` holds, and zero `no_route` holds. The neighbor holds
-identify the congested directed legs:
+diagnostics: 14,551 admissions and 1,695,449 `blocked_nsdp` decisions, with
+zero discovery, empty-topology, gateway-route, or dynamic-destination blocks.
+At the NWK boundary it records 18,713 admissions, 1,073,828
+`neighbor_capacity` holds, 4,057 `global_capacity` holds, and zero `no_route`
+holds. The neighbor holds identify the congested directed legs:
 
 | Directed leg | `neighbor_capacity` holds |
 | --- | ---: |
-| `2>4` | 592,227 |
-| `4>5` | 268,430 |
-| `8>2` | 242,476 |
-| `7>8` | 60,138 |
-| `5>1` | 40,620 |
-| `3>1` | 1,033 |
+| `2>4` | 433,191 |
+| `4>5` | 295,107 |
+| `8>2` | 228,055 |
+| `7>8` | 59,749 |
+| `5>1` | 56,640 |
+| `3>1` | 1,086 |
 
 These hold totals count repeated queue-scan decisions, not unique packets or
-time-weighted occupancy. The increase from the DACK-ordering checkpoint is the
-expected evidence of generic HOP-origin ACK/DACK and expiry wakes; application
-admissions, HOP completions, and packet outcomes remain unchanged.
+time-weighted occupancy. HOP records 15,321 ACK completions, 2,076 DACK
+completions, and 1,281 `no_ack` completions, with 2,070 delayed capacity
+releases. Receiver feedback contains 16,200 ACK and 2,067 DACK decisions.
+Strict admission analysis passes with zero invalid legs, zero global issues,
+and zero pre-limit DACK findings. Strict path analysis also passes with 13,817
+delivered chains, 734 valid incomplete prefixes, zero invalid packets, and
+zero route-context mismatches. The incomplete inventory is 201 open in NWK,
+471 final `no_ack`, 34 open resend, 24 completed ACK, 3 completed DACK, and 1
+packet with no NWK observation.
 
-HOP records 14,892 ACK completions, 2,162 DACK completions, and 1,244
-`no_ack` completions; 2,156 delayed DACK-capacity holds expire. Receiver
-feedback contains 15,747 ACK and 2,161 DACK decisions. Strict admission
-analysis passes with zero invalid legs, zero global issues, zero pre-limit
-DACKs, and zero 15-to-16 DACK decisions. Strict path analysis also passes with
-13,854 delivered chains, 712 valid incomplete prefixes, and zero invalid
-packets. The incomplete inventory is 220 open in NWK, 443 final `no_ack`, 32
-open resend, 12 completed ACK, and 5 completed DACK packets.
-
-The final rerun's aggregate trace has SHA-256
-`8498d2bec10292df73ce60d1bd7823408dcfab614475559b27f8bd03bf264ed9`,
+The current rerun's aggregate trace has SHA-256
+`64bf81c8b2155cd10e3688b468219c6d7d018dee73097c3cb0a45456339231f2`,
 and its generated ns-3 aggregate CSV has SHA-256
-`ec20882a5419834d6920303c38f0528096aee445539d4d5d80def6f2ccf64012`.
+`059b326efa52f1526823d6dfac124b9c1c7e9ec8e642544a31e8f44b2037cfa3`.
 The selected eight-series historical comparison still aligns all 800 points,
 reports 665 exact-tolerance numeric mismatches, and preserves 20 OPNET
-no-sample values. Its corrected ns-3 means are 2.42767 packets/s sent, 2.30900
-packets/s received, and 79.9450 seconds end-to-end delay, versus OPNET's
-2.01200, 1.90167, and 112.748 respectively. Thus clearing the source-order
-violation does not by itself establish aggregate parity.
+no-sample values; application packet size is exact in every measured bucket.
+Its ns-3 means are 2.42516666667 packets/s sent, 2.30283333333 packets/s
+received, and 74.979382019 seconds end-to-end delay, versus OPNET's 2.012,
+1.9016667, and 112.748007455 respectively. Correct route convergence and
+pre-traffic admission therefore do not by themselves establish aggregate
+parity.
 
 The 20-/40-second values above are the nominal custody intervals. Recovered
 `br_hop.pr.c` schedules one DACK-list scan per entry at the nominal hold plus
@@ -410,10 +426,11 @@ wake is nominally one more `TIC` later and can coalesce with an already-pending
 HOP wake. Its event handle remains distinct from NWK's local queue-check
 handle, matching the two OPNET processes.
 
-Compared with the DACK-ordering checkpoint, the resend/generic-wake correction
-leaves all packet counts and all eight core aggregate series unchanged. It
-adds the source-required NWK scans reflected in the larger hold-row totals
-above, without changing admissions or packet trajectories.
+At the earlier resend/generic-wake checkpoint, compared with its
+DACK-ordering predecessor, that correction left packet counts and the eight
+core aggregate series unchanged while adding the source-required NWK scans.
+This is historical checkpoint evidence; the current route-convergence rerun
+supersedes its admission, hold, packet-outcome, and aggregate counts above.
 
 The retained pre-fix trace has SHA-256
 `cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
@@ -448,11 +465,11 @@ attempt before packet creation:
 | `blue_radio_campus-hidden_nodes_symmetrical` | 149,250,000 | 763,700 | 0 | 0 | 0 | 0 | 148,486,300 |
 | `blue_radio_campus-multihop` | 1,710,000 | 14,740 | 1,500 | 4,117 | 189 | 0 | 1,689,454 |
 
-The post-fix multihop row is 1,710,000 attempts, 14,566 admissions, 2,000
-discovery blocks, 4,112 empty-topology blocks, 462 gateway-route blocks, zero
-dynamic-destination blocks, and 1,688,860 NSDP blocks. It is intentionally
-kept separate rather than rewriting the provenance of the earlier comparator
-manifest.
+The current route-convergence multihop row is 1,710,000 attempts, 14,551
+admissions, zero discovery blocks, zero empty-topology blocks, zero
+gateway-route blocks, zero dynamic-destination blocks, and 1,695,449 NSDP
+blocks. It is intentionally kept separate rather than rewriting the provenance
+of the earlier comparator manifest.
 
 The compact trace SHA-256 values are, respectively,
 `94091ec88155ab9c97b3a667b52f96cf516c618e5405e0533de5092a8bae494b`,

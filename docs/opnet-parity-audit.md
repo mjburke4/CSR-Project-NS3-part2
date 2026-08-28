@@ -54,8 +54,11 @@ completion.
 ## Completed or close
 
 - Strict NWK positive-DSCP head insertion and best-effort tail insertion.
-- One-`TIC` NWK queue release, blocked-entry scanning, and no implicit
-  discovery from the DATA queue.
+- Source-owned NWK queue wake semantics: local and relay enqueue paths request
+  the NWK process's own queue check at `+TIC`, while HOP feedback, DACK expiry,
+  and final resend expiry request the separate coalescing HOP wake. Route
+  receipt, neighbor activation, and discovery completion do not themselves
+  wake a packet already held in NWK, and DATA never starts implicit discovery.
 - OPNET-global ACK/resend behavior for NWK DATA.
 - HELLO capability preservation and monotonic active-node population.
 - OPNET ARL local-only link-cost calculation: RoutingInfo is retained as
@@ -100,6 +103,15 @@ completion.
 - Inactive-neighbor DATA rejection with CHECK_MESSAGE initiation, continued
   RoutingUpdate processing from inactive neighbors, and relationship reset on
   remote security-count change.
+- Source-backed inactive-transit admission ordering: RoutingUpdates received
+  from an inactive reporter are retained but cannot be selected. Admitting the
+  reporter recomputes only its direct-neighbor destination; cached transit
+  candidates remain deferred until a later source-owned recomputation revisits
+  their destinations. Normal and looped post-admission RoutingUpdates are
+  covered triggers, including selection of a cached alternate reporter. If a
+  reporter becomes inactive before or after admission, its learned transit
+  candidates are deleted and cannot resurrect merely because that neighbor is
+  admitted again.
 - Legacy ARL INFO/UPDATE/FLUSH byte streams, six-byte section prefixes,
   out-of-order atomic reassembly, and independent reliable HOP sections.
 - End-to-end 24-bit node IDs with `0xFFFFFF` broadcast, exact big-endian node
@@ -271,12 +283,20 @@ delivery events.
 | Long preamble supports duty-cycled discovery; short preamble must arrive during an awake window | Periodic wake phase, Idle/Search transitions, and preamble-survival check | Long preamble bridges a 500-ms sleep interval; short preamble records one miss. |
 | Preamble/header fields transmit at S0 and payload/FCS at the selected rate | Source-derived OTA duration using exact OPNET envelope bytes | Existing sent-time, queue, integration, and slot tests use the new airtime checkpoints. |
 
-Exact airtime also exposed a control-order race: the fourth discovery timer
-could stop discovery while the third long-preamble broadcast was still on air.
-Discovery completion now waits for local MAC control to clear and observes one
-quiet response interval, while the independently scheduled stop event remains
-the hard bound. The autonomous no-static-route convergence scenario covers
-this ordering.
+The recovered discovery schedule is independent of radio completion.
+`routesDiscoveryInitLocal()` uses a 5,000-ms interval with repeat count three:
+the node broadcasts at relative `+0`, `+5`, and `+10` seconds, then the fourth
+broadcaster callback ends discovery at `+15` seconds. That callback immediately
+invokes the wrapper's discovery-complete path and cancels the nominal
+30-second stop, which remains only a fallback. OPNET does not wait for pending
+admission, local MAC/queue quiet, or an extra response interval, and the NWK
+wrapper does not synthesize per-neighbor Verify traffic before completion.
+Focused timing checks pin every boundary at nanosecond resolution; a separate
+ordering case proves that the newest-created logical destination is the first
+serialized SNMP discovery handoff and that a capable local node includes a
+usable reverse-only destination in the walk. That reverse-only case also
+observes the actual frame: the outer HOP destination is the selected reverse
+neighbor while the inner SNMP destination remains the logical endpoint.
 
 ## Step 7: deterministic PHY front end
 
@@ -437,35 +457,33 @@ only 9.68% of deliveries but contribute 85.79% of cumulative delay. These are
 ns-3 isolation measurements, not OPNET numeric parity: the recovered `*.ov`
 results do not contain NWK queue vectors or packet-path event order.
 
-The opt-in application/NWK/HOP ledger now closes both that source-order
-boundary, the recovered DACK-expiration boundary, and the generic HOP wake
-ordering. Its canonical 6,000-second trace contains 3,394,651 events with
-SHA-256
-`701272f6499f4d32c7bad8549a3956c72971ab677d1c1d6f5a72b2a1be999a93`.
-All 1,710,000 application attempts reconcile to 14,566 admissions and
-1,695,434 blocks. NWK records 18,331 admissions, 1,204,924 per-neighbor holds,
-4,152 global-capacity holds, and zero no-route holds. The largest directed-leg
-counts are 592,227 on `2>4`, 268,430 on `4>5`, and 242,476 on `8>2`.
+The opt-in application/NWK/HOP ledger now closes that source-order boundary,
+the recovered DACK-expiration and generic-wake boundaries, and the
+route-convergence/admission boundary. The current canonical 6,000-second
+campus trace has SHA-256
+`64bf81c8b2155cd10e3688b468219c6d7d018dee73097c3cb0a45456339231f2`.
+It records 14,551 application admissions, 18,713 NWK/HOP admissions,
+1,073,828 per-neighbor holds, and 4,057 global-capacity holds. Strict
+packet-path analysis closes 13,817 deliveries and classifies 734 unfinished
+prefixes as structurally valid, with zero invalid packets.
 
-HOP completes 14,892 legs by ACK, 2,162 by DACK, and 1,244 by final `no_ack`;
-2,156 DACK holds later release capacity. Receiver feedback contains 15,747
-ACK and 2,161 DACK decisions. Admission-ledger strict mode passes with zero
-invalid legs, zero global issues, zero pre-limit DACKs, and zero 15-to-16 DACK
-decisions. Packet-path strict mode also passes with 13,854 deliveries, 712
-valid incomplete prefixes, and zero invalid packets. The joined inventory is
-220 open NWK packets, 443 final `no_ack`, 32 open resends, 12 completed ACKs,
-and 5 completed DACKs.
+In that seeded campus diagnostic, node 7's direct-neighbor route and the fresh
+transit updates become selectable at `88.848492442` seconds. Its selected
+gateway route is `8>2>4>5>1` with cost 37,250, and convergence completes before
+application traffic starts at 300 seconds. The exact timestamp is a diagnostic
+for this ns-3 run, not a claimed cross-simulator timing contract.
 
 Each DACK entry now schedules its list-wide expiry scan at the nominal 20- or
 40-second deadline plus one OPNET `TIC`. At ns-3's nanosecond resolution, the
 source value `1 / 36 MHz` is 28 ns. A scan releases every entry already past
 its nominal deadline, so entries less than one `TIC` apart can coalesce: the
 effective per-entry offset is in `[0,TIC]`, and every release must coincide
-with an actual scheduled DACK timer. All 2,156 releases in the canonical run
-are isolated and occur at `hold + TIC`. Focused event-order tests cover the
-normal and maximum-resend 40-second production paths, prove capacity remains
-held immediately after the nominal deadline, exercise a two-entry coalesced
-scan, and prove isolated NWK readmission at `hold + 2*TIC`. A previously
+with an actual scheduled DACK timer. At the preceding generic-wake checkpoint,
+all 2,156 releases were isolated and occurred at `hold + TIC`. Focused
+event-order tests cover the normal and maximum-resend 40-second production
+paths, prove capacity remains held immediately after the nominal deadline,
+exercise a two-entry coalesced scan, and prove isolated NWK readmission at
+`hold + 2*TIC`. A previously
 pending HOP-origin wake coalesces that final request exactly as OPNET's
 `op_ev_pending()` does, without postponing the first event. The NWK process's
 local queue-check event has a separate handle, so it cannot consume or
@@ -493,7 +511,7 @@ missing-entry fallback, unknown/stale/no-op feedback, wrong-destination
 rejection, the disabled known single-DACK path, isolated wake latency, and both
 feedback and expiry coalescing.
 
-The final rerun's aggregate trace has SHA-256
+The preceding generic-wake checkpoint's aggregate trace has SHA-256
 `8498d2bec10292df73ce60d1bd7823408dcfab614475559b27f8bd03bf264ed9`,
 and its generated ns-3 aggregate CSV has SHA-256
 `ec20882a5419834d6920303c38f0528096aee445539d4d5d80def6f2ccf64012`.
@@ -552,12 +570,12 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Compare route convergence and admission semantics against any newer
-   `br_nwk.pr.c`, recovered runtime source, or historical evidence that becomes
-   available. In particular, verify the node-7 five-hop gateway route selected
-   at 386.106492 seconds and the surrounding discovery sequence. Keep
-   ECC/prior-stage rejection accounting as a separate statistic-identity
-   problem rather than folding it into queue calibration.
+1. Close the remaining source-backed ARL control edges: propagate the
+   source-owned self route and its capability exactly, preserve grouped
+   changed-route fanout, and reproduce reliable-control retry when only part
+   of a destination group remains pending. Keep ECC/prior-stage rejection
+   accounting as a separate statistic-identity problem rather than folding it
+   into queue calibration.
 2. When licensed Modeler access is available, execute the prepared
    reservation/collision case, retain its CSV and provenance manifest,
    validate it, and run the event-order differential comparison.
@@ -598,9 +616,9 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Current regression baseline
 
-All 32 CSR executable targets build on this audit revision. The 30 focused
+All 33 CSR executable targets build on this audit revision. The 31 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (32/32). All 143 focused Python tests pass; the suite additionally
+workflow pass (33/33). All 143 focused Python tests pass; the suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
@@ -661,11 +679,22 @@ profile propagation, 500-kbit/s scenario caps, exact 500/1000 OTA durations,
 production DPSK/DQPSK BER and ECC outcomes, same-rate jammer-as-noise ordering,
 signed stronger/shorter-jammer interval handling, and safe one-frame queue
 progress when no high-rate concat limit is available.
-The admission test still covers pre-admission DATA
-rejection, reciprocal key exchange,
-ACK-driven outbound-key completion, NeighborCheck activation, route selection,
-and exactly-once post-admission DATA delivery. The autonomous convergence test
-still covers a lossless 0-1-2 line with no static routes, complete ARL snapshot
-ACK/reassembly state, bidirectional two-hop learning, and exactly-once DATA
-delivery. Warnings are limited to the pre-existing unused callback/CSV helper
-warnings.
+The admission test still covers pre-admission DATA rejection, reciprocal key
+exchange, ACK-driven outbound-key completion, NeighborCheck activation, and
+exactly-once post-admission DATA delivery. It now also proves that an inactive
+reporter's cached transit route remains deferred when the reporter is admitted
+and becomes selectable when a fresh ARL byte-stream RoutingUpdate triggers
+destination recomputation. A second cached candidate proves that an accepted
+looped byte-stream UPDATE performs the same recomputation without selecting its
+invalid tombstone. The same test forces that alternate reporter inactive,
+re-admits it, and requires a fresh UPDATE before its transit route returns. The
+test also fails the primary reporter before its first admission and proves its
+cached transit route was deleted. The discovery-ordering
+test pins the gateway's `10/15/20/25`-second broadcast/completion boundaries and
+newest-destination-first SNMP handoff, including exact reverse-only HOP and
+final-destination addressing. The queue-order tests prove that route
+receipt, neighbor activation, and discovery completion do not create an
+unsourced NWK wake. The autonomous convergence test still covers a lossless
+0-1-2 line with no static routes, complete ARL snapshot ACK/reassembly state,
+bidirectional two-hop learning, and exactly-once DATA delivery. Warnings are
+limited to the pre-existing unused callback/CSV helper warnings.
