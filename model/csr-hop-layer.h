@@ -550,6 +550,23 @@ public:
 
     if (entry == nullptr)
       {
+        // br_hop retains one handle to the most recently scheduled resend
+        // timer.  A MAC sent indication without a matching resend entry still
+        // installs the fallback global scan when that handle is no longer
+        // pending (notably after resend-queue overflow).
+        if (!m_lastResendTimerEvent.IsPending ())
+          {
+            Time due = sentAt + m_resendTime + CsrOpnetTic ();
+            Time delay =
+              due > Simulator::Now ()
+                ? due - Simulator::Now ()
+                : Seconds (0.0);
+            m_lastResendTimerEvent =
+              Simulator::Schedule (
+                delay,
+                &CsrHopLayer::CheckResend,
+                this);
+          }
         return;
       }
 
@@ -571,19 +588,22 @@ public:
         ? m_resendTime + m_resendTime
         : m_resendTime;
 
-    Time due = sentAt + wait;
+    Time due = sentAt + wait + CsrOpnetTic ();
     Time delay =
       due > Simulator::Now ()
         ? due - Simulator::Now ()
         : Seconds (0.0);
 
-    // OPNET schedules one RESEND_TIMER event for every br_Mac_Hop_Inst.
-    // Keeping these events independent prevents a later frame from inheriting
-    // the check cadence of an earlier transmission.
-    Simulator::Schedule (
-      delay,
-      &CsrHopLayer::CheckResend,
-      this);
+    // OPNET schedules one RESEND_TIMER event for every br_Mac_Hop_Inst at the
+    // nominal resend/final-ACK deadline plus one 36-MHz TIC.  Keeping these
+    // events independent preserves the source's list-wide sweep behavior: a
+    // stale or earlier timer can process every entry whose nominal deadline
+    // has passed, including entries less than one TIC apart.
+    m_lastResendTimerEvent =
+      Simulator::Schedule (
+        delay,
+        &CsrHopLayer::CheckResend,
+        this);
   }
 
   bool CanAcceptDataGlobally () const
@@ -745,6 +765,7 @@ private:
   Callback<void, CsrNodeId> m_linkFailureCb;
 
   Callback<void> m_nwkQueueWakeCb;
+  EventId m_nwkQueueWakeEvent;
 
   //Callback<void, uint16_t> m_neighborCheckSuccessCb;
 
@@ -779,6 +800,30 @@ private:
       }
 
     m_nsdpDecrCb (entry.networkSource, entry.networkDestination);
+  }
+
+  void ScheduleNwkQueueWake ()
+  {
+    // br_hop owns one pending remote CHECK_NWK_Q event, distinct from the
+    // Network process's local queue-check event.  ACK/DACK feedback, final
+    // resend timeout, and DACK expiry coalesce only with other HOP-origin
+    // wakes and do not postpone the first scheduled wake.
+    if (!m_nwkQueueWakeEvent.IsPending ())
+      {
+        m_nwkQueueWakeEvent =
+          Simulator::Schedule (
+            CsrOpnetTic (),
+            &CsrHopLayer::RunNwkQueueWake,
+            this);
+      }
+  }
+
+  void RunNwkQueueWake ()
+  {
+    if (!m_nwkQueueWakeCb.IsNull ())
+      {
+        m_nwkQueueWakeCb ();
+      }
   }
 
    struct NeighborInfo
@@ -885,6 +930,7 @@ private:
 
   std::map<CsrNodeId, uint16_t>                  m_lastSentSeqByDest;
   std::list<ResendEntry>                        m_resendQueue;
+  EventId                                       m_lastResendTimerEvent;
   uint64_t                                      m_resendQueueOverflowCount {0};
   Time                                          m_resendTime;
   uint32_t                                      m_maxNumResend;
@@ -2322,9 +2368,10 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
         }
       else if (hdr.IsDack ())
         {
-          m_mac->CancelAcknowledgedFrames (
-            hdr.GetSrc (), hdr.GetSeq (), 0, 1);
-          HandleDackFrame (hdr);
+          // The recovered source hard-disables its legacy single-DACK block,
+          // and the exact-sequence fallback is guarded to ACK only.  A
+          // non-window DACK is therefore a custody/MAC no-op, while the
+          // packet-level generic wake below still runs.
         }
       else
         {
@@ -2332,6 +2379,12 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
             hdr.GetSrc (), hdr.GetSeq (), 1, 0);
           HandleAckFrame (hdr);
         }
+
+      // Legacy br_hop schedules this remote interrupt after every readable,
+      // locally addressed ACK/DACK packet.  The wake is required even when
+      // every sequence is unknown, stale, duplicated, or otherwise produces
+      // no resend/flow-control state change.
+      ScheduleNwkQueueWake ();
       return;
     }
 
@@ -3379,22 +3432,17 @@ CsrHopLayer::CheckDack ()
               WriteDifferentialAdmissionTrace (releaseEvent);
             }
 
-          // Legacy check_dack() schedules the Network-layer queue interrupt
-          // one additional TIC after this delayed HOP slot is released.  The
-          // callback is CsrNetLayer::ScheduleCheckNwkQueue(), which preserves
-          // that second offset rather than running the scan synchronously.
-          if (!m_nwkQueueWakeCb.IsNull ())
-            {
-              std::cout << "[HOP " << m_nodeId
-                        << "] DACK release waking NWK queue"
-                        << " neighbor="
-                        << it->dest
-                        << " seq="
-                        << it->seq
-                        << std::endl;
-
-              m_nwkQueueWakeCb ();
-            }
+          // Legacy check_dack() schedules the HOP-owned remote Network-layer
+          // interrupt one additional TIC after this delayed slot is released.
+          // Multiple expiries in this scan coalesce on that one pending wake.
+          std::cout << "[HOP " << m_nodeId
+                    << "] DACK release scheduling NWK queue wake"
+                    << " neighbor="
+                    << it->dest
+                    << " seq="
+                    << it->seq
+                    << std::endl;
+          ScheduleNwkQueueWake ();
 
           it =
             m_dackList.erase (it);
@@ -3930,28 +3978,41 @@ CsrHopLayer::CheckResend ()
             m_nodeId,
             CSR_STAT_HOP_RESEND_QUEUE_SIZE,
             static_cast<double> (m_resendQueue.size ()));
+          // Source check_resend() requests a Network queue scan after every
+          // final expiry, even when the frame has no NSDP or routing metadata.
+          ScheduleNwkQueueWake ();
           continue;
         }
 
-      if (now - e.lastTxTime >= m_resendTime)
+      ++it;
+    }
+
+  // Source check_resend() completes its full deletion pass before beginning
+  // the retransmission pass.  Preserve that same-time ordering so released
+  // capacity and timeout callbacks precede any newly queued resend.
+  for (auto &e : m_resendQueue)
+    {
+      if (!e.initialTxConfirmed ||
+          e.resendCount >= m_maxNumResend ||
+          now - e.lastTxTime < m_resendTime)
         {
-          NS_LOG_INFO ("Hop " << m_nodeId << " resending dest="
-                              << e.dest << " seq=" << e.seq
-                              << " dscp=" << unsigned (e.dscp)
-                              << " attempt=" << (e.resendCount + 1));
-
-          e.resendCount++;
-
-          // Keep the legacy provisional timestamp.  br_hop records the time
-          // it hands a retransmission to MAC, then br_Mac_Hop_Inst replaces
-          // it with the actual sent time when transmission occurs.
-          e.lastTxTime = now;
-
-          m_mac->EnqueueTxFrame (e.frame->Copy (), e.dest,
-                                 e.dscp, /*ackable*/ true);
+          continue;
         }
 
-      ++it;
+      NS_LOG_INFO ("Hop " << m_nodeId << " resending dest="
+                          << e.dest << " seq=" << e.seq
+                          << " dscp=" << unsigned (e.dscp)
+                          << " attempt=" << (e.resendCount + 1));
+
+      e.resendCount++;
+
+      // Keep the legacy provisional timestamp.  br_hop records the time it
+      // hands a retransmission to MAC, then br_Mac_Hop_Inst replaces it with
+      // the actual sent time when transmission occurs.
+      e.lastTxTime = now;
+
+      m_mac->EnqueueTxFrame (e.frame->Copy (), e.dest,
+                             e.dscp, /*ackable*/ true);
     }
 
 }

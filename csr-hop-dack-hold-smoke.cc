@@ -125,8 +125,9 @@ CheckFirstDack (Ptr<CsrHopLayer> hop)
            "first DACK prematurely released global HOP flow control");
   Require (hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 1,
            "first DACK prematurely released its neighbor slot");
-  Require (g_nwkWakeups == 0,
-           "first DACK woke NWK before its hold expired");
+  Require (g_nwkWakeups == 1 && g_nwkWakeTimes.size () == 1 &&
+             g_nwkWakeTimes[0] == Seconds (2.0) + CsrOpnetTic (),
+           "first DACK did not produce its generic wake one TIC later");
 }
 
 void
@@ -144,8 +145,9 @@ CheckBothDacksHeld (Ptr<CsrNetDevice> device,
            "DACKs did not retain both per-neighbor slots");
   Require (device->GetMac ().GetTransmittedFrameCount () == 1,
            "DACKed frames were retransmitted");
-  Require (g_nwkWakeups == 0,
-           "NWK woke while both DACK holds were active");
+  Require (g_nwkWakeups == 2 && g_nwkWakeTimes.size () == 2 &&
+             g_nwkWakeTimes[1] == Seconds (2.25) + CsrOpnetTic (),
+           "staggered DACK feedback did not produce two delayed wakes");
 }
 
 void
@@ -158,11 +160,11 @@ CheckFirstExpiryOnly (Ptr<CsrNetDevice> device,
            "first exact DACK expiry did not release its neighbor slot");
   Require (hop->GetOutstandingDataCount (SECOND_NEIGHBOR) == 1,
            "second staggered DACK was released too early");
-  Require (g_nwkWakeups == 1,
+  Require (g_nwkWakeups == 3,
            "first DACK expiry did not wake NWK exactly once");
-  Require (g_nwkWakeTimes.size () == 1 &&
-             g_nwkWakeTimes[0] == Seconds (22.0) + CsrOpnetTic (),
-           "first DACK capacity release was not at nominal expiry plus TIC");
+  Require (g_nwkWakeTimes.size () == 3 &&
+             g_nwkWakeTimes[2] == Seconds (22.0) + 2 * CsrOpnetTic (),
+           "first DACK expiry wake was not one TIC after capacity release");
   Require (device->GetMac ().GetTransmittedFrameCount () == 1,
            "DACKed frames were retransmitted during the hold");
 }
@@ -176,11 +178,11 @@ CheckFinalState (Ptr<CsrNetDevice> device,
   Require (hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 0 &&
              hop->GetOutstandingDataCount (SECOND_NEIGHBOR) == 0,
            "DACK expiry left a per-neighbor slot occupied");
-  Require (g_nwkWakeups == 2,
+  Require (g_nwkWakeups == 4,
            "staggered DACK expiries did not wake NWK once each");
-  Require (g_nwkWakeTimes.size () == 2 &&
-             g_nwkWakeTimes[1] == Seconds (22.25) + CsrOpnetTic (),
-           "second staggered DACK release was not at expiry plus TIC");
+  Require (g_nwkWakeTimes.size () == 4 &&
+             g_nwkWakeTimes[3] == Seconds (22.25) + 2 * CsrOpnetTic (),
+           "second DACK expiry wake was not one TIC after capacity release");
   Require (g_nsdpReleases == 2,
            "DACK expiry incorrectly released NSDP a second time");
   Require (device->GetMac ().GetTransmittedFrameCount () == 1,
@@ -197,8 +199,8 @@ CheckFirstNominalExpiry (Ptr<CsrHopLayer> hop)
   Require (hop->GetPendingDataCount () == 2 &&
              hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 1,
            "first DACK capacity released at the nominal 20-second expiry");
-  Require (g_nwkWakeups == 0,
-           "first DACK requested an NWK wake before expiry plus TIC");
+  Require (g_nwkWakeups == 2,
+           "capacity released or an extra wake ran at nominal DACK expiry");
 }
 
 void
@@ -220,7 +222,7 @@ BackdateSentConfirmation (Ptr<CsrHopLayer> hop)
   // test-only model hook.
   hop->NotifyMacFrameSent (FIRST_NEIGHBOR,
                            1,
-                           Simulator::Now () - Seconds (2.0));
+                           Simulator::Now () - Seconds (2.0) - CsrOpnetTic ());
 }
 
 void
@@ -231,8 +233,8 @@ CheckMaxResendDackHeld (Ptr<CsrHopLayer> hop)
   Require (hop->GetPendingDataCount () == 1 &&
              hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 1,
            "max-resend DACK did not retain HOP capacity");
-  Require (g_nwkWakeups == 0,
-           "max-resend DACK woke NWK before its doubled hold expired");
+  Require (g_nwkWakeups == 1,
+           "max-resend DACK did not issue one coalesced generic wake");
 }
 
 void
@@ -241,8 +243,8 @@ CheckMaxResendNominalExpiry (Ptr<CsrHopLayer> hop)
   Require (hop->GetPendingDataCount () == 1 &&
              hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 1,
            "max-resend DACK released capacity at the nominal 40-second expiry");
-  Require (g_nwkWakeups == 0,
-           "max-resend DACK requested an NWK wake before expiry plus TIC");
+  Require (g_nwkWakeups == 1,
+           "max-resend DACK issued an extra wake at nominal expiry");
 }
 
 void
@@ -253,9 +255,9 @@ CheckMaxResendFinalState (Ptr<CsrNetDevice> device,
   Require (hop->GetPendingDataCount () == 0 &&
              hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 0,
            "max-resend DACK did not release HOP capacity");
-  Require (g_nwkWakeups == 1 && g_nwkWakeTimes.size () == 1 &&
-             g_nwkWakeTimes[0] == expectedRelease,
-           "max-resend DACK release was not at 40 seconds plus TIC");
+  Require (g_nwkWakeups == 2 && g_nwkWakeTimes.size () == 2 &&
+             g_nwkWakeTimes[1] == expectedRelease,
+           "max-resend DACK wake was not one TIC after capacity release");
   Require (g_nsdpReleases == 1,
            "max-resend DACK expiry released NSDP twice");
   Require (device->GetMac ().GetQueuedFrameCount () == 0,
@@ -275,8 +277,8 @@ CheckCoalescedDacksHeld (Ptr<CsrHopLayer> hop)
              hop->GetOutstandingDataCount (FIRST_NEIGHBOR) == 1 &&
              hop->GetOutstandingDataCount (SECOND_NEIGHBOR) == 1,
            "nearby DACK capacity released before the first timer scan");
-  Require (g_nwkWakeups == 0,
-           "nearby DACKs woke NWK before the first timer scan");
+  Require (g_nwkWakeups == 1,
+           "nearby DACK feedback did not coalesce on its first generic wake");
 }
 
 void
@@ -289,9 +291,8 @@ CheckCoalescedDackFinalState (Ptr<CsrNetDevice> device,
              hop->GetOutstandingDataCount (SECOND_NEIGHBOR) == 0,
            "one DACK timer scan did not release both nominally expired holds");
   Require (g_nwkWakeups == 2 && g_nwkWakeTimes.size () == 2 &&
-             g_nwkWakeTimes[0] == expectedRelease &&
              g_nwkWakeTimes[1] == expectedRelease,
-           "nearby DACK expiries did not coalesce on the earlier timer scan");
+           "nearby DACK expiry wakes did not coalesce after the timer scan");
   Require (g_nsdpReleases == 2,
            "coalesced DACK timer released NSDP more than once");
   Require (device->GetMac ().GetQueuedFrameCount () == 0,
@@ -321,23 +322,26 @@ RunMaxResendTimingCase ()
 
   const Time dackAt = NanoSeconds (2);
   const Time nominalExpiry = dackAt + Seconds (40.0);
-  const Time releaseAt = nominalExpiry + CsrOpnetTic ();
+  const Time capacityReleaseAt = nominalExpiry + CsrOpnetTic ();
+  const Time nwkWakeAt = capacityReleaseAt + CsrOpnetTic ();
 
   Simulator::ScheduleNow (&BackdateSentConfirmation, hop);
   Simulator::Schedule (NanoSeconds (1), &BackdateSentConfirmation, hop);
   Simulator::Schedule (dackAt, &InjectDack, hop, FIRST_NEIGHBOR);
-  Simulator::Schedule (NanoSeconds (3), &CheckMaxResendDackHeld, hop);
+  Simulator::Schedule (dackAt + CsrOpnetTic () + NanoSeconds (1),
+                       &CheckMaxResendDackHeld,
+                       hop);
   // Probe just after the nominal deadline so the assertion remains robust
   // even when an implementation schedules its timer at that exact timestamp.
   Simulator::Schedule (nominalExpiry + NanoSeconds (1),
                        &CheckMaxResendNominalExpiry,
                        hop);
-  Simulator::Schedule (releaseAt + NanoSeconds (1),
+  Simulator::Schedule (nwkWakeAt + NanoSeconds (1),
                        &CheckMaxResendFinalState,
                        device,
                        hop,
-                       releaseAt);
-  Simulator::Stop (releaseAt + NanoSeconds (2));
+                       nwkWakeAt);
+  Simulator::Stop (nwkWakeAt + NanoSeconds (2));
   Simulator::Run ();
   Simulator::Destroy ();
 }
@@ -370,8 +374,7 @@ RunCoalescedTimingCase ()
   const Time secondNominalExpiry = secondDackAt + Seconds (20.0);
   const Time firstReleaseAt =
     firstDackAt + Seconds (20.0) + CsrOpnetTic ();
-  const Time secondOwnTimerAt =
-    secondNominalExpiry + CsrOpnetTic ();
+  const Time nwkWakeAt = firstReleaseAt + CsrOpnetTic ();
 
   Simulator::Schedule (firstDackAt,
                        &InjectDack,
@@ -387,12 +390,12 @@ RunCoalescedTimingCase ()
   // The first entry's timer runs 18 ns after the second entry's nominal
   // expiry, so the source's list-wide check releases both entries then.  The
   // second entry's own timer remains pending but has no capacity left to free.
-  Simulator::Schedule (secondOwnTimerAt + NanoSeconds (1),
+  Simulator::Schedule (nwkWakeAt + NanoSeconds (1),
                        &CheckCoalescedDackFinalState,
                        device,
                        hop,
-                       firstReleaseAt);
-  Simulator::Stop (secondOwnTimerAt + NanoSeconds (2));
+                       nwkWakeAt);
+  Simulator::Stop (nwkWakeAt + NanoSeconds (2));
   Simulator::Run ();
   Simulator::Destroy ();
 }

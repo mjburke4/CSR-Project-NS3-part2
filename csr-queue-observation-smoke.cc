@@ -562,6 +562,9 @@ BuildExactDack (CsrNodeId source,
   frame->RemoveHeader (header);
   header.SetIsDack (true);
   header.SetType (CSR_PKT_DACK);
+  header.SetHasAckWindow (true);
+  header.SetAckBitmap (0);
+  header.SetDackBitmap (1);
   frame->AddHeader (header);
   return frame;
 }
@@ -1475,6 +1478,72 @@ TestAdmissionLedgerNeighborAckRelease ()
 }
 
 void
+TestIndependentHopAndNwkQueueWakeHandles ()
+{
+  constexpr CsrNodeId sourceNode = 341;
+  constexpr CsrNodeId destinationNode = 342;
+  const Time tic = CsrOpnetTic ();
+
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  ConnectNwkStack (device, hop, nwk, sourceNode);
+  nwk->AddStaticRouteWithPathloss (
+    destinationNode,
+    destinationNode,
+    70.0,
+    true,
+    static_cast<uint8_t> (CsrNodeType::Routable));
+
+  // Both sends share NWK's local queue-check handle at +TIC.  The first is
+  // admitted and the second is held by the initial per-neighbor window.
+  nwk->Send (destinationNode,
+             0,
+             BuildTaggedPayload (16, 7401),
+             true);
+  nwk->Send (destinationNode,
+             0,
+             BuildTaggedPayload (16, 7402),
+             true);
+
+  // This callback is ordered after NWK's local scan but before the HOP-owned
+  // wake below.  It releases the first packet, allowing only the later remote
+  // wake to admit the held packet at this same timestamp.
+  Simulator::Schedule (tic, [device, hop, nwk] () {
+    Require (nwk->GetNwkQueueSize () == 1 &&
+               hop->GetPendingDataCount () == 1 &&
+               hop->GetOutstandingDataCount (destinationNode) == 1,
+             "NWK-local scan did not admit exactly the first packet");
+    hop->ReceiveFromMac (
+      BuildExactAck (destinationNode, sourceNode, 1), 70.0, 30.0);
+    Require (nwk->GetNwkQueueSize () == 1 &&
+               hop->GetPendingDataCount () == 0 &&
+               hop->GetOutstandingDataCount (destinationNode) == 0 &&
+               device->GetMac ().GetDataQueuedFrameCount () == 0,
+             "inter-handle ACK did not release the first HOP slot");
+  });
+
+  // Schedule a no-op feedback wake last, so its HOP EventId follows both the
+  // NWK-local scan and the capacity-release callback at the +TIC timestamp.
+  hop->ReceiveFromMac (
+    BuildExactAck (destinationNode, sourceNode, 400), 70.0, 30.0);
+
+  Simulator::Schedule (tic + NanoSeconds (1), [device, hop, nwk] () {
+    Require (nwk->GetNwkQueueSize () == 0 &&
+               nwk->GetNsdpCount (sourceNode, destinationNode) == 1 &&
+               hop->GetPendingDataCount () == 1 &&
+               hop->GetOutstandingDataCount (destinationNode) == 1 &&
+               hop->GetResendQueueSize () == 1 &&
+               device->GetMac ().GetDataQueuedFrameCount () == 1,
+             "HOP-owned wake coalesced with or was delayed by NWK-local handle");
+  });
+
+  Simulator::Stop (tic + NanoSeconds (2));
+  Simulator::Run ();
+  Simulator::Destroy ();
+}
+
+void
 TestAdmissionLedgerGlobalEffectiveLimit ()
 {
   constexpr CsrNodeId sourceNode = 341;
@@ -1987,6 +2056,7 @@ main ()
       TestAdmissionLedgerNoRouteAndSuccessfulAdmission ();
       TestApplicationNsdpAdmissionBoundary ();
       TestAdmissionLedgerNeighborAckRelease ();
+      TestIndependentHopAndNwkQueueWakeHandles ();
       TestAdmissionLedgerGlobalEffectiveLimit ();
       TestAdmissionLedgerDackSplitRelease ();
     }

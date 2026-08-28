@@ -351,9 +351,9 @@ leg, and writes both a bounded JSON summary and a packet-leg CSV. Structurally
 valid open NWK, resend, and DACK-hold states are inventoried rather than
 silently converted to failures.
 
-The exact-order canonical 6,000-second multihop trace contains 2,875,403
+The exact-order canonical 6,000-second multihop trace contains 3,394,651
 events and has SHA-256
-`4f85672a78044db4176a0866dc2e225e4f4652e95b5aa636a1b1f7234518a8ef`.
+`701272f6499f4d32c7bad8549a3956c72971ab677d1c1d6f5a72b2a1be999a93`.
 Its application ledger exactly partitions 1,710,000 attempts into 14,566
 admissions, 2,000 discovery blocks, 4,112 empty-topology blocks, 462
 gateway-route blocks, and 1,688,860 NSDP blocks. NWK decisions are:
@@ -361,12 +361,12 @@ gateway-route blocks, and 1,688,860 NSDP blocks. NWK decisions are:
 | NWK decision | Count |
 | --- | ---: |
 | Admitted | 18,331 |
-| `neighbor_capacity` | 686,581 |
-| `global_capacity` | 3,251 |
+| `neighbor_capacity` | 1,204,924 |
+| `global_capacity` | 4,152 |
 | `no_route` | 0 |
 
-The per-neighbor holds are 335,294 on `2>4`, 168,733 on `4>5`, 122,552 on
-`8>2`, 31,065 on `5>1`, 28,130 on `7>8`, and 807 on `3>1`. Those hold counts
+The per-neighbor holds are 592,227 on `2>4`, 268,430 on `4>5`, 242,476 on
+`8>2`, 60,138 on `7>8`, 40,620 on `5>1`, and 1,033 on `3>1`. Those hold counts
 are repeated queue-scan decisions rather than unique packets or time-weighted
 occupancy. HOP completion counts are 14,892 ACK, 2,162 DACK, and 1,244 final
 `no_ack`; 2,156 delayed DACK-capacity holds expire.
@@ -396,7 +396,64 @@ release to remain in range and to coincide with an actual scheduled DACK
 timer. Focused regressions cover isolated 20- and 40-second holds, reject the
 former bare-deadline behavior, exercise a coalesced two-entry scan, and prove
 integrated isolated NWK readmission at `hold + 2*TIC`. As in OPNET, an already
-pending NWK check can coalesce the final one-`TIC` wake.
+pending HOP-origin queue wake can coalesce the final one-`TIC` wake. The HOP
+and NWK processes retain separate pending-event handles, so an NWK-local queue
+check does not suppress or postpone that remote wake.
+
+### Resend expiry and HOP-origin queue wakes
+
+The resend path now preserves the recovered `br_hop` timer boundaries and
+same-time scan order. Every matching MAC sent indication records the actual
+transmission time and installs an independent list-wide resend scan. Its own
+normal-retry scan runs at that sent time plus two seconds and one OPNET `TIC`.
+After the second retry, its own final no-ACK scan runs from that retry's actual
+sent time plus four seconds and one `TIC`. An earlier list-wide timer may still
+process an entry once its nominal predicate is due. Each scan first completes its
+entire final-deletion pass, including capacity and tagged NSDP releases, and
+only then completes a second pass that queues eligible retransmissions. Thus a
+final expiry and another packet's retry at the same timestamp cannot reverse
+the source's release-before-requeue ordering.
+
+The source retains only the most recently installed resend-timer handle but
+does not cancel older timer events. Consequently, any timer callback scans the
+whole resend list and may process other entries whose nominal deadline has
+already passed. A MAC sent indication with no matching resend entry also arms
+the source's fallback global scan when that retained handle is no longer
+pending, including the resend-queue-overflow case. Final deletion always
+requests an NWK queue wake, even when the expired frame carries no NSDP or
+routing metadata.
+
+HOP owns one remote NWK-wake event distinct from NWK's local queue-check event.
+It runs one `TIC` after the first request, coalesces only with another pending
+HOP-origin request, and is not postponed by later requests. Every readable,
+locally addressed ACK or DACK requests this wake after feedback processing,
+including unknown, stale, duplicate, zero-bit cumulative, and other no-op
+feedback. A readable ACK/DACK for another HOP destination does not. Final
+no-ACK expiry and DACK-capacity expiry use the same HOP-owned wake path, so the
+former wakes NWK one `TIC` after deletion and the latter one `TIC` after its
+already delayed capacity release.
+
+The focused ns-3 regressions all pass and make those boundaries executable
+evidence:
+
+- `csr-hop-mac-sent-time-smoke` rejects retry at the bare two-second boundary,
+  requires both retries at their actual sent time plus `2 s + TIC`, rejects
+  final deletion at the bare four-second boundary, and requires deletion at
+  `4 s + TIC` followed by the NWK wake one more `TIC` later. It also exercises
+  the unmatched-sent fallback and proves that a same-scan final deletion
+  completes before another entry is requeued.
+- `csr-ack-window-smoke` proves that ordinary, unknown, stale, DACK, and
+  zero-bit cumulative feedback use the delayed generic wake; requests within
+  one `TIC` coalesce without postponement, while wrong-destination feedback
+  produces no wake. It also proves that the source-disabled single-DACK path
+  leaves a known resend entry and its pending MAC copy untouched.
+- `csr-hop-dack-hold-smoke` keeps the independent 20-/40-second DACK-release
+  timing checks and additionally requires feedback wakes at receipt plus one
+  `TIC`, expiry wakes at nominal hold plus two `TIC`s, and coalescing for
+  nearby feedback and expiry requests.
+- `csr-mac-hop-queue-limit-smoke` confirms that an ACK for the untracked 513th
+  overflow frame still produces its delayed generic wake without repairing
+  the source-equivalent pending or per-neighbor count mismatch.
 
 Recovered `br_hop.pr.c` obtains the NSDP entry, sends the relay packet to the
 separate NWK process, and tests the still-pre-enqueue count: 15 selects ACK
@@ -539,8 +596,8 @@ route-context mismatches, 13,854 valid deliveries, and 712 valid incomplete
 prefixes. Its packet-weighted 79.7413 seconds decomposes exactly into 66.7034
 seconds of NWK residence and 13.0380 seconds of post-NWK leg service/transit.
 
-The completed admission ledger records 686,581 per-neighbor holds and 3,251
-global holds, led by 335,294 on `2>4`, 168,733 on `4>5`, and 122,552 on
+The completed admission ledger records 1,204,924 per-neighbor holds and 4,152
+global holds, led by 592,227 on `2>4`, 268,430 on `4>5`, and 242,476 on
 `8>2`, with no no-route holds. All 2,161 receiver DACK decisions use a
 pre-enqueue NSDP count of at least 16. Strict admission analysis now passes
 with no invalid legs or global issues; the retained pre-fix trace remains the

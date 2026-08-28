@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 
 using namespace ns3;
 
@@ -12,6 +13,7 @@ namespace
 {
 
 uint16_t g_firstReceivedSequence = 0;
+std::vector<Time> g_nwkWakeTimes;
 
 void
 Require (bool condition, const char* message)
@@ -48,6 +50,12 @@ RecordFirstFrame (Ptr<Packet> frame, double, double)
   Require (frame->PeekHeader (header),
            "received MAC frame has no CSR header");
   g_firstReceivedSequence = header.GetSeq ();
+}
+
+void
+RecordNwkWake ()
+{
+  g_nwkWakeTimes.push_back (Simulator::Now ());
 }
 
 void
@@ -100,6 +108,8 @@ TestHopOverflowRemainsUntracked ()
   Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
   hop->SetNodeId (1);
   hop->SetMac (&device->GetMac ());
+  hop->SetNwkQueueWakeCallback (MakeCallback (&RecordNwkWake));
+  g_nwkWakeTimes.clear ();
 
   for (uint16_t sequence = 1;
        sequence <= CsrHopLayer::RESEND_QUEUE_SIZE;
@@ -144,6 +154,19 @@ TestHopOverflowRemainsUntracked ()
            "unknown overflow ACK repaired OPNET's pending-count mismatch");
   Require (hop->GetOutstandingDataCount (2) == 513,
            "unknown overflow ACK repaired OPNET's flow-count mismatch");
+
+  Require (g_nwkWakeTimes.empty (),
+           "unknown overflow ACK woke NWK synchronously instead of after TIC");
+
+  Simulator::Stop (CsrOpnetTic () + NanoSeconds (1));
+  Simulator::Run ();
+
+  Require (g_nwkWakeTimes.size () == 1 &&
+             g_nwkWakeTimes[0] == CsrOpnetTic (),
+           "unknown overflow ACK did not produce one delayed generic wake");
+  Require (hop->GetPendingDataCount () == 513 &&
+             hop->GetOutstandingDataCount (2) == 513,
+           "generic wake repaired the source-equivalent overflow mismatch");
 
   Simulator::Destroy ();
 }

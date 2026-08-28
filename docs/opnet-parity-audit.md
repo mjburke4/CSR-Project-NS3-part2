@@ -35,7 +35,7 @@ OPNET/ns-3 event-trace comparison.
 | Visible NWK wrapper behavior | 94-97% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, capability handling, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, automatic changed-route propagation, and fixed packet/control envelopes are covered. |
 | Full NWK routing behavior | 86-91% | ARL byte-stream exchange, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. Remaining uncertainty is concentrated in wrapper timing and untested edge cases rather than an unavailable routing implementation. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 93-96% | ACK/DACK windows, exact DACK expiration ordering, resend timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
+| HOP | 93-96% | ACK/DACK windows, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
 | Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
 | Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and differential traces. |
@@ -63,7 +63,7 @@ completion.
 - NWK/HOP admission, NSDP ACK/DACK selection, and global pending-DATA state.
 - Exact DACK custody ordering: nominal 20-/40-second holds, one per-entry timer
   at `hold + TIC`, list-wide expiry scans, and source-equivalent pending-event
-  coalescing for the subsequent NWK queue check.
+  coalescing for the subsequent HOP-owned NWK queue wake.
 - Source-backed ARL neighbor admission: unauthenticated Discover triggers a
   no-ACK KeyRequest; valid KeyUpdate triggers a reciprocal reliable KeyUpdate;
   only its ACK marks the outbound group key sent; and a NeighborCheck proof
@@ -120,10 +120,23 @@ completion.
 - Relay custody, reverse routes, invalidation, alternate paths, and no-route
   ACK behavior.
 - 16-bit HOP sequences, cumulative ACK/DACK windows, duplicate suppression,
-  retransmission timing from actual MAC send time, and 512-entry resend limit.
+  and a 512-entry resend limit. Each matching MAC sent indication starts an
+  uncancelled, list-wide resend scan at the actual sent instant plus the
+  nominal two-second retry or four-second final-ACK wait and one 36-MHz `TIC`.
+- Source-order resend scans delete every due final timeout before making a
+  second pass for due retries. A MAC sent indication missing its resend entry
+  installs the source's fallback global scan when the retained timer handle is
+  no longer pending.
 - Multi-destination reliable routing-control ACK bookkeeping.
 - Final DATA timeout releases flow-control/NSDP custody without creating an
-  OPNET-incompatible routing-link failure.
+  OPNET-incompatible routing-link failure and requests the HOP-owned generic
+  NWK queue wake one `TIC` later.
+- Every readable ACK/DACK addressed to the local node requests that same
+  generic wake, including unknown, stale, duplicate, and zero-bit/no-op
+  feedback. HOP-origin wakes coalesce behind the first pending HOP event, while
+  the NWK process retains a distinct local queue-check handle.
+- The hard-disabled legacy single-DACK path remains a custody and MAC no-op;
+  DACK state transitions come from the cumulative/windowed feedback path.
 - Grouped routing-control timeout preserves the original ordered transaction
   metadata without separately penalizing an already-ACKed primary target.
 - MAC OPNET slot selection/holdoff, ACK queue semantics, 512-entry DATA limit,
@@ -425,14 +438,14 @@ ns-3 isolation measurements, not OPNET numeric parity: the recovered `*.ov`
 results do not contain NWK queue vectors or packet-path event order.
 
 The opt-in application/NWK/HOP ledger now closes both that source-order
-boundary and the recovered DACK-expiration boundary. Its canonical
-6,000-second trace contains 2,875,403 events with
+boundary, the recovered DACK-expiration boundary, and the generic HOP wake
+ordering. Its canonical 6,000-second trace contains 3,394,651 events with
 SHA-256
-`4f85672a78044db4176a0866dc2e225e4f4652e95b5aa636a1b1f7234518a8ef`.
+`701272f6499f4d32c7bad8549a3956c72971ab677d1c1d6f5a72b2a1be999a93`.
 All 1,710,000 application attempts reconcile to 14,566 admissions and
-1,695,434 blocks. NWK records 18,331 admissions, 686,581 per-neighbor holds,
-3,251 global-capacity holds, and zero no-route holds. The largest directed-leg
-counts are 335,294 on `2>4`, 168,733 on `4>5`, and 122,552 on `8>2`.
+1,695,434 blocks. NWK records 18,331 admissions, 1,204,924 per-neighbor holds,
+4,152 global-capacity holds, and zero no-route holds. The largest directed-leg
+counts are 592,227 on `2>4`, 268,430 on `4>5`, and 242,476 on `8>2`.
 
 HOP completes 14,892 legs by ACK, 2,162 by DACK, and 1,244 by final `no_ack`;
 2,156 DACK holds later release capacity. Receiver feedback contains 15,747
@@ -453,22 +466,49 @@ are isolated and occur at `hold + TIC`. Focused event-order tests cover the
 normal and maximum-resend 40-second production paths, prove capacity remains
 held immediately after the nominal deadline, exercise a two-entry coalesced
 scan, and prove isolated NWK readmission at `hold + 2*TIC`. A previously
-pending NWK check can coalesce that final wake exactly as OPNET's
-`op_ev_pending()` does.
+pending HOP-origin wake coalesces that final request exactly as OPNET's
+`op_ev_pending()` does, without postponing the first event. The NWK process's
+local queue-check event has a separate handle, so it cannot consume or
+coalesce the HOP request.
 
-The corrected aggregate CSV has SHA-256
-`35b0b694322186ff217d1612877f257cd11321e7bed11ee3e9ceb3a810936b8b`.
+Resend expiry now uses the same source boundary. Every matching MAC sent
+indication records the actual transmission instant and leaves its independent
+list-wide timer scheduled for `sent + 2 seconds + TIC`, or
+`sent + 4 seconds + TIC` after the final retry. `check_resend` first completes
+all due final deletions and their queue-wake requests, then performs a second
+full pass for due retransmissions. A sent indication whose resend entry is
+already absent still schedules the recovered fallback scan when the retained
+resend-timer handle is not pending; scheduling a newer timer does not cancel
+older scans.
+
+The generic feedback boundary is also explicit. After processing any readable
+ACK or DACK addressed to the local node, HOP requests its own NWK queue wake at
+`feedback + TIC`, even when the feedback is unknown, stale, duplicate,
+zero-bit, or otherwise changes no custody state. Wrong-destination feedback
+does not wake the queue. Final resend timeout and DACK expiry use the same
+HOP-owned scheduler; simultaneous HOP requests coalesce without postponement,
+but never coalesce against the NWK-local queue-check handle. Focused tests
+cover the nominal resend/final-expiry boundaries, delete-before-retry order,
+missing-entry fallback, unknown/stale/no-op feedback, wrong-destination
+rejection, the disabled known single-DACK path, isolated wake latency, and both
+feedback and expiry coalescing.
+
+The final rerun's aggregate trace has SHA-256
+`8498d2bec10292df73ce60d1bd7823408dcfab614475559b27f8bd03bf264ed9`,
+and its generated ns-3 aggregate CSV has SHA-256
+`ec20882a5419834d6920303c38f0528096aee445539d4d5d80def6f2ccf64012`.
 The eight-series aggregate comparison still aligns all 800 points,
 contains 665 exact-tolerance numeric mismatches, and preserves 20 OPNET
 no-sample values. Corrected ns-3 means are 2.42767 packets/s sent, 2.30900
 packets/s received, and 79.9450 seconds end-to-end delay. Neither corrected
 ordering erases the larger aggregate calibration gap.
 
-Relative to the preceding pre-enqueue-only checkpoint, all admission,
-completion, delivery, and core-comparison values are unchanged. The added
-28-ns boundary changes only 95 MAC and 95 NWK queue-delay bucket means, each
-by less than 5.6 ns; this is the expected redistribution between adjacent
-queue-residence intervals rather than a packet-trajectory change.
+Relative to the DACK-ordering checkpoint, application decisions, NWK/HOP
+admissions, HOP completions, deliveries, and all eight core aggregate series
+are unchanged. The generic wakes add source-required NWK rescans, so repeated
+hold observations rise from 686,581 to 1,204,924 per-neighbor rows and from
+3,251 to 4,152 global-capacity rows. Those extra observations do not change a
+packet trajectory or close the remaining aggregate gap.
 
 The retained pre-fix trace has SHA-256
 `cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`
@@ -512,21 +552,17 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Close the adjacent source-proven HOP timer/wake boundaries. Recovered HOP
-   schedules resend expiry one `TIC` after its nominal deadline and requests a
-   generic NWK queue check after even an unknown or stale ACK/DACK; verify and
-   reproduce those two orderings without changing valid-feedback semantics.
-2. Compare route convergence and admission semantics against any newer
+1. Compare route convergence and admission semantics against any newer
    `br_nwk.pr.c`, recovered runtime source, or historical evidence that becomes
    available. In particular, verify the node-7 five-hop gateway route selected
    at 386.106492 seconds and the surrounding discovery sequence. Keep
    ECC/prior-stage rejection accounting as a separate statistic-identity
    problem rather than folding it into queue calibration.
-3. When licensed Modeler access is available, execute the prepared
+2. When licensed Modeler access is available, execute the prepared
    reservation/collision case, retain its CSV and provenance manifest,
    validate it, and run the event-order differential comparison.
-4. Reproduce synchronization-threshold variance for calibrated runs.
-5. Close exact security-wrapper gaps for remaining HOP control packets and the
+3. Reproduce synchronization-threshold variance for calibrated runs.
+4. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
 
@@ -596,6 +632,12 @@ RTS TSLOT, the shared local/neighbor phase, `prep_tx` holdoff restart,
 first-contact reservation ordering, persistent advertisement/reuse,
 expiry/redraw ordering,
 SYNC/Track activation, real HOP retry reuse, and delayed-packing state gates.
+The MAC-sent-time test now pins retry and final-expiry scans one `TIC` beyond
+their nominal actual-send boundaries, verifies the final queue wake one
+additional `TIC` later, and covers the missing-entry fallback plus
+delete-all-before-retry ordering. The ACK-window and DACK-hold tests cover
+HOP-owned generic wakes for valid and no-op feedback, wrong-destination
+suppression, HOP-only coalescing, and DACK capacity-release ordering.
 The queue-observation test adds exact source write-site and ordering checks for
 HOP enqueue/ACK removal, MAC data admission/selection delay, ACK duplicate and
 cumulative-update suppression, unchanged full-queue rejection, and
