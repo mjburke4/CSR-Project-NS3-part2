@@ -621,6 +621,169 @@ BuildTaggedPayload (uint32_t bytes, uint64_t sequence)
   return payload;
 }
 
+Ptr<Packet>
+BuildNetworkPayload (CsrNodeId source,
+                     CsrNodeId destination,
+                     uint8_t dscp,
+                     uint64_t appSequence)
+{
+  Ptr<Packet> payload = BuildTaggedPayload (16, appSequence);
+  payload->AddHeader (CsrNetHeader (source, destination, dscp));
+  return payload;
+}
+
+Ptr<Packet>
+BuildRelayDataFrame (CsrNodeId hopSource,
+                     CsrNodeId relay,
+                     uint16_t hopSequence,
+                     CsrNodeId nwkSource,
+                     CsrNodeId nwkDestination,
+                     uint8_t dscp,
+                     uint64_t appSequence)
+{
+  Ptr<Packet> frame =
+    BuildNetworkPayload (nwkSource, nwkDestination, dscp, appSequence);
+  CsrHeader header (hopSource,
+                    relay,
+                    hopSequence,
+                    dscp,
+                    true,
+                    false);
+  header.SetType (CSR_PKT_DATA);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetLinkControl (8, 0.0, 0.0);
+  frame->AddHeader (header);
+  return frame;
+}
+
+void
+RunRelayFeedbackBoundary (uint32_t nsdpBefore,
+                          const std::string &expectedReason,
+                          bool injectDuplicate,
+                          CsrNodeId nodeBase)
+{
+  TraceFile trace ("relay-feedback-" + std::to_string (nsdpBefore));
+  const CsrNodeId hopSource = nodeBase;
+  const CsrNodeId relay = nodeBase + 1;
+  const CsrNodeId nwkSource = nodeBase + 2;
+  const CsrNodeId nwkDestination = nodeBase + 3;
+  const CsrNodeId nextHop = nodeBase + 4;
+  const uint8_t dscp = 4;
+  const uint16_t hopSequence = 41;
+  const uint64_t appSequence = 8100 + nsdpBefore;
+
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (relay);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  ConnectNwkStack (device, hop, nwk, relay);
+  nwk->SetNodeType (CsrNodeType::Routable);
+
+  // Seed relay custody without an onward route.  ReceiveFromHop performs the
+  // same NSDP increment and NWK enqueue that follows an accepted HOP frame,
+  // while leaving the scheduled queue checks unexecuted for this fixture.
+  SetDifferentialAdmissionTraceEnabled (false);
+  for (uint32_t index = 0; index < nsdpBefore; ++index)
+    {
+      nwk->ReceiveFromHop (
+        BuildNetworkPayload (nwkSource,
+                             nwkDestination,
+                             dscp,
+                             appSequence + index + 1),
+        hopSource);
+    }
+
+  Require (nwk->GetNsdpCount (nwkSource, nwkDestination) == nsdpBefore,
+           "relay feedback fixture did not seed the requested NSDP count");
+  Require (nwk->GetNwkQueueSize () == nsdpBefore,
+           "relay feedback fixture did not seed the requested NWK queue");
+
+  nwk->AddStaticRouteWithPathloss (nwkDestination, nextHop, 70.0);
+  StartTrace (trace);
+
+  hop->ReceiveFromMac (
+    BuildRelayDataFrame (hopSource,
+                         relay,
+                         hopSequence,
+                         nwkSource,
+                         nwkDestination,
+                         dscp,
+                         appSequence),
+    70.0,
+    30.0);
+  if (injectDuplicate)
+    {
+      hop->ReceiveFromMac (
+        BuildRelayDataFrame (hopSource,
+                             relay,
+                             hopSequence,
+                             nwkSource,
+                             nwkDestination,
+                             dscp,
+                             appSequence),
+        70.0,
+        30.0);
+    }
+
+  const uint32_t nsdpAfter = nsdpBefore + 1;
+  Require (nwk->GetNsdpCount (nwkSource, nwkDestination) == nsdpAfter,
+           "accepted relay DATA did not increment NSDP exactly once");
+  Require (nwk->GetNwkQueueSize () == nsdpAfter,
+           "accepted relay DATA did not enqueue exactly once");
+
+  CloseDifferentialTraceCsv ();
+  const std::vector<TraceRow> rows = ReadTrace (trace.Path ());
+  const std::vector<TraceRow> feedback =
+    RowsForEventAndSequence (rows, "hop_feedback", appSequence);
+  const std::vector<TraceRow> enqueues =
+    RowsForEventAndSequence (rows, "nwk_enqueue", appSequence);
+
+  Require (feedback.size () == (injectDuplicate ? 2 : 1),
+           "relay feedback boundary emitted the wrong feedback count");
+  Require (enqueues.size () == 1,
+           "relay feedback boundary enqueued a duplicate or lost first DATA");
+  Require (feedback[0].reason == expectedReason && feedback[0].success == "1",
+           "relay feedback boundary selected the wrong ACK/DACK reason");
+  RequireDetail (feedback[0],
+                 "first_reception",
+                 "1",
+                 "first relay feedback");
+  RequireDetail (feedback[0],
+                 "nsdp_count_before",
+                 CsrTraceInteger (nsdpBefore),
+                 "first relay feedback");
+  RequireDetail (feedback[0],
+                 "nsdp_count_after",
+                 CsrTraceInteger (nsdpAfter),
+                 "first relay feedback");
+
+  if (injectDuplicate)
+    {
+      Require (feedback[1].reason == "ack" && feedback[1].success == "1",
+               "duplicate relay DATA did not receive a plain ACK decision");
+      RequireDetail (feedback[1],
+                     "first_reception",
+                     "0",
+                     "duplicate relay feedback");
+      RequireDetail (feedback[1],
+                     "nsdp_count_before",
+                     CsrTraceInteger (nsdpAfter),
+                     "duplicate relay feedback");
+      RequireDetail (feedback[1],
+                     "nsdp_count_after",
+                     CsrTraceInteger (nsdpAfter),
+                     "duplicate relay feedback");
+    }
+
+  Simulator::Destroy ();
+}
+
+void
+TestRelayFeedbackUsesPreEnqueueNsdpCount ()
+{
+  RunRelayFeedbackBoundary (15, "ack", false, 360);
+  RunRelayFeedbackBoundary (16, "dack", true, 370);
+}
+
 uint32_t g_nwkDeliveryCount = 0;
 CsrNodeId g_expectedNwkSource = 0;
 
@@ -1782,6 +1945,7 @@ main ()
       Time::SetResolution (Time::NS);
       TestAggregateOnlyPathWriter ();
       TestHopAndMacEnqueueOrdering ();
+      TestRelayFeedbackUsesPreEnqueueNsdpCount ();
       TestMacSelectionSizeDelayOrdering ();
       TestAckAdmissionAndOverflowSampling ();
       TestAckRemovalSampling ();

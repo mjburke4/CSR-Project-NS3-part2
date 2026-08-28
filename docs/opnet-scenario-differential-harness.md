@@ -1,6 +1,6 @@
 # OPNET scenario importer and differential harness
 
-Updated: 2026-08-27
+Updated: 2026-08-28
 
 ## Purpose
 
@@ -283,8 +283,9 @@ exact end-to-end decomposition. HOP resend lifetime is deliberately not added
 as another component because it overlaps MAC queuing, transmission, and ACK
 service.
 
-On the canonical 6,000-second multihop run, strict analysis accepted all
-13,740 delivered lifecycles with zero invalid packets and preserved 1,000
+On the retained pre-fix canonical 6,000-second multihop run, strict analysis
+accepted all 13,740 delivered lifecycles with zero invalid packets and
+preserved 1,000
 valid end-of-run prefixes. Its 95 nonempty end-to-end buckets were exactly
 identical to the aggregate builder. This validates the ns-3 ledger and
 isolates model behavior; it does not manufacture an OPNET packet path, because
@@ -336,11 +337,10 @@ python3 utils/analyze-ns3-admission-ledger.py ns3-admission-trace.csv \
   --strict
 ```
 
-Strict mode is a source-semantics assertion, not merely a CSV parser. On the
-pre-fix canonical trace it writes both outputs and exits nonzero because the
-138 DACK boundary decisions described below violate recovered OPNET order.
-That expected failure is the confirmed parity finding to clear with the next
-code change.
+Strict mode is a source-semantics assertion, not merely a CSV parser. The
+pre-enqueue ACK/DACK correction now passes this assertion. The retained
+pre-fix trace still exits nonzero on its 138 early-DACK boundary decisions and
+remains useful before/after evidence.
 
 The analyzer reconciles every `app_admission` decision with the compact
 per-flow diagnostics, validates NWK and HOP state transitions, correlates
@@ -349,37 +349,38 @@ leg, and writes both a bounded JSON summary and a packet-leg CSV. Structurally
 valid open NWK, resend, and DACK-hold states are inventoried rather than
 silently converted to failures.
 
-The canonical 6,000-second multihop trace contains 3,228,471 events and has
-SHA-256
-`cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
-Its application ledger exactly partitions 1,710,000 attempts into the same
-14,740 admissions and compact block totals. NWK decisions are:
+The post-fix canonical 6,000-second multihop trace contains 2,875,403 events
+and has SHA-256
+`5518de948721ab4b3370a6c02ac7efe3909e5a0b3e2406928f3ad95e9214b518`.
+Its application ledger exactly partitions 1,710,000 attempts into 14,566
+admissions, 2,000 discovery blocks, 4,112 empty-topology blocks, 462
+gateway-route blocks, and 1,688,860 NSDP blocks. NWK decisions are:
 
 | NWK decision | Count |
 | --- | ---: |
-| Admitted | 18,675 |
-| `neighbor_flow_full` | 1,024,561 |
-| `global_hop_full` | 3,172 |
+| Admitted | 18,331 |
+| `neighbor_capacity` | 686,581 |
+| `global_capacity` | 3,251 |
 | `no_route` | 0 |
 
-The per-neighbor holds are 604,751 on `8>2`, 172,281 on `2>4`, 156,811 on
-`4>5`, 46,915 on `7>8`, 42,867 on `5>1`, and 936 on `3>1`. Those hold counts
+The per-neighbor holds are 335,294 on `2>4`, 168,733 on `4>5`, 122,552 on
+`8>2`, 31,065 on `5>1`, 28,130 on `7>8`, and 807 on `3>1`. Those hold counts
 are repeated queue-scan decisions rather than unique packets or time-weighted
-occupancy. HOP completion counts are 14,906 ACK, 2,445 DACK, and 1,290 final
-`no_ack`; 2,438 delayed DACK-capacity holds expire. The strict packet-path
-result remains 13,740 valid
-deliveries, 1,000 valid incomplete prefixes, and zero invalid packets. After
-trace-provenance columns are removed, aggregate value output from this run is
-byte-identical to the earlier path-only run, with SHA-256
-`ce84eb0c61d8de89dbd3aff50ad9608947ed9997c96db0e1a38d11f08a5d79bb`.
+occupancy. HOP completion counts are 14,892 ACK, 2,162 DACK, and 1,244 final
+`no_ack`; 2,156 delayed DACK-capacity holds expire.
 
-Joining the packet and leg ledgers classifies all 1,000 incomplete packets:
-508 remain in NWK, while the 492 terminal-forward prefixes comprise 438
-completed `no_ack`, 33 open resend, 16 completed ACK, and 5 completed DACK
-legs. Most of the old "post-NWK unresolved" category is therefore historical
-final no-ACK loss, not traffic still in flight. A DACK hold is per-leg
-capacity state; a packet may continue through later hops while an upstream
-DACK hold remains open, so that hold is not a packet-terminal category.
+Receiver feedback contains 15,747 ACK and 2,161 DACK decisions. Every DACK
+uses a pre-enqueue NSDP count of at least 16: both the analyzer's pre-limit
+finding count and its 15-to-16 DACK boundary count are zero. The strict
+packet-path result also passes with 13,854 valid deliveries, 712 valid
+incomplete prefixes, and zero invalid packets. The joined inventory classifies
+those prefixes as 220 open in NWK, 443 completed by final `no_ack`, 32 open
+resends, 12 completed ACKs, and 5 completed DACKs.
+
+The pre-fix trace contained 3,228,471 events with SHA-256
+`cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
+Its 138 pre-15/post-16 DACK findings establish the behavioral delta; they are
+not relabeled as passing evidence.
 
 The recorded 20-/40-second values are the configured ns-3 hold intervals, not
 an assertion of exact timer-event parity. Recovered `br_hop.pr.c` schedules its
@@ -387,17 +388,12 @@ DACK check one `TIC` after the nominal expiration and schedules the subsequent
 NWK queue wake one more `TIC` later. That sub-microsecond ordering difference
 is deliberately left unchanged by this observation-only ledger step.
 
-This isolates the far-chain backlog to live admission state, especially the
-`8>2` per-neighbor boundary, and exposes one concrete source mismatch. Of
-2,433 receiver DACK feedback decisions, 138 observe NSDP count 15 before relay
-enqueue and 16 afterward. Recovered `br_hop.pr.c` obtains the NSDP entry, sends the
-relay packet to the separate NWK process, and tests the pre-enqueue count;
-count 15 selects ACK. The current synchronous ns-3 callback increments first
-and tests 16, selecting DACK one packet early. The next parity change is to use
-the source-defined pre-enqueue boundary, then rerun this same ledger and
-aggregate/path checks. The current admission-ledger strict result therefore
-fails on these 138 cases while the independent packet-path strict result
-passes.
+Recovered `br_hop.pr.c` obtains the NSDP entry, sends the relay packet to the
+separate NWK process, and tests the still-pre-enqueue count: 15 selects ACK
+and 16 selects DACK. ns-3 now makes that decision before its synchronous NWK
+delivery callback. Explicit smoke fixtures cover pre-15/post-16 ACK,
+pre-16/post-17 DACK, duplicate plain-ACK/no-second-enqueue behavior, and
+first-reception no-route ACK suppression.
 
 The ledger is ns-3 isolation evidence interpreted against recovered OPNET
 source. It is not an OPNET event comparison. No authoritative OPNET
@@ -509,7 +505,7 @@ not parity passes:
 | --- | ---: | --- | --- | --- |
 | `blue_radio_campus-2_nodes` | 800 | All 100 buckets | Sent 16.4417 vs 16.3597 packet/s; received 16.4373 vs 16.3474 packet/s; delay 1.45125 vs 1.42737 s | 696 numeric mismatches; no missing or extra points |
 | `blue_radio_campus-hidden_nodes_symmetrical` | 800 | All 100 buckets | Sent 12.1707 vs 12.7283 packet/s; received 11.4370 vs 12.0342 packet/s; delay 9.17976 vs 8.40223 s | 700 numeric mismatches; no missing or extra points |
-| `blue_radio_campus-multihop` | 800 | All 95 measured buckets; 5 OPNET no-sample buckets preserved | Sent 2.0120 vs 2.45667 packet/s; received 1.90167 vs 2.29000 packet/s; delay 112.748 vs 91.4031 s | 665 numeric mismatches; no missing or extra points; 20 missing values skipped |
+| `blue_radio_campus-multihop` | 800 | All 95 measured buckets; 5 OPNET no-sample buckets preserved | Sent 2.0120 vs 2.42767 packet/s; received 1.90167 vs 2.30900 packet/s; delay 112.748 vs 79.9450 s | 665 numeric mismatches; no missing or extra points; 20 missing values skipped |
 
 These failures were not hidden by widening tolerances. The exact packet-size
 matches validate vector decoding and the source-level modeled size, while the
@@ -519,24 +515,26 @@ under their executable-bound application and MAC profiles. Multihop's
 remaining rate and delay residual was therefore taken through the recovered
 queue/service diagnostic surface.
 
-The multihop queue run aligned all 400 bucket positions for HOP resend size,
-MAC ACK size, MAC Tx size, and MAC Tx queuing delay. Of those positions, 394
+The post-fix multihop queue run aligned all 400 bucket positions for HOP
+resend size, MAC ACK size, MAC Tx size, and MAC Tx queuing delay. Of those
+positions, 394
 contained numeric values on both sides and all 394 differed at exact
 tolerance; four OPNET no-sample values were skipped and two additional ns-3
 values were missing. For bucket ends strictly after 300 seconds, ns-3 is
-16.10% high in HOP resend size, 12.57% low in MAC ACK size, 13.66% high in MAC
-Tx size, and 8.85% high in MAC Tx queuing delay. Because MAC queuing delay is
-higher while end-to-end delay is lower, the path ledger was added rather than
-changing MAC service again. It finds one stable loop-free route per source,
-zero route-context mismatches, and an exact packet-weighted decomposition of
-91.5210 seconds into 78.4605 seconds of NWK residence and 13.0605 seconds of
-post-NWK leg service/transit. Multihop packets are only 9.68% of deliveries but
-contribute 85.79% of cumulative delay. The completed admission ledger then
-records 1,024,561 per-neighbor holds and only 3,172 global holds, with 604,751
-of the former on `8>2` and no no-route holds. Its 138 DACK choices at NSDP
-15-before/16-after identify the next source-backed correction: ACK/DACK must
-use the pre-enqueue NSDP count rather than ns-3's current synchronous
-post-enqueue count.
+19.13% high in HOP resend size, 14.23% low in MAC ACK size, 16.87% high in MAC
+Tx size, and 12.39% high in MAC Tx queuing delay. Because MAC queuing delay is
+higher while end-to-end delay is lower, the path ledger remains the stronger
+diagnostic boundary. It finds one stable loop-free route per source, zero
+route-context mismatches, 13,854 valid deliveries, and 712 valid incomplete
+prefixes. Its packet-weighted 79.7413 seconds decomposes exactly into 66.7034
+seconds of NWK residence and 13.0380 seconds of post-NWK leg service/transit.
+
+The completed admission ledger records 686,581 per-neighbor holds and 3,251
+global holds, led by 335,294 on `2>4`, 168,733 on `4>5`, and 122,552 on
+`8>2`, with no no-route holds. All 2,161 receiver DACK decisions use a
+pre-enqueue NSDP count of at least 16. Strict admission analysis now passes
+with no invalid legs or global issues; the retained pre-fix trace remains the
+evidence for the corrected 138 early-DACK decisions.
 
 ## Remaining certification boundary
 

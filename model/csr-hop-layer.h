@@ -2823,19 +2823,9 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
         }
     }
 
-  // 1) Deliver up on first reception (lets Net update NSDP for relays)
-  if (firstReception && !m_rxFromHopCb.IsNull ())
-  {
-     m_rxFromHopCb (payload, src);
-     if (feedbackNsdpStateValid)
-       {
-         feedbackNsdpAfter =
-           m_nsdpObservationCb (feedbackNetworkHeader.GetSrc (),
-                                feedbackNetworkHeader.GetDst ());
-       }
-  }
-
-  // 2) Decide ACK vs DACK (duplicates get plain ACK)
+  // proc_mac_pk() looks up the NSDP entry before sending the packet to NWK.
+  // The later NWK stream interrupt increments relay NSDP, so ACK/DACK uses
+  // the pre-enqueue count.  Duplicates skip this decision and get plain ACK.
   bool sendDack = false;
   if (ackable && firstReception && !m_shouldDackCb.IsNull ())
   {
@@ -2846,6 +2836,18 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     {
       sendDack = m_shouldDackCb (nh.GetSrc (), nh.GetDst ());
     }
+  }
+
+  // Deliver up on first reception after preserving the source decision order.
+  if (firstReception && !m_rxFromHopCb.IsNull ())
+  {
+     m_rxFromHopCb (payload, src);
+     if (feedbackNsdpStateValid)
+       {
+         feedbackNsdpAfter =
+           m_nsdpObservationCb (feedbackNetworkHeader.GetSrc (),
+                                feedbackNetworkHeader.GetDst ());
+       }
   }
 
   if (ackable)
