@@ -1,6 +1,6 @@
 # OPNET aggregate comparison
 
-Updated: 2026-08-27
+Updated: 2026-08-28
 
 ## Purpose and evidence boundary
 
@@ -256,7 +256,8 @@ sites and ordering without inventing initialization or final-zero samples:
 - MAC Tx queuing delay at actual transmission selection, measured from the
   timestamp recorded immediately before successful admission.
 
-The strict 6,000-second multihop workflow aligned all 400 queue-vector bucket
+The retained pre-fix 6,000-second multihop workflow aligned all 400
+queue-vector bucket
 positions. It compared 394 numeric pairs, found 394 exact-value mismatches,
 skipped the four OPNET no-sample values at 300 seconds, and reported two
 additional ns-3 no-sample values at 180 seconds for HOP resend and MAC ACK.
@@ -283,8 +284,139 @@ retransmitted load. The next diagnostic boundary is therefore above and
 across the MAC: delivered hop count/path, route convergence, and NWK/HOP
 admission and residence time.
 
-The corrected traces also retain complete correlation and size-integrity
-provenance:
+### Packet-path and NWK-residence diagnostic
+
+That boundary is now instrumented without changing modeled packet bytes,
+queue order, route selection, random draws, or event scheduling. The NWK
+queue-size and delay samples reproduce the supplied `br_nwk.pr.c` write sites:
+post-insert size for local and relay DATA, then post-remove size and per-hop
+residence immediately before HOP admission. The compact trace also retains
+correlated `nwk_enqueue`, `nwk_forward`, `nwk_delivery`, and `route_change`
+rows. Forward rows record the actual next hop and the selected route cost/path;
+stored partial static paths are normalized by the same rule used for ARL
+serialization.
+
+The retained pre-fix 6,000-second multihop rerun produced 395,412 trace rows
+and 14,740 packet keys. The packet-path analyzer accepted all 13,740 delivered
+chains,
+reported no incomplete delivery, loop, duplicate admission, next-hop mismatch,
+route-context mismatch, negative interval, or decomposition error, and retained
+1,000 valid end-of-run prefixes instead of misclassifying them as failures.
+Of those prefixes, 508 end in an NWK queue and 492 have already been handed to
+HOP without a subsequent relay enqueue or delivery. Joining the path and
+admission ledgers now classifies those 492 terminal-forward prefixes as 438
+completed `no_ack`, 33 open resend, 16 completed ACK, and 5 completed DACK
+legs. Thus most of the formerly generic post-NWK population is historical
+final no-ACK loss rather than traffic still in flight at the stop. All 95
+nonempty end-to-end-delay buckets match `aggregate-ns3-trace.py` exactly, with
+maximum absolute difference zero.
+
+The pre-fix delivered paths are stable and source-specific:
+
+| Source | Delivered path | Hops | Packets | Packet-weighted mean E2E |
+| ---: | --- | ---: | ---: | ---: |
+| 2 | `2>4>5>1` | 3 | 245 | 441.115101 s |
+| 3 | `3>1` | 1 | 7,508 | 11.766925 s |
+| 4 | `4>5>1` | 2 | 475 | 168.650200 s |
+| 5 | `5>1` | 1 | 4,902 | 18.427855 s |
+| 7 | `7>8>2>4>5>1` | 5 | 483 | 1,648.481810 s |
+| 8 | `8>2>4>5>1` | 4 | 127 | 743.472364 s |
+
+Across delivered packets, the packet-weighted 91.521046-second mean decomposes
+exactly into 78.460522 seconds of NWK residence (85.73%) and 13.060524 seconds
+from NWK-to-HOP handoff through the next NWK enqueue or final delivery
+(14.27%). This packet-weighted value is intentionally distinct from the
+91.403103-second arithmetic mean of the 95 aggregate bucket means quoted
+above. The new steady-window bucket means are 22.694762 packets for NWK queue
+size and 88.032154 seconds for NWK queuing delay. They are source-grounded
+ns-3 diagnostics, not numeric OPNET parity results: the recovered multihop
+PB/OV selection contains no NWK vectors or packet-path events.
+
+In the retained pre-fix path run, only 1,330 delivered packets (9.68%) use
+more than one hop, yet they contribute
+85.79% of cumulative delivered delay. Source 7 alone contributes 63.32% while
+representing 3.52% of deliveries. Mean per-visit NWK residence rises from
+0.073 seconds at node 3 and 5.361 seconds at node 5 to 153.224 seconds at node
+4, 287.907 seconds at node 2, and 919.847 seconds at node 8. Route discovery
+does explain source 7's late first admission: its five-hop gateway route is
+selected at 386.106 seconds. The route set stops changing by 389.955 seconds,
+however, and every delivered source uses one loop-free path thereafter.
+
+### Application/NWK/HOP admission-state diagnostic
+
+The source-ordered ledger is now implemented as an opt-in observation surface.
+It records every application gate decision, every NWK-to-HOP admission or
+hold, the HOP admission snapshot, receiver ACK/DACK feedback, the exact NSDP
+release, sender completion, and delayed HOP-capacity release. The snapshots
+include route availability, NWK queue size, NSDP count/limit, global pending
+DATA and allowance, per-neighbor outstanding/threshold/allowance, resend
+state, and the correlated `(src,dst,sequence)` identity wherever the modeled
+packet carries it. Enabling the ledger does not change modeled bytes, queue
+order, route selection, random draws, or event scheduling.
+
+The post-fix canonical 6,000-second multihop ledger has 2,875,403 events and
+SHA-256
+`5518de948721ab4b3370a6c02ac7efe3909e5a0b3e2406928f3ad95e9214b518`.
+Its 1,710,000 application decisions reconcile exactly to the compact
+diagnostics: 14,566 admissions and 1,695,434 source-ordered blocks. At the NWK
+boundary it records 18,331 admissions, 686,581 `neighbor_capacity` holds,
+3,251 `global_capacity` holds, and zero `no_route` holds. The neighbor holds
+identify the congested directed legs:
+
+| Directed leg | `neighbor_capacity` holds |
+| --- | ---: |
+| `2>4` | 335,294 |
+| `4>5` | 168,733 |
+| `8>2` | 122,552 |
+| `5>1` | 31,065 |
+| `7>8` | 28,130 |
+| `3>1` | 807 |
+
+These hold totals count repeated queue-scan decisions, not unique packets or
+time-weighted occupancy. Their directed-leg distribution identifies the gate
+that repeatedly prevents progress.
+
+HOP records 14,892 ACK completions, 2,162 DACK completions, and 1,244
+`no_ack` completions; 2,156 delayed DACK-capacity holds expire. Receiver
+feedback contains 15,747 ACK and 2,161 DACK decisions. Strict admission
+analysis passes with zero invalid legs, zero global issues, zero pre-limit
+DACKs, and zero 15-to-16 DACK decisions. Strict path analysis also passes with
+13,854 delivered chains, 712 valid incomplete prefixes, and zero invalid
+packets. The incomplete inventory is 220 open in NWK, 443 final `no_ack`, 32
+open resend, 12 completed ACK, and 5 completed DACK packets.
+
+The corrected aggregate CSV has SHA-256
+`b2310bc5fa68e0b4e92d2b6a10b783a2490321f74f8f99349b0df1ed1475475c`.
+The selected eight-series historical comparison still aligns all 800 points,
+reports 665 exact-tolerance numeric mismatches, and preserves 20 OPNET
+no-sample values. Its corrected ns-3 means are 2.42767 packets/s sent, 2.30900
+packets/s received, and 79.9450 seconds end-to-end delay, versus OPNET's
+2.01200, 1.90167, and 112.748 respectively. Thus clearing the source-order
+violation does not by itself establish aggregate parity.
+
+The 20-/40-second hold values above describe the configured ns-3 intervals.
+Recovered `br_hop.pr.c` schedules the actual DACK expiry check at the nominal
+hold plus one `TIC`, then wakes NWK one additional `TIC` later; the
+observation-only ledger does not change or claim parity for that tiny timer
+offset.
+
+The retained pre-fix trace has SHA-256
+`cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
+It contains 138 DACK decisions whose relay NSDP changes from 15 before enqueue
+to 16 afterward. The recovered `br_hop.pr.c` and the campus archive's embedded
+`br_hop.pr.m` both obtain the NSDP entry before sending to the NWK process and
+then test that pre-event count. ns-3 now preserves that ordering: pre-count 15
+ACKs, pre-count 16 DACKs, and duplicates do not enqueue again.
+
+These counts are ns-3 source-ordered isolation evidence combined with a direct
+comparison to recovered OPNET source. They are not an OPNET event-trace
+comparison: the recovered PB/OV results contain aggregate vectors and no
+corresponding admission ledger.
+
+The hash-bound core-comparison traces retain complete correlation and
+size-integrity provenance. These three traces predate the additive NWK/path
+events and remain the inputs to the published core aggregate comparator
+reports:
 
 | Scenario | Trace events | Exact deliveries | Unmatched sends | Unmatched deliveries | Size mismatches |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -292,14 +424,20 @@ provenance:
 | `blue_radio_campus-hidden_nodes_symmetrical` | 2,234,152 | 722,053 | 41,647 | 0 | 0 |
 | `blue_radio_campus-multihop` | 191,591 | 13,740 | 1,000 | 0 | 0 |
 
-The generator diagnostics account for every scheduled attempt before packet
-creation:
+The retained pre-fix generator diagnostics account for every scheduled
+attempt before packet creation:
 
 | Scenario | Attempts | Admitted | Discovery | Empty topology | Gateway route | Dynamic destination | NSDP full |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `blue_radio_campus-2_nodes` | 59,700,000 | 981,579 | 0 | 0 | 0 | 0 | 58,718,421 |
 | `blue_radio_campus-hidden_nodes_symmetrical` | 149,250,000 | 763,700 | 0 | 0 | 0 | 0 | 148,486,300 |
 | `blue_radio_campus-multihop` | 1,710,000 | 14,740 | 1,500 | 4,117 | 189 | 0 | 1,689,454 |
+
+The post-fix multihop row is 1,710,000 attempts, 14,566 admissions, 2,000
+discovery blocks, 4,112 empty-topology blocks, 462 gateway-route blocks, zero
+dynamic-destination blocks, and 1,688,860 NSDP blocks. It is intentionally
+kept separate rather than rewriting the provenance of the earlier comparator
+manifest.
 
 The compact trace SHA-256 values are, respectively,
 `94091ec88155ab9c97b3a667b52f96cf516c618e5405e0533de5092a8bae494b`,
@@ -308,6 +446,14 @@ and `57721b50d4dcad31d7da36d79ad5f7bd24147ea54d255490c0dd3ac321d90070`.
 The mandatory-hash canonical workflow was also executed end to end for the
 multihop case; its scoped status was `selected_comparison_failed`, with all
 four stages completing as designed and the comparator returning status 1.
+
+The separate pre-fix path-enriched multihop diagnostic contains 395,412 events,
+13,740 exact deliveries, 1,000 unmatched end-of-run sends, no unmatched
+deliveries, and no size mismatches. Its SHA-256 is
+`002097d468a54d94416923b8c75d56fe93217e2c69cb318a1d7c0b2593114e76`.
+It was run through the scenario runner, strict packet-path analyzer, and ns-3
+aggregate builder. It has not replaced the older mandatory-hash comparator
+manifest or its 665-mismatch core report.
 
 At exact tolerance, the two-node report contains 696 numeric mismatches, the
 hidden-node report contains 700, and the multihop report contains 665 and
