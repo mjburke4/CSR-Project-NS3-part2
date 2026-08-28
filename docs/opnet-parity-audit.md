@@ -371,10 +371,12 @@ commands in a manifest.
 
 The application runner schedules the next constant generator event before
 all gates, caches the discovered gateway, supports the historical gateway's
-live destination draw, and writes one compact admission row per flow. Those
-rows partition attempts into discovery, empty topology, unknown gateway route,
-missing dynamic destination, NSDP-full, and admitted counts without expanding
-the event trace by tens of millions of suppressed attempts.
+live destination draw, and writes one compact admission row per flow by
+default. Those rows partition attempts into discovery, empty topology,
+unknown gateway route, missing dynamic destination, NSDP-full, and admitted
+counts. An explicit `--admissionTrace=1` diagnostic mode additionally records
+every source-ordered attempt and its live application/NWK/HOP state; ordinary
+aggregate runs retain the compact surface.
 
 Historical result databases are now available and executable evidence. The
 read-only extractor decoded 10 complete Modeler `*.ov` files containing 109
@@ -406,8 +408,8 @@ in ACK size, 13.66% high in Tx size, and 8.85% high in Tx queuing delay. MAC
 queuing delay is therefore higher while end-to-end delay is lower, so the
 route/path and NWK-residence ledger was added before changing service timing.
 
-That ledger validates 13,740 complete deliveries and 1,000 structurally valid
-packets still in flight at the exclusive 6,000-second stop, with no invalid
+That path ledger validates 13,740 complete deliveries and 1,000 structurally
+valid incomplete prefixes at the exclusive 6,000-second stop, with no invalid
 chains, route-context mismatches, loops, or end-to-end decomposition errors.
 Every source uses one stable delivered path. The packet-weighted 91.5210-second
 mean decomposes exactly into 78.4605 seconds of NWK residence and 13.0605
@@ -415,6 +417,41 @@ seconds of post-NWK leg service/transit. Packets taking more than one hop are
 only 9.68% of deliveries but contribute 85.79% of cumulative delay. These are
 ns-3 isolation measurements, not OPNET numeric parity: the recovered `*.ov`
 results do not contain NWK queue vectors or packet-path event order.
+
+The opt-in application/NWK/HOP ledger closes the next diagnostic boundary.
+Its canonical 6,000-second trace contains 3,228,471 events with SHA-256
+`cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
+All 1,710,000 application attempts reconcile to 14,740 admissions and the
+existing compact gate totals. NWK records 18,675 admissions, 1,024,561
+per-neighbor flow-control holds, 3,172 global-capacity holds, and zero
+no-route holds. These are repeated queue-scan decisions, not unique packets.
+The largest directed-leg counts are 604,751 on `8>2`, 172,281 on `2>4`, and
+156,811 on `4>5`, confirming that the far-chain backlog is a capacity boundary
+rather than route churn. HOP completes 14,906 legs by ACK,
+2,445 by DACK, and 1,290 by final `no_ack`; 2,438 DACK holds later release
+capacity. The path analyzer remains unchanged at 13,740 valid deliveries,
+1,000 valid incomplete prefixes, and zero invalid packets. Aggregate value
+columns are byte-identical to the earlier path run after trace provenance is
+removed, with SHA-256
+`ce84eb0c61d8de89dbd3aff50ad9608947ed9997c96db0e1a38d11f08a5d79bb`.
+The joined path/leg inventory classifies the incomplete set exactly: 508 open
+NWK packets, plus 438 terminal legs completed by final `no_ack`, 33 open
+resends, 16 completed ACKs, and 5 completed DACKs. Most of the earlier generic
+post-NWK category is therefore historical no-ACK loss rather than in-flight
+traffic. An upstream DACK capacity hold may remain open after the packet has
+progressed downstream and is not itself a terminal packet state.
+
+The ledger also turns the next change into a source-proven correction. It
+records 2,433 receiver DACK feedback decisions; 138 use an NSDP count of 15
+before relay enqueue and 16 afterward. Recovered `br_hop.pr.c` obtains the NSDP
+entry and sends the relay packet to the separate NWK process before testing
+the still-pre-enqueue count, so 15 selects ACK. The current synchronous ns-3
+NWK callback increments first and selects DACK from 16, one packet earlier.
+This conclusion compares observed ns-3 order with recovered OPNET source. It
+is not an event-trace parity claim, because no corresponding OPNET admission
+trace exists in the recovered results. Admission-ledger strict mode
+intentionally fails on these 138 violations; packet-path strict mode remains
+clean.
 
 The hidden-node ECC-drop probe also exposes a deliberately unresolved identity
 mapping: Modeler records 10.84105
@@ -441,12 +478,17 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Add a source-ordered application/NWK/HOP admission-state ledger. Correlate
-   every send attempt, admission, hold, and block with gateway-route state,
-   NSDP count/limit, global HOP capacity, per-neighbor `flow_ctrl_spad`,
-   ACK/DACK completion, and the queue receiving the packet. The completed path
-   ledger localizes the residual to admission and backlog on the far multihop
-   chain rather than route churn or another MAC service-rate adjustment.
+1. Correct the source-proven DACK decision boundary. Preserve the current
+   receive/delivery ordering, but make ACK-versus-DACK use the relay NSDP count
+   before the synchronous ns-3 NWK enqueue, matching recovered `br_hop.pr.c`.
+   Re-run the canonical admission ledger and verify that the 138 observed
+   15-to-16 transitions no longer choose DACK, then measure the resulting
+   DACK/expiry, admission, traffic, queue, and delay changes without weakening
+   any structural check. Treat the timer boundary separately: recovered HOP
+   checks DACK expiry at the nominal 20/40-second hold plus one `TIC` and wakes
+   NWK one more `TIC` later, whereas the current ns-3 release is at the nominal
+   hold. The present ledger validates the configured hold and records this
+   remaining event-order difference; it does not silently certify it.
 2. Compare route convergence and admission semantics against any newer
    `br_nwk.pr.c`, recovered runtime source, or historical evidence that becomes
    available. In particular, verify the node-7 five-hop gateway route selected
@@ -496,8 +538,8 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 All 32 CSR executable targets build on this audit revision. The 30 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (32/32). All 122 focused Python tests pass; the suite additionally
-covers the packet-path analyzer as well as the
+workflow pass (32/32). All 138 focused Python tests pass; the suite additionally
+covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
 aggregate workflow. The importer decodes all 12 recovered campus network

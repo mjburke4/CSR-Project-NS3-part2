@@ -555,6 +555,7 @@ RecordScenarioLink (const RuntimeNode &first,
 void
 SendFlowPacket (Ptr<CsrNetLayer> network,
                 ImportedFlow flow,
+                std::size_t flowIndex,
                 double stopSeconds,
                 uint64_t flowLimit,
                 bool opnetAppGating,
@@ -575,6 +576,7 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
                            &SendFlowPacket,
                            network,
                            flow,
+                           flowIndex,
                            stopSeconds,
                            flowLimit,
                            opnetAppGating,
@@ -582,17 +584,34 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
     }
 
   state->attempts++;
+  const uint64_t attemptIndex = state->attempts;
   bool admitted = true;
   CsrNodeId destination = flow.destination;
-  if (opnetAppGating && network->IsDiscoveryActive ())
+  std::string admissionReason = "admitted";
+  const bool traceAdmission = IsDifferentialAdmissionTraceEnabled ();
+  const bool discoveryActive = traceAdmission
+    ? network->IsDiscoveryActive ()
+    : false;
+  const bool topologyKnown = traceAdmission
+    ? network->HasApplicationTopologyKnowledge ()
+    : false;
+  bool routeCheckPerformed = false;
+  bool routeAvailable = false;
+  if (opnetAppGating &&
+      (traceAdmission ? discoveryActive : network->IsDiscoveryActive ()))
     {
       state->blockedDiscovery++;
       admitted = false;
+      admissionReason = "discovery_active";
     }
-  else if (opnetAppGating && !network->HasApplicationTopologyKnowledge ())
+  else if (opnetAppGating &&
+           !(traceAdmission
+               ? topologyKnown
+               : network->HasApplicationTopologyKnowledge ()))
     {
       state->blockedTopology++;
       admitted = false;
+      admissionReason = "topology_unknown";
     }
 
   if (admitted && flow.destinationMode == RANDOM_ROUTE_DESTINATION_MODE)
@@ -603,6 +622,7 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
         {
           state->blockedDestination++;
           admitted = false;
+          admissionReason = "destination_unavailable";
         }
       else
         {
@@ -617,7 +637,9 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
     }
   else if (admitted && opnetAppGating && !state->gatewayKnown)
     {
-      if (network->HasRelayRoute (destination))
+      routeCheckPerformed = true;
+      routeAvailable = network->HasRelayRoute (destination);
+      if (routeAvailable)
         {
           // Historical br_app caches gateway_node_id after the first route
           // lookup.  Later application attempts do not repeat a stricter ARL
@@ -628,6 +650,7 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
         {
           state->blockedGatewayRoute++;
           admitted = false;
+          admissionReason = "gateway_route_unknown";
         }
     }
 
@@ -636,6 +659,52 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
     {
       state->blockedNsdp++;
       admitted = false;
+      admissionReason = "nsdp_full";
+    }
+
+  const uint32_t nsdpCount = traceAdmission
+    ? network->GetNsdpCount (flow.source, destination)
+    : 0;
+  const uint32_t nwkQueueSize = traceAdmission
+    ? network->GetNwkQueueSize ()
+    : 0;
+  auto writeAdmissionEvent = [&] (const std::string &sequence) {
+    if (!traceAdmission)
+      {
+        return;
+      }
+    CsrDifferentialTraceEvent event;
+    event.event = "app_admission";
+    event.node = CsrTraceInteger (flow.source);
+    event.peer = CsrTraceInteger (destination);
+    event.packetType = "data";
+    event.source = CsrTraceInteger (flow.source);
+    event.destination = CsrTraceInteger (destination);
+    event.sequence = sequence;
+    event.success = admitted ? "1" : "0";
+    event.reason = admissionReason;
+    event.detail =
+      "flow_index=" + CsrTraceInteger (flowIndex) +
+      ";attempt_index=" + CsrTraceInteger (attemptIndex) +
+      ";configured_destination=" + CsrTraceInteger (flow.destination) +
+      ";discovery_active=" + CsrTraceInteger (discoveryActive ? 1 : 0) +
+      ";topology_known=" + CsrTraceInteger (topologyKnown ? 1 : 0) +
+      ";gateway_cached=" + CsrTraceInteger (state->gatewayKnown ? 1 : 0) +
+      ";route_check_performed=" +
+        CsrTraceInteger (routeCheckPerformed ? 1 : 0) +
+      ";route_available=" + CsrTraceInteger (routeAvailable ? 1 : 0) +
+      ";nsdp_count=" + CsrTraceInteger (nsdpCount) +
+      ";nsdp_limit=16" +
+      ";nwk_queue=" + CsrTraceInteger (nwkQueueSize);
+    WriteDifferentialAdmissionTrace (event);
+  };
+
+  if (!admitted)
+    {
+      // A source-blocked attempt creates no packet and therefore has no
+      // application correlation sequence.
+      writeAdmissionEvent ("");
+      return;
     }
   if (admitted)
     {
@@ -661,6 +730,7 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
         Create<Packet> (networkPacketBytes - networkHeaderBytes);
       CsrDifferentialAppTag appTag (payload->GetUid ());
       payload->AddPacketTag (appTag);
+      writeAdmissionEvent (CsrTraceInteger (appTag.GetSequence ()));
       CsrDifferentialTraceEvent event;
       event.event = "app_send";
       event.node = CsrTraceInteger (flow.source);
@@ -748,6 +818,7 @@ main (int argc, char *argv[])
   bool gatewayDiscovery = true;
   bool opnetAppGating = true;
   bool aggregateTraceOnly = false;
+  bool admissionTrace = false;
   bool quietModelLogs = false;
   uint64_t flowLimit = 0;
 
@@ -774,6 +845,10 @@ main (int argc, char *argv[])
     "Write only app/delivery/drop events needed for aggregate comparison",
     aggregateTraceOnly);
   command.AddValue (
+    "admissionTrace",
+    "Write the opt-in application/NWK/HOP admission ledger",
+    admissionTrace);
+  command.AddValue (
     "quietModelLogs",
     "Suppress per-event model stdout while retaining the final summary",
     quietModelLogs);
@@ -793,6 +868,7 @@ main (int argc, char *argv[])
   RngSeedManager::SetSeed (scenario.seed);
   RngSeedManager::SetRun (1);
   SetDifferentialTraceAggregateOnly (aggregateTraceOnly);
+  SetDifferentialAdmissionTraceEnabled (admissionTrace);
   OpenDifferentialTraceCsv (tracePath);
 
   NullStreamBuffer nullStreamBuffer;
@@ -879,8 +955,11 @@ main (int argc, char *argv[])
 
   std::vector<std::shared_ptr<FlowRuntimeState>> flowStates;
   flowStates.reserve (scenario.flows.size ());
-  for (const ImportedFlow &flow : scenario.flows)
+  for (std::size_t flowIndex = 0;
+       flowIndex < scenario.flows.size ();
+       ++flowIndex)
     {
+      const ImportedFlow &flow = scenario.flows[flowIndex];
       auto state = std::make_shared<FlowRuntimeState> ();
       if (flow.destinationMode == RANDOM_ROUTE_DESTINATION_MODE)
         {
@@ -896,6 +975,7 @@ main (int argc, char *argv[])
                            &SendFlowPacket,
                            nodes.at (flow.source).network,
                            flow,
+                           flowIndex,
                            stopSeconds,
                            flowLimit,
                            opnetAppGating,

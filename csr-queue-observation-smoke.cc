@@ -291,6 +291,65 @@ RowsForEventAndSequence (const std::vector<TraceRow> &rows,
 }
 
 std::vector<TraceRow>
+RowsForEventAndFlow (const std::vector<TraceRow> &rows,
+                     const std::string &event,
+                     CsrNodeId source,
+                     CsrNodeId destination)
+{
+  std::vector<TraceRow> selected;
+  const std::string sourceText = CsrTraceInteger (source);
+  const std::string destinationText = CsrTraceInteger (destination);
+  std::copy_if (rows.begin (),
+                rows.end (),
+                std::back_inserter (selected),
+                [&event, &sourceText, &destinationText] (const TraceRow &row) {
+                  return row.event == event &&
+                         row.source == sourceText &&
+                         row.destination == destinationText;
+                });
+  return selected;
+}
+
+std::map<std::string, std::string>
+ParseDetail (const TraceRow &row)
+{
+  std::map<std::string, std::string> fields;
+  std::size_t start = 0;
+  while (start < row.detail.size ())
+    {
+      const std::size_t end = row.detail.find (';', start);
+      const std::string token = row.detail.substr (
+        start,
+        end == std::string::npos ? std::string::npos : end - start);
+      const std::size_t equals = token.find ('=');
+      Require (equals != std::string::npos && equals != 0,
+               "admission-ledger detail is not key=value");
+      const std::string key = token.substr (0, equals);
+      Require (fields.emplace (key, token.substr (equals + 1)).second,
+               "admission-ledger detail contains a duplicate key");
+      if (end == std::string::npos)
+        {
+          break;
+        }
+      start = end + 1;
+    }
+  return fields;
+}
+
+void
+RequireDetail (const TraceRow &row,
+               const std::string &key,
+               const std::string &expected,
+               const std::string &label)
+{
+  const std::map<std::string, std::string> detail = ParseDetail (row);
+  const auto found = detail.find (key);
+  Require (found != detail.end (), label + " is missing detail key " + key);
+  Require (found->second == expected,
+           label + " has the wrong " + key + " value");
+}
+
+std::vector<TraceRow>
 RouteChangesForDestination (const std::vector<TraceRow> &rows,
                             CsrNodeId node,
                             CsrNodeId destination)
@@ -320,6 +379,7 @@ void
 StartTrace (const TraceFile &trace)
 {
   SetDifferentialTraceAggregateOnly (false);
+  SetDifferentialAdmissionTraceEnabled (true);
   OpenDifferentialTraceCsv (trace.Path ());
 }
 
@@ -328,11 +388,22 @@ TestAggregateOnlyPathWriter ()
 {
   TraceFile trace ("aggregate-path-writer");
   SetDifferentialTraceAggregateOnly (true);
+  SetDifferentialAdmissionTraceEnabled (true);
   OpenDifferentialTraceCsv (trace.Path ());
 
   CsrDifferentialTraceEvent filtered;
   filtered.event = "tx_start";
   WriteDifferentialTrace (filtered);
+
+  CsrDifferentialTraceEvent admission;
+  admission.event = "app_admission";
+  admission.node = "10";
+  admission.source = "10";
+  admission.destination = "30";
+  admission.success = "0";
+  admission.reason = "nsdp_full";
+  admission.detail = "attempt=8;nsdp_count=16;nsdp_limit=16";
+  WriteDifferentialTrace (admission);
 
   CsrDifferentialTraceEvent enqueue;
   enqueue.event = "nwk_enqueue";
@@ -363,6 +434,7 @@ TestAggregateOnlyPathWriter ()
 
   CloseDifferentialTraceCsv ();
   SetDifferentialTraceAggregateOnly (false);
+  SetDifferentialAdmissionTraceEnabled (false);
 
   std::ifstream stream (trace.Path ());
   Require (stream.is_open (), "could not open aggregate-only path trace");
@@ -392,7 +464,7 @@ TestAggregateOnlyPathWriter ()
         }
     }
 
-  Require (rows.size () == 3,
+  Require (rows.size () == 4,
            "aggregate-only writer retained a filtered event or lost a path event");
   for (const auto &row : rows)
     {
@@ -400,19 +472,27 @@ TestAggregateOnlyPathWriter ()
                "aggregate-only writer emitted a malformed CSV row");
     }
   Require (rows[0][columns["event_index"]] == "0" &&
-             rows[0][columns["event"]] == "nwk_enqueue" &&
+             rows[0][columns["event"]] == "app_admission" &&
              rows[1][columns["event_index"]] == "1" &&
-             rows[1][columns["event"]] == "nwk_forward" &&
+             rows[1][columns["event"]] == "nwk_enqueue" &&
              rows[2][columns["event_index"]] == "2" &&
-             rows[2][columns["event"]] == "route_change",
+             rows[2][columns["event"]] == "nwk_forward" &&
+             rows[3][columns["event_index"]] == "3" &&
+             rows[3][columns["event"]] == "route_change",
            "aggregate-only path events or indexes are not source ordered");
-  Require (rows[1][columns["src"]] == "10" &&
-             rows[1][columns["dst"]] == "30" &&
-             rows[1][columns["sequence"]] == "7" &&
-             rows[1][columns["peer"]] == "9" &&
-             rows[1][columns["next_hop"]] == "20" &&
-             rows[1][columns["route_cost"]] == "17" &&
-             rows[1][columns["detail"]] == "num_hop=2;path=20>30",
+  Require (rows[0][columns["src"]] == "10" &&
+             rows[0][columns["dst"]] == "30" &&
+             rows[0][columns["reason"]] == "nsdp_full" &&
+             rows[0][columns["detail"]] ==
+               "attempt=8;nsdp_count=16;nsdp_limit=16",
+           "aggregate-only writer dropped application-admission fields");
+  Require (rows[2][columns["src"]] == "10" &&
+             rows[2][columns["dst"]] == "30" &&
+             rows[2][columns["sequence"]] == "7" &&
+             rows[2][columns["peer"]] == "9" &&
+             rows[2][columns["next_hop"]] == "20" &&
+             rows[2][columns["route_cost"]] == "17" &&
+             rows[2][columns["detail"]] == "num_hop=2;path=20>30",
            "aggregate-only writer dropped packet-path correlation fields");
 }
 
@@ -468,6 +548,20 @@ BuildWindowAck (CsrNodeId source,
   header.SetHasAckWindow (true);
   header.SetAckBitmap (1);
   header.SetDackBitmap (0);
+  frame->AddHeader (header);
+  return frame;
+}
+
+Ptr<Packet>
+BuildExactDack (CsrNodeId source,
+                CsrNodeId destination,
+                uint16_t sequence)
+{
+  Ptr<Packet> frame = BuildExactAck (source, destination, sequence);
+  CsrHeader header;
+  frame->RemoveHeader (header);
+  header.SetIsDack (true);
+  header.SetType (CSR_PKT_DACK);
   frame->AddHeader (header);
   return frame;
 }
@@ -633,6 +727,8 @@ TestDirectHeldThenReleasedPath ()
     RowsForEventAndSequence (rows, "nwk_forward", appSequence);
   std::vector<TraceRow> deliveries =
     RowsForEventAndSequence (rows, "nwk_delivery", appSequence);
+  std::vector<TraceRow> feedback =
+    RowsForEventAndSequence (rows, "hop_feedback", appSequence);
   std::vector<TraceRow> routeChanges =
     RouteChangesForDestination (rows, sourceNode, destinationNode);
   std::vector<TraceRow> sizes =
@@ -643,8 +739,9 @@ TestDirectHeldThenReleasedPath ()
   Require (enqueues.size () == 1 &&
              forwards.size () == 1 &&
              deliveries.size () == 1 &&
+             feedback.size () == 1 &&
              routeChanges.size () == 1,
-           "direct lifecycle did not emit one enqueue/route/forward/delivery chain");
+           "direct lifecycle did not emit one enqueue/route/forward/delivery/feedback chain");
   RequireNwkSizeAndDelaySamples (
     rows, sourceNode, expectedResidence, "held direct packet");
 
@@ -682,6 +779,13 @@ TestDirectHeldThenReleasedPath ()
              deliveries[0].destination == destinationText &&
              deliveries[0].sizeBytes == networkBytesText,
            "direct delivery correlation fields are incorrect");
+  Require (feedback[0].node == destinationText &&
+             feedback[0].peer == sourceText &&
+             feedback[0].source == sourceText &&
+             feedback[0].destination == destinationText &&
+             feedback[0].success == "1" &&
+             feedback[0].reason == "ack",
+           "direct receiver did not record its ACK feedback decision");
   Require (sizes[0].eventIndex < enqueues[0].eventIndex &&
              enqueues[0].eventIndex < routeChanges[0].eventIndex &&
              routeChanges[0].eventIndex < sizes[1].eventIndex &&
@@ -689,6 +793,8 @@ TestDirectHeldThenReleasedPath ()
              delays[0].eventIndex < forwards[0].eventIndex &&
              forwards[0].eventIndex < deliveries[0].eventIndex,
            "direct NWK lifecycle is not in source/event order");
+  Require (deliveries[0].eventIndex < feedback[0].eventIndex,
+           "receiver feedback was recorded before NWK delivery");
   Require (NearlyEqual (forwards[0].timeSeconds,
                         expectedResidence,
                         1e-12),
@@ -889,6 +995,550 @@ TestForcedTwoHopPath ()
              relayEnqueue->eventIndex < relayForward->eventIndex &&
              relayForward->eventIndex < deliveries[0].eventIndex,
            "two-hop NWK lifecycle is not in path order");
+
+  Simulator::Destroy ();
+}
+
+void
+TestAdmissionLedgerNoRouteAndSuccessfulAdmission ()
+{
+  constexpr CsrNodeId sourceNode = 301;
+  constexpr CsrNodeId noRouteDestination = 302;
+  constexpr CsrNodeId routedDestination = 303;
+  constexpr uint64_t noRouteSequence = 7101;
+  constexpr uint64_t routedSequence = 7102;
+
+  TraceFile trace ("admission-no-route");
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  ConnectNwkStack (device, hop, nwk, sourceNode);
+  nwk->AddStaticRouteWithPathloss (
+    routedDestination,
+    routedDestination,
+    70.0,
+    true,
+    static_cast<uint8_t> (CsrNodeType::Routable));
+
+  StartTrace (trace);
+  // The route-less positive-DSCP entry stays at the head.  The source-exact
+  // full scan must still admit the routed best-effort entry behind it.
+  nwk->Send (noRouteDestination,
+             5,
+             BuildTaggedPayload (16, noRouteSequence),
+             true);
+  nwk->Send (routedDestination,
+             0,
+             BuildTaggedPayload (24, routedSequence),
+             true);
+
+  Simulator::Stop (MicroSeconds (1));
+  Simulator::Run ();
+
+  Require (nwk->GetNwkQueueSize () == 1,
+           "admission ledger did not retain only the no-route packet");
+  Require (nwk->GetNsdpCount (sourceNode, noRouteDestination) == 1 &&
+             nwk->GetNsdpCount (sourceNode, routedDestination) == 1,
+           "admission ledger changed NWK NSDP custody");
+  const CsrHopLayer::DataAdmissionSnapshot routedState =
+    hop->GetDataAdmissionSnapshot (routedDestination);
+  Require (routedState.pendingData == 1 &&
+             routedState.pendingThreshold == 16 &&
+             routedState.globalSpad == 16 &&
+             routedState.neighborOutstanding == 1 &&
+             routedState.neighborThreshold == 0 &&
+             routedState.neighborSpad == 0 &&
+             routedState.globalAllowed &&
+             !routedState.neighborAllowed,
+           "successful admission produced the wrong read-only HOP snapshot");
+
+  CloseDifferentialTraceCsv ();
+  const std::vector<TraceRow> rows = ReadTrace (trace.Path ());
+  const std::vector<TraceRow> noRouteAdmissions =
+    RowsForEventAndSequence (rows, "nwk_admission", noRouteSequence);
+  const std::vector<TraceRow> routedAdmissions =
+    RowsForEventAndSequence (rows, "nwk_admission", routedSequence);
+  const std::vector<TraceRow> routedForwards =
+    RowsForEventAndSequence (rows, "nwk_forward", routedSequence);
+  const std::vector<TraceRow> hopAdmissions =
+    RowsForEventAndSequence (rows, "hop_admission", routedSequence);
+
+  Require (noRouteAdmissions.size () == 1 &&
+             noRouteAdmissions[0].success == "0" &&
+             noRouteAdmissions[0].reason == "no_route" &&
+             noRouteAdmissions[0].node == CsrTraceInteger (sourceNode) &&
+             noRouteAdmissions[0].destination ==
+               CsrTraceInteger (noRouteDestination) &&
+             noRouteAdmissions[0].nextHop.empty (),
+           "no-route scan did not emit its correlated NWK block");
+  RequireDetail (noRouteAdmissions[0],
+                 "nsdp_count",
+                 "1",
+                 "no-route NWK block");
+  RequireDetail (noRouteAdmissions[0],
+                 "nsdp_limit",
+                 "16",
+                 "no-route NWK block");
+  RequireDetail (noRouteAdmissions[0],
+                 "pending",
+                 "0",
+                 "no-route NWK block");
+  RequireDetail (noRouteAdmissions[0],
+                 "global_spad",
+                 "17",
+                 "no-route NWK block");
+
+  Require (routedAdmissions.size () == 1 &&
+             routedAdmissions[0].success == "1" &&
+             routedAdmissions[0].reason == "admitted" &&
+             routedAdmissions[0].nextHop ==
+               CsrTraceInteger (routedDestination),
+           "routed queue entry did not emit its successful NWK admission");
+  RequireDetail (routedAdmissions[0],
+                 "outstanding",
+                 "0",
+                 "successful NWK admission");
+  RequireDetail (routedAdmissions[0],
+                 "threshold",
+                 "0",
+                 "successful NWK admission");
+  RequireDetail (routedAdmissions[0],
+                 "neighbor_spad",
+                 "1",
+                 "successful NWK admission");
+
+  Require (routedForwards.size () == 1 && hopAdmissions.size () == 1,
+           "successful admission lost its NWK-forward or HOP-admission row");
+  Require (hopAdmissions[0].success == "1" &&
+             hopAdmissions[0].reason == "admitted" &&
+             hopAdmissions[0].peer == CsrTraceInteger (routedDestination),
+           "HOP admission correlation fields are incorrect");
+  RequireDetail (hopAdmissions[0],
+                 "pending_after",
+                 "1",
+                 "successful HOP admission");
+  RequireDetail (hopAdmissions[0],
+                 "outstanding_after",
+                 "1",
+                 "successful HOP admission");
+  RequireDetail (hopAdmissions[0],
+                 "global_spad_after",
+                 "16",
+                 "successful HOP admission");
+  Require (noRouteAdmissions[0].eventIndex < routedAdmissions[0].eventIndex &&
+             routedAdmissions[0].eventIndex < routedForwards[0].eventIndex &&
+             routedForwards[0].eventIndex < hopAdmissions[0].eventIndex,
+           "no-route and successful admission rows are not source ordered");
+
+  Simulator::Destroy ();
+}
+
+void
+TestApplicationNsdpAdmissionBoundary ()
+{
+  constexpr CsrNodeId sourceNode = 321;
+  constexpr CsrNodeId destinationNode = 322;
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  nwk->SetNodeId (sourceNode);
+
+  Require (nwk->CanAdmitApplicationPacket (destinationNode),
+           "empty NSDP flow was not application-admissible");
+  for (uint64_t index = 0; index < 15; ++index)
+    {
+      nwk->Send (destinationNode,
+                 0,
+                 BuildTaggedPayload (8, 7200 + index),
+                 true);
+    }
+  Require (nwk->GetNsdpCount (sourceNode, destinationNode) == 15 &&
+             nwk->CanAdmitApplicationPacket (destinationNode),
+           "application NSDP gate blocked before the source-exact limit");
+
+  nwk->Send (destinationNode,
+             0,
+             BuildTaggedPayload (8, 7215),
+             true);
+  Require (nwk->GetNsdpCount (sourceNode, destinationNode) == 16 &&
+             !nwk->CanAdmitApplicationPacket (destinationNode) &&
+             nwk->GetNwkQueueSize () == 16,
+           "application NSDP gate did not block exactly at count 16");
+
+  Simulator::Destroy ();
+}
+
+void
+TestAdmissionLedgerNeighborAckRelease ()
+{
+  constexpr CsrNodeId sourceNode = 331;
+  constexpr CsrNodeId destinationNode = 332;
+  constexpr uint64_t firstSequence = 7301;
+  constexpr uint64_t secondSequence = 7302;
+
+  TraceFile trace ("admission-neighbor-ack");
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  ConnectNwkStack (device, hop, nwk, sourceNode);
+  nwk->AddStaticRouteWithPathloss (
+    destinationNode,
+    destinationNode,
+    70.0,
+    true,
+    static_cast<uint8_t> (CsrNodeType::Routable));
+
+  StartTrace (trace);
+  nwk->Send (destinationNode,
+             0,
+             BuildTaggedPayload (16, firstSequence),
+             true);
+  nwk->Send (destinationNode,
+             0,
+             BuildTaggedPayload (16, secondSequence),
+             true);
+
+  Simulator::Schedule (MicroSeconds (1), [device, hop, nwk] () {
+    const CsrHopLayer::DataAdmissionSnapshot held =
+      hop->GetDataAdmissionSnapshot (destinationNode);
+    Require (nwk->GetNwkQueueSize () == 1 &&
+               nwk->GetNsdpCount (sourceNode, destinationNode) == 2 &&
+               held.pendingData == 1 && held.globalAllowed &&
+               held.neighborOutstanding == 1 &&
+               held.neighborThreshold == 0 &&
+               held.neighborSpad == 0 && !held.neighborAllowed,
+             "second packet was not held by the initial neighbor window");
+
+    hop->ReceiveFromMac (
+      BuildExactAck (destinationNode, sourceNode, 1), 70.0, 30.0);
+    const CsrHopLayer::DataAdmissionSnapshot released =
+      hop->GetDataAdmissionSnapshot (destinationNode);
+    Require (nwk->GetNsdpCount (sourceNode, destinationNode) == 1 &&
+               released.pendingData == 0 &&
+               released.neighborOutstanding == 0 &&
+               released.globalSpad == 17 &&
+               released.neighborSpad == 1 &&
+               hop->GetResendQueueSize () == 0 &&
+               device->GetMac ().GetDataQueuedFrameCount () == 0,
+             "exact ACK did not release NSDP and HOP capacity immediately");
+  });
+
+  Simulator::Schedule (MicroSeconds (2), [hop, nwk] () {
+    const CsrHopLayer::DataAdmissionSnapshot admitted =
+      hop->GetDataAdmissionSnapshot (destinationNode);
+    Require (nwk->GetNwkQueueSize () == 0 &&
+               nwk->GetNsdpCount (sourceNode, destinationNode) == 1 &&
+               admitted.pendingData == 1 &&
+               admitted.neighborOutstanding == 1,
+             "ACK release did not admit the held packet one TIC later");
+    hop->ReceiveFromMac (
+      BuildExactAck (destinationNode, sourceNode, 2), 70.0, 30.0);
+    Require (nwk->GetNsdpCount (sourceNode, destinationNode) == 0 &&
+               hop->GetPendingDataCount () == 0 &&
+               hop->GetOutstandingDataCount (destinationNode) == 0,
+             "second exact ACK did not close the deterministic flow");
+  });
+
+  Simulator::Stop (MicroSeconds (3));
+  Simulator::Run ();
+  CloseDifferentialTraceCsv ();
+
+  const std::vector<TraceRow> rows = ReadTrace (trace.Path ());
+  const std::vector<TraceRow> firstNwkAdmissions =
+    RowsForEventAndSequence (rows, "nwk_admission", firstSequence);
+  const std::vector<TraceRow> secondNwkAdmissions =
+    RowsForEventAndSequence (rows, "nwk_admission", secondSequence);
+  const std::vector<TraceRow> firstHopAdmissions =
+    RowsForEventAndSequence (rows, "hop_admission", firstSequence);
+  const std::vector<TraceRow> secondHopAdmissions =
+    RowsForEventAndSequence (rows, "hop_admission", secondSequence);
+  const std::vector<TraceRow> releases =
+    RowsForEventAndFlow (rows,
+                         "nwk_nsdp_release",
+                         sourceNode,
+                         destinationNode);
+  const std::vector<TraceRow> firstCompletions =
+    RowsForEventAndSequence (rows, "hop_completion", firstSequence);
+  const std::vector<TraceRow> secondCompletions =
+    RowsForEventAndSequence (rows, "hop_completion", secondSequence);
+
+  Require (firstNwkAdmissions.size () == 1 &&
+             firstNwkAdmissions[0].reason == "admitted" &&
+             firstHopAdmissions.size () == 1,
+           "first neighbor-window packet was not admitted exactly once");
+  Require (secondNwkAdmissions.size () == 2 &&
+             secondNwkAdmissions[0].success == "0" &&
+             secondNwkAdmissions[0].reason == "neighbor_flow_full" &&
+             secondNwkAdmissions[1].success == "1" &&
+             secondNwkAdmissions[1].reason == "admitted" &&
+             secondHopAdmissions.size () == 1,
+           "neighbor hold did not become admission after ACK release");
+  RequireDetail (secondNwkAdmissions[0],
+                 "outstanding",
+                 "1",
+                 "neighbor-flow block");
+  RequireDetail (secondNwkAdmissions[0],
+                 "threshold",
+                 "0",
+                 "neighbor-flow block");
+  RequireDetail (secondNwkAdmissions[0],
+                 "neighbor_spad",
+                 "0",
+                 "neighbor-flow block");
+
+  Require (releases.size () == 2 &&
+             releases[0].reason == "hop_feedback" &&
+             releases[1].reason == "hop_feedback" &&
+             firstCompletions.size () == 1 &&
+             firstCompletions[0].reason == "ack" &&
+             secondCompletions.size () == 1 &&
+             secondCompletions[0].reason == "ack",
+           "exact ACK lifecycle did not emit feedback/release/completion rows");
+  RequireDetail (firstCompletions[0],
+                 "pending_after",
+                 "0",
+                 "ACK completion");
+  RequireDetail (firstCompletions[0],
+                 "outstanding_after",
+                 "0",
+                 "ACK completion");
+  Require (releases[0].eventIndex < firstCompletions[0].eventIndex &&
+             firstCompletions[0].eventIndex <
+               secondNwkAdmissions[1].eventIndex &&
+             secondNwkAdmissions[1].eventIndex <
+               secondHopAdmissions[0].eventIndex &&
+             releases[1].eventIndex < secondCompletions[0].eventIndex,
+           "ACK release and held-packet admission are not source ordered");
+
+  Simulator::Destroy ();
+}
+
+void
+TestAdmissionLedgerGlobalEffectiveLimit ()
+{
+  constexpr CsrNodeId sourceNode = 341;
+  constexpr CsrNodeId firstDestination = 400;
+  constexpr uint64_t firstSequence = 7400;
+  constexpr uint32_t offeredPackets = 18;
+
+  TraceFile trace ("admission-global-limit");
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  ConnectNwkStack (device, hop, nwk, sourceNode);
+
+  for (uint32_t index = 0; index < offeredPackets; ++index)
+    {
+      const CsrNodeId destination = firstDestination + index;
+      nwk->AddStaticRouteWithPathloss (
+        destination,
+        destination,
+        70.0,
+        true,
+        static_cast<uint8_t> (CsrNodeType::Routable));
+    }
+
+  StartTrace (trace);
+  for (uint32_t index = 0; index < offeredPackets; ++index)
+    {
+      nwk->Send (firstDestination + index,
+                 0,
+                 BuildTaggedPayload (8, firstSequence + index),
+                 true);
+    }
+
+  Simulator::Stop (MicroSeconds (1));
+  Simulator::Run ();
+
+  Require (nwk->GetNwkQueueSize () == 1 &&
+             hop->GetPendingDataCount () == 17 &&
+             hop->GetResendQueueSize () == 17,
+           "global HOP gate did not reproduce the effective limit of 17");
+  for (uint32_t index = 0; index < 17; ++index)
+    {
+      Require (hop->GetOutstandingDataCount (firstDestination + index) == 1,
+               "global-limit admission lost a per-neighbor HOP slot");
+    }
+  const CsrNodeId heldDestination = firstDestination + 17;
+  const CsrHopLayer::DataAdmissionSnapshot held =
+    hop->GetDataAdmissionSnapshot (heldDestination);
+  Require (held.pendingData == 17 &&
+             held.pendingThreshold == 16 &&
+             held.globalSpad == 0 &&
+             !held.globalAllowed &&
+             held.neighborOutstanding == 0 &&
+             held.neighborThreshold == 0 &&
+             held.neighborSpad == 1 &&
+             held.neighborAllowed,
+           "global-limit hold exposed the wrong read-only HOP snapshot");
+
+  CloseDifferentialTraceCsv ();
+  const std::vector<TraceRow> rows = ReadTrace (trace.Path ());
+  uint32_t successfulNwkAdmissions = 0;
+  uint32_t hopAdmissions = 0;
+  for (const TraceRow &row : rows)
+    {
+      if (row.event == "nwk_admission" && row.success == "1" &&
+          row.reason == "admitted")
+        {
+          successfulNwkAdmissions++;
+        }
+      if (row.event == "hop_admission")
+        {
+          hopAdmissions++;
+        }
+    }
+  Require (successfulNwkAdmissions == 17 && hopAdmissions == 17,
+           "global ledger did not report exactly 17 HOP admissions");
+  const std::vector<TraceRow> globalBlocks =
+    RowsForEventAndSequence (rows,
+                             "nwk_admission",
+                             firstSequence + 17);
+  const std::vector<TraceRow> heldForwards =
+    RowsForEventAndSequence (rows, "nwk_forward", firstSequence + 17);
+  Require (globalBlocks.size () == 1 &&
+             globalBlocks[0].success == "0" &&
+             globalBlocks[0].reason == "global_hop_full" &&
+             globalBlocks[0].destination ==
+               CsrTraceInteger (heldDestination) &&
+             heldForwards.empty (),
+           "18th packet was not attributed to the global HOP gate");
+  RequireDetail (globalBlocks[0],
+                 "pending",
+                 "17",
+                 "global HOP block");
+  RequireDetail (globalBlocks[0],
+                 "pending_limit",
+                 "16",
+                 "global HOP block");
+  RequireDetail (globalBlocks[0],
+                 "global_spad",
+                 "0",
+                 "global HOP block");
+
+  Simulator::Destroy ();
+}
+
+void
+TestAdmissionLedgerDackSplitRelease ()
+{
+  constexpr CsrNodeId sourceNode = 351;
+  constexpr CsrNodeId destinationNode = 352;
+  constexpr uint64_t firstSequence = 7501;
+  constexpr uint64_t secondSequence = 7502;
+
+  TraceFile trace ("admission-dack-split");
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  ConnectNwkStack (device, hop, nwk, sourceNode);
+  nwk->AddStaticRouteWithPathloss (
+    destinationNode,
+    destinationNode,
+    70.0,
+    true,
+    static_cast<uint8_t> (CsrNodeType::Routable));
+
+  StartTrace (trace);
+  nwk->Send (destinationNode,
+             0,
+             BuildTaggedPayload (16, firstSequence),
+             true);
+  nwk->Send (destinationNode,
+             0,
+             BuildTaggedPayload (16, secondSequence),
+             true);
+
+  Simulator::Schedule (Seconds (2.0), [hop, nwk] () {
+    Require (nwk->GetNwkQueueSize () == 1 &&
+               nwk->GetNsdpCount (sourceNode, destinationNode) == 2 &&
+               hop->GetPendingDataCount () == 1 &&
+               hop->GetOutstandingDataCount (destinationNode) == 1,
+             "DACK setup did not retain the second neighbor-flow packet");
+    hop->ReceiveFromMac (
+      BuildExactDack (destinationNode, sourceNode, 1), 70.0, 30.0);
+    const CsrHopLayer::DataAdmissionSnapshot held =
+      hop->GetDataAdmissionSnapshot (destinationNode);
+    Require (nwk->GetNsdpCount (sourceNode, destinationNode) == 1 &&
+               hop->GetResendQueueSize () == 0 &&
+               held.pendingData == 1 &&
+               held.neighborOutstanding == 1 &&
+               held.neighborSpad == 0,
+             "DACK did not release NSDP while retaining HOP capacity");
+  });
+
+  Simulator::Schedule (Seconds (21.9), [hop, nwk] () {
+    Require (nwk->GetNwkQueueSize () == 1 &&
+               hop->GetPendingDataCount () == 1 &&
+               hop->GetOutstandingDataCount (destinationNode) == 1,
+             "DACK HOP capacity was released before its 20-second expiry");
+  });
+
+  Simulator::Schedule (Seconds (22.1), [hop, nwk] () {
+    Require (nwk->GetNwkQueueSize () == 0 &&
+               nwk->GetNsdpCount (sourceNode, destinationNode) == 1 &&
+               hop->GetPendingDataCount () == 1 &&
+               hop->GetOutstandingDataCount (destinationNode) == 1,
+             "DACK expiry did not release and re-admit the held packet");
+  });
+
+  Simulator::Stop (Seconds (22.2));
+  Simulator::Run ();
+  CloseDifferentialTraceCsv ();
+
+  const std::vector<TraceRow> rows = ReadTrace (trace.Path ());
+  const std::vector<TraceRow> releases =
+    RowsForEventAndFlow (rows,
+                         "nwk_nsdp_release",
+                         sourceNode,
+                         destinationNode);
+  const std::vector<TraceRow> completions =
+    RowsForEventAndSequence (rows, "hop_completion", firstSequence);
+  const std::vector<TraceRow> capacityReleases =
+    RowsForEventAndSequence (rows, "hop_capacity_release", firstSequence);
+  const std::vector<TraceRow> secondNwkAdmissions =
+    RowsForEventAndSequence (rows, "nwk_admission", secondSequence);
+  const std::vector<TraceRow> secondHopAdmissions =
+    RowsForEventAndSequence (rows, "hop_admission", secondSequence);
+
+  Require (releases.size () == 1 &&
+             releases[0].reason == "hop_feedback" &&
+             completions.size () == 1 && completions[0].reason == "dack" &&
+             capacityReleases.size () == 1 &&
+             capacityReleases[0].reason == "dack_expiry",
+           "DACK did not emit its split feedback/release/completion lifecycle");
+  RequireDetail (completions[0],
+                 "pending_after",
+                 "1",
+                 "DACK completion");
+  RequireDetail (completions[0],
+                 "outstanding_after",
+                 "1",
+                 "DACK completion");
+  RequireDetail (capacityReleases[0],
+                 "pending_after",
+                 "0",
+                 "DACK capacity release");
+  RequireDetail (capacityReleases[0],
+                 "outstanding_after",
+                 "0",
+                 "DACK capacity release");
+  Require (NearlyEqual (capacityReleases[0].timeSeconds -
+                          completions[0].timeSeconds,
+                        20.0,
+                        1e-12),
+           "DACK capacity release did not use the configured 20-second ns-3 hold");
+  Require (releases[0].eventIndex < completions[0].eventIndex &&
+             completions[0].eventIndex < capacityReleases[0].eventIndex,
+           "DACK split-release rows are not source ordered");
+
+  Require (secondNwkAdmissions.size () >= 2 &&
+             secondNwkAdmissions.front ().reason == "neighbor_flow_full" &&
+             secondNwkAdmissions.back ().reason == "admitted" &&
+             secondHopAdmissions.size () == 1 &&
+             capacityReleases[0].eventIndex <
+               secondNwkAdmissions.back ().eventIndex &&
+             secondNwkAdmissions.back ().eventIndex <
+               secondHopAdmissions[0].eventIndex,
+           "held packet was not admitted after DACK capacity release");
 
   Simulator::Destroy ();
 }
@@ -1137,6 +1787,11 @@ main ()
       TestAckRemovalSampling ();
       TestDirectHeldThenReleasedPath ();
       TestForcedTwoHopPath ();
+      TestAdmissionLedgerNoRouteAndSuccessfulAdmission ();
+      TestApplicationNsdpAdmissionBoundary ();
+      TestAdmissionLedgerNeighborAckRelease ();
+      TestAdmissionLedgerGlobalEffectiveLimit ();
+      TestAdmissionLedgerDackSplitRelease ();
     }
   catch (const std::exception &error)
     {

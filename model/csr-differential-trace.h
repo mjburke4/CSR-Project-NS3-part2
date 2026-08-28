@@ -121,12 +121,40 @@ inline constexpr const char* CSR_STAT_NWK_QUEUE_DELAY =
 inline std::ofstream g_csrDifferentialTrace;
 inline uint64_t g_csrDifferentialTraceIndex = 0;
 inline bool g_csrDifferentialAggregateOnly = false;
+inline bool g_csrDifferentialAdmissionTraceEnabled = false;
 
 /** Limit trace output to events consumed by the aggregate-series builder. */
 inline void
 SetDifferentialTraceAggregateOnly (bool enabled)
 {
   g_csrDifferentialAggregateOnly = enabled;
+}
+
+/** Enable the opt-in application/NWK/HOP admission ledger. */
+inline void
+SetDifferentialAdmissionTraceEnabled (bool enabled)
+{
+  g_csrDifferentialAdmissionTraceEnabled = enabled;
+}
+
+/** @return Whether the opt-in admission ledger is enabled. */
+inline bool
+IsDifferentialAdmissionTraceEnabled ()
+{
+  return g_csrDifferentialAdmissionTraceEnabled;
+}
+
+/** Return whether an event belongs to the frozen admission-ledger surface. */
+inline bool
+CsrIsDifferentialAdmissionTraceEvent (const std::string &event)
+{
+  return event == "app_admission" ||
+         event == "nwk_admission" ||
+         event == "hop_admission" ||
+         event == "hop_feedback" ||
+         event == "nwk_nsdp_release" ||
+         event == "hop_completion" ||
+         event == "hop_capacity_release";
 }
 
 inline std::string
@@ -232,7 +260,9 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
       event.event != "nwk_delivery" &&
       event.event != "route_change" &&
       event.event != "rx_drop" &&
-      event.event != "statistic_sample")
+      event.event != "statistic_sample" &&
+      !(g_csrDifferentialAdmissionTraceEnabled &&
+        CsrIsDifferentialAdmissionTraceEvent (event.event)))
     {
       return;
     }
@@ -310,6 +340,20 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
       g_csrDifferentialTrace << CsrTraceCsvEscape (fields[index]);
     }
   g_csrDifferentialTrace << '\n';
+}
+
+/** Write one admission-ledger event when the opt-in surface is enabled. */
+inline void
+WriteDifferentialAdmissionTrace (const CsrDifferentialTraceEvent &event)
+{
+  if (!g_csrDifferentialAdmissionTraceEnabled)
+    {
+      return;
+    }
+  NS_ABORT_MSG_IF (
+    !CsrIsDifferentialAdmissionTraceEvent (event.event),
+    "unsupported CSR admission trace event: " << event.event);
+  WriteDifferentialTrace (event);
 }
 
 /** Write one source-equivalent discrete statistic sample. */

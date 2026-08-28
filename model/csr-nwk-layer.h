@@ -900,6 +900,11 @@ public:
         m_hop->SetShouldDackCallback (
           MakeCallback (&CsrNetLayer::ShouldDack, this));
 
+        // Observation-only state query used by the opt-in HOP feedback
+        // ledger.  The getter does not create or mutate an NSDP entry.
+        m_hop->SetNsdpObservationCallback (
+          MakeCallback (&CsrNetLayer::GetNsdpCount, this));
+
         m_hop->SetRelayRouteAvailableCallback (
           MakeCallback (&CsrNetLayer::HasRelayRoute, this));
 
@@ -1043,6 +1048,13 @@ public:
     enqueueEvent.sizeBytes = CsrTraceInteger (e.payload->GetSize ());
     enqueueEvent.success = "1";
     enqueueEvent.reason = "local";
+    if (IsDifferentialAdmissionTraceEnabled ())
+      {
+        enqueueEvent.detail =
+          "nsdp_count=" + CsrTraceInteger (nsdp.count) +
+          ";nsdp_limit=" + CsrTraceInteger (nsdp.limit) +
+          ";queue_after=" + CsrTraceInteger (m_nwkQueue.size ());
+      }
     WriteDifferentialTrace (enqueueEvent);
 
     ScheduleCheckNwkQueue ();
@@ -1055,6 +1067,7 @@ public:
 
     if (e.count > 0)
       {
+        const uint32_t countBefore = e.count;
         e.count--;
 
         std::cout << "[NWK " << m_nodeId
@@ -1063,6 +1076,24 @@ public:
                   << ") decremented to "
                   << e.count
                   << std::endl;
+
+        if (IsDifferentialAdmissionTraceEnabled ())
+          {
+            CsrDifferentialTraceEvent releaseEvent;
+            releaseEvent.event = "nwk_nsdp_release";
+            releaseEvent.node = CsrTraceInteger (m_nodeId);
+            releaseEvent.packetType = "data";
+            releaseEvent.source = CsrTraceInteger (src);
+            releaseEvent.destination = CsrTraceInteger (dst);
+            releaseEvent.success = "1";
+            releaseEvent.reason = "hop_feedback";
+            releaseEvent.detail =
+              "count_before=" + CsrTraceInteger (countBefore) +
+              ";count_after=" + CsrTraceInteger (e.count) +
+              ";nsdp_limit=" + CsrTraceInteger (e.limit) +
+              ";nwk_queue=" + CsrTraceInteger (m_nwkQueue.size ());
+            WriteDifferentialAdmissionTrace (releaseEvent);
+          }
 
         // Legacy HOP schedules a NWK queue check whenever
         // ACK/DACK/final-timeout processing releases flow
@@ -1205,6 +1236,13 @@ public:
         enqueueEvent.sizeBytes = CsrTraceInteger (e.payload->GetSize ());
         enqueueEvent.success = "1";
         enqueueEvent.reason = "relay";
+        if (IsDifferentialAdmissionTraceEnabled ())
+          {
+            enqueueEvent.detail =
+              "nsdp_count=" + CsrTraceInteger (nsdp.count) +
+              ";nsdp_limit=" + CsrTraceInteger (nsdp.limit) +
+              ";queue_after=" + CsrTraceInteger (m_nwkQueue.size ());
+          }
         WriteDifferentialTrace (enqueueEvent);
 
         ScheduleCheckNwkQueue ();
@@ -1908,6 +1946,20 @@ private:
               << m_nwkQueue.size ()
               << std::endl;
 
+    auto populatePacketIdentity =
+      [this] (CsrDifferentialTraceEvent &event,
+              const NwkQueueEntry &entry) {
+        event.node = CsrTraceInteger (m_nodeId);
+        event.packetType = "data";
+        event.source = CsrTraceInteger (entry.nwkSrc);
+        event.destination = CsrTraceInteger (entry.nwkDst);
+        CsrDifferentialAppTag appTag;
+        if (entry.payload->PeekPacketTag (appTag))
+          {
+            event.sequence = CsrTraceInteger (appTag.GetSequence ());
+          }
+      };
+
     // Legacy check_nwk_queue() scans the complete priority queue.
     // A packet with no route or a saturated next hop does not block
     // eligible traffic for another destination. NSDP is bookkeeping
@@ -1919,6 +1971,31 @@ private:
       {
         if (!m_hop->CanAcceptDataGlobally ())
           {
+            if (IsDifferentialAdmissionTraceEnabled ())
+              {
+                const auto snapshot =
+                  m_hop->GetDataAdmissionSnapshot (CSR_BROADCAST_ID);
+                CsrDifferentialTraceEvent admissionEvent;
+                admissionEvent.event = "nwk_admission";
+                populatePacketIdentity (admissionEvent, *it);
+                admissionEvent.success = "0";
+                admissionEvent.reason = "global_hop_full";
+                admissionEvent.detail =
+                  "queue_before=" + CsrTraceInteger (m_nwkQueue.size ()) +
+                  ";queue_after=" + CsrTraceInteger (m_nwkQueue.size ()) +
+                  ";nsdp_count=" +
+                    CsrTraceInteger (
+                      GetNsdpCount (it->nwkSrc, it->nwkDst)) +
+                  ";nsdp_limit=" + CsrTraceInteger (NSDP_DACK_THRESHOLD) +
+                  ";pending=" + CsrTraceInteger (snapshot.pendingData) +
+                  ";pending_limit=" +
+                    CsrTraceInteger (snapshot.pendingThreshold) +
+                  ";global_spad=" +
+                    CsrTraceSignedInteger (snapshot.globalSpad) +
+                  ";scan_stopped=1";
+                WriteDifferentialAdmissionTrace (admissionEvent);
+              }
+
             std::cout << "[NWK " << m_nodeId
                       << "] Global HOP DATA capacity exhausted;"
                       << " holding "
@@ -1936,6 +2013,31 @@ private:
                             &selectedRoute,
                             &usedReverseRoute))
           {
+            if (IsDifferentialAdmissionTraceEnabled ())
+              {
+                const auto snapshot =
+                  m_hop->GetDataAdmissionSnapshot (CSR_BROADCAST_ID);
+                CsrDifferentialTraceEvent admissionEvent;
+                admissionEvent.event = "nwk_admission";
+                populatePacketIdentity (admissionEvent, *it);
+                admissionEvent.success = "0";
+                admissionEvent.reason = "no_route";
+                admissionEvent.detail =
+                  "queue_before=" + CsrTraceInteger (m_nwkQueue.size ()) +
+                  ";queue_after=" + CsrTraceInteger (m_nwkQueue.size ()) +
+                  ";nsdp_count=" +
+                    CsrTraceInteger (
+                      GetNsdpCount (it->nwkSrc, it->nwkDst)) +
+                  ";nsdp_limit=" + CsrTraceInteger (NSDP_DACK_THRESHOLD) +
+                  ";pending=" + CsrTraceInteger (snapshot.pendingData) +
+                  ";pending_limit=" +
+                    CsrTraceInteger (snapshot.pendingThreshold) +
+                  ";global_spad=" +
+                    CsrTraceSignedInteger (snapshot.globalSpad) +
+                  ";route_known=0";
+                WriteDifferentialAdmissionTrace (admissionEvent);
+              }
+
             std::cout << "[NWK " << m_nodeId
                       << "] No route to nwkDst="
                       << it->nwkDst
@@ -1946,10 +2048,85 @@ private:
             continue;
           }
 
-        if (!m_hop->CanSendToHop (hopDest))
+        const bool canSendToHop = m_hop->CanSendToHop (hopDest);
+        CsrHopLayer::DataAdmissionSnapshot admissionSnapshot;
+        if (IsDifferentialAdmissionTraceEnabled ())
           {
+            admissionSnapshot =
+              m_hop->GetDataAdmissionSnapshot (hopDest);
+          }
+        if (!canSendToHop)
+          {
+            if (IsDifferentialAdmissionTraceEnabled ())
+              {
+                CsrDifferentialTraceEvent admissionEvent;
+                admissionEvent.event = "nwk_admission";
+                populatePacketIdentity (admissionEvent, *it);
+                admissionEvent.peer = CsrTraceInteger (hopDest);
+                admissionEvent.nextHop = CsrTraceInteger (hopDest);
+                admissionEvent.success = "0";
+                admissionEvent.reason =
+                  admissionSnapshot.globalAllowed
+                    ? "neighbor_flow_full"
+                    : "global_hop_full";
+                admissionEvent.detail =
+                  "queue_before=" + CsrTraceInteger (m_nwkQueue.size ()) +
+                  ";queue_after=" + CsrTraceInteger (m_nwkQueue.size ()) +
+                  ";nsdp_count=" +
+                    CsrTraceInteger (
+                      GetNsdpCount (it->nwkSrc, it->nwkDst)) +
+                  ";nsdp_limit=" + CsrTraceInteger (NSDP_DACK_THRESHOLD) +
+                  ";pending=" +
+                    CsrTraceInteger (admissionSnapshot.pendingData) +
+                  ";pending_limit=" +
+                    CsrTraceInteger (admissionSnapshot.pendingThreshold) +
+                  ";global_spad=" +
+                    CsrTraceSignedInteger (admissionSnapshot.globalSpad) +
+                  ";outstanding=" +
+                    CsrTraceInteger (
+                      admissionSnapshot.neighborOutstanding) +
+                  ";threshold=" +
+                    CsrTraceInteger (admissionSnapshot.neighborThreshold) +
+                  ";neighbor_spad=" +
+                    CsrTraceSignedInteger (admissionSnapshot.neighborSpad) +
+                  ";route_known=1";
+                WriteDifferentialAdmissionTrace (admissionEvent);
+              }
+
             ++it;
             continue;
+          }
+
+        if (IsDifferentialAdmissionTraceEnabled ())
+          {
+            CsrDifferentialTraceEvent admissionEvent;
+            admissionEvent.event = "nwk_admission";
+            populatePacketIdentity (admissionEvent, *it);
+            admissionEvent.peer = CsrTraceInteger (hopDest);
+            admissionEvent.nextHop = CsrTraceInteger (hopDest);
+            admissionEvent.success = "1";
+            admissionEvent.reason = "admitted";
+            admissionEvent.detail =
+              "queue_before=" + CsrTraceInteger (m_nwkQueue.size ()) +
+              ";queue_after=" + CsrTraceInteger (m_nwkQueue.size () - 1) +
+              ";nsdp_count=" +
+                CsrTraceInteger (
+                  GetNsdpCount (it->nwkSrc, it->nwkDst)) +
+              ";nsdp_limit=" + CsrTraceInteger (NSDP_DACK_THRESHOLD) +
+              ";pending=" +
+                CsrTraceInteger (admissionSnapshot.pendingData) +
+              ";pending_limit=" +
+                CsrTraceInteger (admissionSnapshot.pendingThreshold) +
+              ";global_spad=" +
+                CsrTraceSignedInteger (admissionSnapshot.globalSpad) +
+              ";outstanding=" +
+                CsrTraceInteger (admissionSnapshot.neighborOutstanding) +
+              ";threshold=" +
+                CsrTraceInteger (admissionSnapshot.neighborThreshold) +
+              ";neighbor_spad=" +
+                CsrTraceSignedInteger (admissionSnapshot.neighborSpad) +
+              ";route_known=1";
+            WriteDifferentialAdmissionTrace (admissionEvent);
           }
 
         NwkQueueEntry entry = *it;

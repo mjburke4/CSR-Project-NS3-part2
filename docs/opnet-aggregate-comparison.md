@@ -1,6 +1,6 @@
 # OPNET aggregate comparison
 
-Updated: 2026-08-27
+Updated: 2026-08-28
 
 ## Purpose and evidence boundary
 
@@ -301,9 +301,13 @@ reported no incomplete delivery, loop, duplicate admission, next-hop mismatch,
 route-context mismatch, negative interval, or decomposition error, and retained
 1,000 valid end-of-run prefixes instead of misclassifying them as failures.
 Of those prefixes, 508 end in an NWK queue and 492 have already been handed to
-HOP without a subsequent relay enqueue or delivery. All 95 nonempty
-end-to-end-delay buckets match `aggregate-ns3-trace.py` exactly, with maximum
-absolute difference zero.
+HOP without a subsequent relay enqueue or delivery. Joining the path and
+admission ledgers now classifies those 492 terminal-forward prefixes as 438
+completed `no_ack`, 33 open resend, 16 completed ACK, and 5 completed DACK
+legs. Thus most of the formerly generic post-NWK population is historical
+final no-ACK loss rather than traffic still in flight at the stop. All 95
+nonempty end-to-end-delay buckets match `aggregate-ns3-trace.py` exactly, with
+maximum absolute difference zero.
 
 The delivered paths are stable and source-specific:
 
@@ -335,13 +339,75 @@ does explain source 7's late first admission: its five-hop gateway route is
 selected at 386.106 seconds. The route set stops changing by 389.955 seconds,
 however, and every delivered source uses one loop-free path thereafter.
 
-This narrows the next parity target. Route churn and a too-fast MAC are not the
-dominant ns-3 explanation. The next source-ordered ledger should correlate
-each application attempt with the NWK/HOP admission decision and state that
-made it pass or block: gateway-route availability, NSDP count/limit, global
-HOP DATA capacity, per-neighbor `flow_ctrl_spad`, ACK/DACK completion, and the
-eventual source queue. That is the shortest path to explaining both the 22.1%
-excess ns-3 offered traffic and the far-chain NWK backlog.
+### Application/NWK/HOP admission-state diagnostic
+
+The source-ordered ledger is now implemented as an opt-in observation surface.
+It records every application gate decision, every NWK-to-HOP admission or
+hold, the HOP admission snapshot, receiver ACK/DACK feedback, the exact NSDP
+release, sender completion, and delayed HOP-capacity release. The snapshots
+include route availability, NWK queue size, NSDP count/limit, global pending
+DATA and allowance, per-neighbor outstanding/threshold/allowance, resend
+state, and the correlated `(src,dst,sequence)` identity wherever the modeled
+packet carries it. Enabling the ledger does not change modeled bytes, queue
+order, route selection, random draws, or event scheduling.
+
+The canonical 6,000-second multihop ledger has 3,228,471 events and SHA-256
+`cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
+Its 1,710,000 application decisions reconcile exactly to the compact
+diagnostics: 14,740 admissions and the same 1,695,260 source-ordered blocks.
+At the NWK boundary it records 18,675 admissions, 1,024,561
+`neighbor_flow_full` holds, 3,172 `global_hop_full` holds, and zero
+`no_route` holds. The neighbor holds identify the congested directed legs:
+
+| Directed leg | `neighbor_flow_full` holds |
+| --- | ---: |
+| `8>2` | 604,751 |
+| `2>4` | 172,281 |
+| `4>5` | 156,811 |
+| `7>8` | 46,915 |
+| `5>1` | 42,867 |
+| `3>1` | 936 |
+
+These hold totals count repeated queue-scan decisions, not unique packets or
+time-weighted occupancy. Their directed-leg distribution identifies the gate
+that repeatedly prevents progress.
+
+HOP records 14,906 ACK completions, 2,445 DACK completions, and 1,290
+`no_ack` completions; 2,438 delayed DACK-capacity holds expire. This confirms
+that the node-8 backlog is principally a per-neighbor admission bottleneck on
+`8>2`, not a missing route. It also preserves the earlier result boundary:
+the strict path analysis still reports 13,740 valid delivered chains, 1,000
+valid incomplete prefixes, and zero invalid packets. After trace-provenance
+columns are removed, the old and ledger-enabled aggregate value CSVs are
+byte-identical with SHA-256
+`ce84eb0c61d8de89dbd3aff50ad9608947ed9997c96db0e1a38d11f08a5d79bb`.
+The ledger is therefore observational for the measured aggregate surface.
+An open DACK hold is a per-leg capacity state: the acknowledged packet may
+already have progressed downstream, so it is not classified as a terminal
+packet state by itself.
+
+The 20-/40-second hold values above describe the configured ns-3 intervals.
+Recovered `br_hop.pr.c` schedules the actual DACK expiry check at the nominal
+hold plus one `TIC`, then wakes NWK one additional `TIC` later; the
+observation-only ledger does not change or claim parity for that tiny timer
+offset.
+
+The new evidence exposes a narrower, source-proven mismatch. Of 2,433 DACK
+feedback decisions, 138 occur with relay NSDP state changing from 15 before
+NWK enqueue to 16 afterward. The recovered `br_hop.pr.c` obtains the NSDP entry,
+sends the relay packet to the separate NWK process, and makes its ACK/DACK
+test against the pre-enqueue count; count 15 therefore selects ACK. The
+current ns-3 callback enqueues synchronously and tests the post-enqueue count,
+so the same 15-to-16 transition selects DACK one packet early. Fixing that
+pre/post-enqueue decision boundary and rerunning this ledger is the next
+parity step. The admission-ledger analyzer intentionally fails strict mode on
+these 138 source-semantic violations; the independent packet-path strict check
+still passes.
+
+These counts are ns-3 source-ordered isolation evidence combined with a direct
+comparison to recovered OPNET source. They are not an OPNET event-trace
+comparison: the recovered PB/OV results contain aggregate vectors and no
+corresponding admission ledger.
 
 The hash-bound core-comparison traces retain complete correlation and
 size-integrity provenance. These three traces predate the additive NWK/path

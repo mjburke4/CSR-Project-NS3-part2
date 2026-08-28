@@ -216,6 +216,8 @@ The runner writes `csr-differential-trace-v1` rows with a monotonic event index
 and simulation timestamp. Its current observation points are:
 
 - scenario node/link construction and application sends;
+- opt-in application, NWK, HOP, feedback, completion, and delayed-capacity
+  admission events;
 - MAC Idle/Search/Track/Tx state transitions;
 - MAC reservation preparation, holdoff completion, per-slot countdown, and
   next-reservation advertisement;
@@ -243,8 +245,9 @@ and integral queue-size samples. Aggregate-only v1 traces preserve the
 original 12 columns in their original order and append `peer`, `next_hop`,
 `route_cost`, and `detail`; repository readers are name-based. The compact
 writer now retains `nwk_enqueue`, `nwk_forward`, and `route_change` in addition
-to its earlier aggregate events. Readers that require an exact header width or
-an unchanged event set must account for those additions.
+to its earlier aggregate events. With `--admissionTrace=1`, it also retains the
+seven admission-ledger event types documented below. Readers that require an
+exact header width or an unchanged event set must account for those additions.
 
 ### Packet-path and NWK-residence ledger
 
@@ -286,6 +289,119 @@ valid end-of-run prefixes. Its 95 nonempty end-to-end buckets were exactly
 identical to the aggregate builder. This validates the ns-3 ledger and
 isolates model behavior; it does not manufacture an OPNET packet path, because
 the recovered PB/OV result contains bucket aggregates only.
+
+### Application/NWK/HOP admission-state ledger
+
+The admission ledger is disabled by default and enabled explicitly with
+`--admissionTrace=1`. When enabled, the compact writer retains seven additional
+source-ordered events:
+
+| Event | Observation boundary |
+| --- | --- |
+| `app_admission` | Every generator attempt and its admitted or blocked application gate |
+| `nwk_admission` | Every successful NWK-to-HOP transfer or hold due to route/global/per-neighbor state |
+| `hop_admission` | Pending, outstanding, threshold, and resend state before and after HOP admission |
+| `hop_feedback` | Receiver ACK/DACK choice, first-reception state, and NSDP count before/after relay enqueue |
+| `nwk_nsdp_release` | Exact NSDP decrement and release cause |
+| `hop_completion` | Sender ACK, DACK, or final no-ACK completion and capacity state |
+| `hop_capacity_release` | Deferred 20-/40-second DACK hold expiry |
+
+The events carry `(src,dst,sequence)` and directed-leg identity wherever the
+modeled packet carries the observation tag. Detail fields preserve the live
+queue, NSDP, global pending/allowance, per-neighbor
+outstanding/threshold/allowance, resend, completion, and DACK-hold snapshots.
+They add no modeled bytes and do not alter route lookup, queue order, random
+draws, or event scheduling.
+
+Run the imported scenario with the opt-in surface:
+
+```bash
+../ns-3-dev/build/scratch/ns3-dev-csr-opnet-scenario-runner-default \
+  --scenario=imported-campus.csv \
+  --trace=ns3-admission-trace.csv \
+  --appDiagnostics=app-admission-diagnostics.csv \
+  --stop=6000 \
+  --aggregateTraceOnly=1 \
+  --admissionTrace=1 \
+  --quietModelLogs=1
+```
+
+Then validate and summarize the ledger:
+
+```bash
+python3 utils/analyze-ns3-admission-ledger.py ns3-admission-trace.csv \
+  --app-diagnostics app-admission-diagnostics.csv \
+  --summary-json admission-summary.json \
+  --legs-csv admission-legs.csv \
+  --strict
+```
+
+Strict mode is a source-semantics assertion, not merely a CSV parser. On the
+pre-fix canonical trace it writes both outputs and exits nonzero because the
+138 DACK boundary decisions described below violate recovered OPNET order.
+That expected failure is the confirmed parity finding to clear with the next
+code change.
+
+The analyzer reconciles every `app_admission` decision with the compact
+per-flow diagnostics, validates NWK and HOP state transitions, correlates
+feedback, NSDP release, completion, and DACK expiry for each directed packet
+leg, and writes both a bounded JSON summary and a packet-leg CSV. Structurally
+valid open NWK, resend, and DACK-hold states are inventoried rather than
+silently converted to failures.
+
+The canonical 6,000-second multihop trace contains 3,228,471 events and has
+SHA-256
+`cf9392db5d10d47f5a7cc6459b00f828556cb72d5988e80e33a55cd0764e79ef`.
+Its application ledger exactly partitions 1,710,000 attempts into the same
+14,740 admissions and compact block totals. NWK decisions are:
+
+| NWK decision | Count |
+| --- | ---: |
+| Admitted | 18,675 |
+| `neighbor_flow_full` | 1,024,561 |
+| `global_hop_full` | 3,172 |
+| `no_route` | 0 |
+
+The per-neighbor holds are 604,751 on `8>2`, 172,281 on `2>4`, 156,811 on
+`4>5`, 46,915 on `7>8`, 42,867 on `5>1`, and 936 on `3>1`. Those hold counts
+are repeated queue-scan decisions rather than unique packets or time-weighted
+occupancy. HOP completion counts are 14,906 ACK, 2,445 DACK, and 1,290 final
+`no_ack`; 2,438 delayed DACK-capacity holds expire. The strict packet-path
+result remains 13,740 valid
+deliveries, 1,000 valid incomplete prefixes, and zero invalid packets. After
+trace-provenance columns are removed, aggregate value output from this run is
+byte-identical to the earlier path-only run, with SHA-256
+`ce84eb0c61d8de89dbd3aff50ad9608947ed9997c96db0e1a38d11f08a5d79bb`.
+
+Joining the packet and leg ledgers classifies all 1,000 incomplete packets:
+508 remain in NWK, while the 492 terminal-forward prefixes comprise 438
+completed `no_ack`, 33 open resend, 16 completed ACK, and 5 completed DACK
+legs. Most of the old "post-NWK unresolved" category is therefore historical
+final no-ACK loss, not traffic still in flight. A DACK hold is per-leg
+capacity state; a packet may continue through later hops while an upstream
+DACK hold remains open, so that hold is not a packet-terminal category.
+
+The recorded 20-/40-second values are the configured ns-3 hold intervals, not
+an assertion of exact timer-event parity. Recovered `br_hop.pr.c` schedules its
+DACK check one `TIC` after the nominal expiration and schedules the subsequent
+NWK queue wake one more `TIC` later. That sub-microsecond ordering difference
+is deliberately left unchanged by this observation-only ledger step.
+
+This isolates the far-chain backlog to live admission state, especially the
+`8>2` per-neighbor boundary, and exposes one concrete source mismatch. Of
+2,433 receiver DACK feedback decisions, 138 observe NSDP count 15 before relay
+enqueue and 16 afterward. Recovered `br_hop.pr.c` obtains the NSDP entry, sends the
+relay packet to the separate NWK process, and tests the pre-enqueue count;
+count 15 selects ACK. The current synchronous ns-3 callback increments first
+and tests 16, selecting DACK one packet early. The next parity change is to use
+the source-defined pre-enqueue boundary, then rerun this same ledger and
+aggregate/path checks. The current admission-ledger strict result therefore
+fails on these 138 cases while the independent packet-path strict result
+passes.
+
+The ledger is ns-3 isolation evidence interpreted against recovered OPNET
+source. It is not an OPNET event comparison. No authoritative OPNET
+application/NWK/HOP event trace exists in the recovered PB/OV results.
 
 OPNET CSV exports may use canonical names or common aliases such as `Time`,
 `Action`, `Node ID`, `Tx Node`, `Pkt Type`, `Seq`, `SNR`, and `Accepted`. Event
@@ -415,9 +531,12 @@ changing MAC service again. It finds one stable loop-free route per source,
 zero route-context mismatches, and an exact packet-weighted decomposition of
 91.5210 seconds into 78.4605 seconds of NWK residence and 13.0605 seconds of
 post-NWK leg service/transit. Multihop packets are only 9.68% of deliveries but
-contribute 85.79% of cumulative delay. The next isolation target is therefore
-application/NWK/HOP admission state, especially NSDP and neighbor/global HOP
-capacity on the `7>8>2>4>5>1` chain.
+contribute 85.79% of cumulative delay. The completed admission ledger then
+records 1,024,561 per-neighbor holds and only 3,172 global holds, with 604,751
+of the former on `8>2` and no no-route holds. Its 138 DACK choices at NSDP
+15-before/16-after identify the next source-backed correction: ACK/DACK must
+use the pre-enqueue NSDP count rather than ns-3's current synchronous
+post-enqueue count.
 
 ## Remaining certification boundary
 

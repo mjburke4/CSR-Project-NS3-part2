@@ -165,6 +165,12 @@ public:
     m_shouldDackCb = cb;
   }
 
+  void SetNsdpObservationCallback (
+    Callback<uint32_t, CsrNodeId, CsrNodeId> cb)
+  {
+    m_nsdpObservationCb = cb;
+  }
+
   void SetRelayRouteAvailableCallback (Callback<bool, CsrNodeId> cb)
   {
     m_relayRouteAvailableCb = cb;
@@ -455,6 +461,49 @@ private:
 public:
   static constexpr uint32_t RESEND_QUEUE_SIZE = 512;
 
+  /**
+   * Observation-only view of the source HOP DATA admission state.
+   *
+   * The two spare-allowance values reproduce the temporary values computed
+   * by br_nwk.check_nwk_queue().  They are signed because a congested prefix
+   * can legitimately report zero (or less) after the final permitted DATA
+   * transfer raises pendingData from 16 to 17.
+   */
+  struct DataAdmissionSnapshot
+  {
+    uint32_t pendingData {0};
+    uint32_t pendingThreshold {HOP_PENDING_MAX_THRESHOLD};
+    int64_t globalSpad {0};
+    uint32_t neighborOutstanding {0};
+    uint32_t neighborThreshold {0};
+    int64_t neighborSpad {0};
+    bool globalAllowed {false};
+    bool neighborAllowed {false};
+  };
+
+  DataAdmissionSnapshot
+  GetDataAdmissionSnapshot (CsrNodeId dest) const
+  {
+    DataAdmissionSnapshot snapshot;
+    snapshot.pendingData = m_pendingDataCount;
+    snapshot.globalSpad =
+      static_cast<int64_t> (HOP_PENDING_MAX_THRESHOLD) -
+      static_cast<int64_t> (m_pendingDataCount) + 1;
+    snapshot.globalAllowed = snapshot.globalSpad > 0;
+
+    auto it = m_flowCtrlByDest.find (dest);
+    if (it != m_flowCtrlByDest.end ())
+      {
+        snapshot.neighborOutstanding = it->second.outstanding;
+        snapshot.neighborThreshold = it->second.threshold;
+      }
+    snapshot.neighborSpad =
+      static_cast<int64_t> (snapshot.neighborThreshold) -
+      static_cast<int64_t> (snapshot.neighborOutstanding) + 1;
+    snapshot.neighborAllowed = snapshot.neighborSpad > 0;
+    return snapshot;
+  }
+
   uint32_t GetPendingDataCount () const
   {
     return m_pendingDataCount;
@@ -689,6 +738,8 @@ private:
 
   Callback<bool, CsrNodeId, CsrNodeId> m_shouldDackCb;
 
+  Callback<uint32_t, CsrNodeId, CsrNodeId> m_nsdpObservationCb;
+
   Callback<bool, CsrNodeId> m_relayRouteAvailableCb;
 
   Callback<void, CsrNodeId> m_linkFailureCb;
@@ -801,6 +852,12 @@ private:
     uint16_t seq;
     Ptr<Packet> frame;   // original data frame
     Time expiry;
+    // Observation-only correlation copied before resend custody is removed.
+    bool networkFlowMetadataValid {false};
+    CsrNodeId networkSource {0};
+    CsrNodeId networkDestination {0};
+    uint32_t resendCount {0};
+    Time receivedAt {Seconds (0.0)};
   };
 
   std::list<DackEntry> m_dackList;
@@ -1306,6 +1363,13 @@ CsrHopLayer::SendProtectedPairwiseData (
 
   if (ack)
     {
+      const DataAdmissionSnapshot admissionBefore =
+        GetDataAdmissionSnapshot (dst);
+      const uint32_t resendQueueBefore =
+        static_cast<uint32_t> (m_resendQueue.size ());
+      const uint64_t resendOverflowBefore =
+        m_resendQueueOverflowCount;
+
       // Track this as an outstanding hop-level transmission
       FlowCtrlEntry &fc = GetFlowCtrlEntry (dst);
       fc.outstanding++;
@@ -1339,13 +1403,74 @@ CsrHopLayer::SendProtectedPairwiseData (
 
       ResendEntry *resendEntry = FindResendEntry (dst, seq);
       CsrNetHeader networkHeader;
-      if (resendEntry != nullptr &&
-          payload->GetSize () >= networkHeader.GetSerializedSize () &&
-          payload->PeekHeader (networkHeader))
+      const bool networkFlowMetadataValid =
+        payload->GetSize () >= networkHeader.GetSerializedSize () &&
+        payload->PeekHeader (networkHeader);
+      if (resendEntry != nullptr && networkFlowMetadataValid)
         {
           resendEntry->networkFlowMetadataValid = true;
           resendEntry->networkSource = networkHeader.GetSrc ();
           resendEntry->networkDestination = networkHeader.GetDst ();
+        }
+
+      if (IsDifferentialAdmissionTraceEnabled ())
+        {
+          const DataAdmissionSnapshot admissionAfter =
+            GetDataAdmissionSnapshot (dst);
+          CsrDifferentialTraceEvent admissionEvent;
+          admissionEvent.event = "hop_admission";
+          admissionEvent.node = CsrTraceInteger (m_nodeId);
+          admissionEvent.peer = CsrTraceInteger (dst);
+          admissionEvent.packetType = "data";
+          admissionEvent.nextHop = CsrTraceInteger (dst);
+          admissionEvent.success = "1";
+          admissionEvent.reason = "admitted";
+          CsrDifferentialAppTag appTag;
+          if (payload->PeekPacketTag (appTag))
+            {
+              admissionEvent.sequence =
+                CsrTraceInteger (appTag.GetSequence ());
+            }
+          if (networkFlowMetadataValid)
+            {
+              admissionEvent.source =
+                CsrTraceInteger (networkHeader.GetSrc ());
+              admissionEvent.destination =
+                CsrTraceInteger (networkHeader.GetDst ());
+            }
+          admissionEvent.detail =
+            "hop_sequence=" + CsrTraceInteger (seq) +
+            ";pending_before=" +
+              CsrTraceInteger (admissionBefore.pendingData) +
+            ";pending_after=" +
+              CsrTraceInteger (admissionAfter.pendingData) +
+            ";pending_limit=" +
+              CsrTraceInteger (admissionAfter.pendingThreshold) +
+            ";global_spad_before=" +
+              CsrTraceSignedInteger (admissionBefore.globalSpad) +
+            ";global_spad_after=" +
+              CsrTraceSignedInteger (admissionAfter.globalSpad) +
+            ";outstanding_before=" +
+              CsrTraceInteger (admissionBefore.neighborOutstanding) +
+            ";outstanding_after=" +
+              CsrTraceInteger (admissionAfter.neighborOutstanding) +
+            ";threshold=" +
+              CsrTraceInteger (admissionAfter.neighborThreshold) +
+            ";neighbor_spad_before=" +
+              CsrTraceSignedInteger (admissionBefore.neighborSpad) +
+            ";neighbor_spad_after=" +
+              CsrTraceSignedInteger (admissionAfter.neighborSpad) +
+            ";resend_queue_before=" +
+              CsrTraceInteger (resendQueueBefore) +
+            ";resend_queue_after=" +
+              CsrTraceInteger (m_resendQueue.size ()) +
+            ";resend_tracked=" +
+              std::string (resendEntry != nullptr ? "1" : "0") +
+            ";resend_overflow=" +
+              std::string (
+                m_resendQueueOverflowCount > resendOverflowBefore ? "1" :
+                                                                    "0");
+          WriteDifferentialAdmissionTrace (admissionEvent);
         }
     }
 
@@ -2617,6 +2742,63 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     return;
   }
 
+  const bool traceFeedback = IsDifferentialAdmissionTraceEnabled ();
+  CsrNetHeader feedbackNetworkHeader;
+  const bool feedbackNetworkMetadataValid =
+    traceFeedback &&
+    payload->GetSize () >= feedbackNetworkHeader.GetSerializedSize () &&
+    payload->PeekHeader (feedbackNetworkHeader);
+  CsrDifferentialAppTag feedbackAppTag;
+  const bool feedbackAppSequenceValid =
+    traceFeedback && payload->PeekPacketTag (feedbackAppTag);
+  const bool feedbackNsdpStateValid =
+    IsDifferentialAdmissionTraceEnabled () &&
+    feedbackNetworkMetadataValid &&
+    !m_nsdpObservationCb.IsNull ();
+  const uint32_t feedbackNsdpBefore = feedbackNsdpStateValid
+    ? m_nsdpObservationCb (feedbackNetworkHeader.GetSrc (),
+                           feedbackNetworkHeader.GetDst ())
+    : 0;
+  uint32_t feedbackNsdpAfter = feedbackNsdpBefore;
+
+  auto writeFeedback =
+    [&] (const char *reason, bool accepted) {
+      if (!traceFeedback)
+        {
+          return;
+        }
+      CsrDifferentialTraceEvent feedbackEvent;
+      feedbackEvent.event = "hop_feedback";
+      feedbackEvent.node = CsrTraceInteger (m_nodeId);
+      feedbackEvent.peer = CsrTraceInteger (src);
+      feedbackEvent.packetType = "data";
+      if (feedbackNetworkMetadataValid)
+        {
+          feedbackEvent.source =
+            CsrTraceInteger (feedbackNetworkHeader.GetSrc ());
+          feedbackEvent.destination =
+            CsrTraceInteger (feedbackNetworkHeader.GetDst ());
+        }
+      if (feedbackAppSequenceValid)
+        {
+          feedbackEvent.sequence =
+            CsrTraceInteger (feedbackAppTag.GetSequence ());
+        }
+      feedbackEvent.success = accepted ? "1" : "0";
+      feedbackEvent.reason = reason;
+      feedbackEvent.detail =
+        "hop_sequence=" + CsrTraceInteger (hdr.GetSeq ()) +
+        ";first_reception=" +
+          std::string (firstReception ? "1" : "0") +
+        ";ackable=" + std::string (ackable ? "1" : "0") +
+        ";nsdp_count_before=" + CsrTraceInteger (feedbackNsdpBefore) +
+        ";nsdp_count_after=" + CsrTraceInteger (feedbackNsdpAfter) +
+        ";nsdp_state_valid=" +
+          std::string (feedbackNsdpStateValid ? "1" : "0") +
+        ";nsdp_limit=16";
+      WriteDifferentialAdmissionTrace (feedbackEvent);
+    };
+
   // Legacy proc_mac_pk() records the sequence before consulting the route
   // table.  A first reception that cannot be relayed is discarded without an
   // ACK; a retry is therefore recognized as a duplicate and receives an ACK.
@@ -2636,6 +2818,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
                     << " seq=" << hdr.GetSeq ()
                     << " ACK suppressed"
                     << std::endl;
+          writeFeedback ("suppressed_no_route", false);
           return;
         }
     }
@@ -2644,6 +2827,12 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
   if (firstReception && !m_rxFromHopCb.IsNull ())
   {
      m_rxFromHopCb (payload, src);
+     if (feedbackNsdpStateValid)
+       {
+         feedbackNsdpAfter =
+           m_nsdpObservationCb (feedbackNetworkHeader.GetSrc (),
+                                feedbackNetworkHeader.GetDst ());
+       }
   }
 
   // 2) Decide ACK vs DACK (duplicates get plain ACK)
@@ -2685,6 +2874,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     Ptr<Packet> ackPkt = Create<Packet> ();
     ackPkt->AddHeader (ackHdr);
      m_mac->EnqueueTxFrame (ackPkt, src, /*dscp*/ 7, /*ackable*/ false);
+    writeFeedback (sendDack ? "dack" : "ack", true);
   }
 }
 
@@ -2744,6 +2934,20 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
                           << " from " << src);
       return;
     }
+
+  const DataAdmissionSnapshot completionBefore =
+    GetDataAdmissionSnapshot (entry->dest);
+  const uint32_t completionResendQueueBefore =
+    static_cast<uint32_t> (m_resendQueue.size ());
+  const uint32_t completionResendCount = entry->resendCount;
+  const bool completionNetworkMetadataValid =
+    entry->networkFlowMetadataValid;
+  const CsrNodeId completionNetworkSource = entry->networkSource;
+  const CsrNodeId completionNetworkDestination =
+    entry->networkDestination;
+  CsrDifferentialAppTag completionAppTag;
+  const bool completionAppSequenceValid =
+    entry->frame->PeekPacketTag (completionAppTag);
 
   ResendTarget *acknowledgedTarget = nullptr;
   for (auto &target : entry->targets)
@@ -3000,6 +3204,54 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
       return;
     }
 
+  if (IsDifferentialAdmissionTraceEnabled () &&
+      entry->flowControlTracked &&
+      completionNetworkMetadataValid)
+    {
+      const DataAdmissionSnapshot completionAfter =
+        GetDataAdmissionSnapshot (entry->dest);
+      CsrDifferentialTraceEvent completionEvent;
+      completionEvent.event = "hop_completion";
+      completionEvent.node = CsrTraceInteger (m_nodeId);
+      completionEvent.peer = CsrTraceInteger (entry->dest);
+      completionEvent.packetType = "data";
+      completionEvent.source =
+        CsrTraceInteger (completionNetworkSource);
+      completionEvent.destination =
+        CsrTraceInteger (completionNetworkDestination);
+      if (completionAppSequenceValid)
+        {
+          completionEvent.sequence =
+            CsrTraceInteger (completionAppTag.GetSequence ());
+        }
+      completionEvent.success = "1";
+      completionEvent.reason = "ack";
+      completionEvent.nextHop = CsrTraceInteger (entry->dest);
+      completionEvent.detail =
+        "hop_sequence=" + CsrTraceInteger (entry->seq) +
+        ";resend_count=" + CsrTraceInteger (completionResendCount) +
+        ";pending_before=" +
+          CsrTraceInteger (completionBefore.pendingData) +
+        ";pending_after=" +
+          CsrTraceInteger (completionAfter.pendingData) +
+        ";pending_limit=" +
+          CsrTraceInteger (completionAfter.pendingThreshold) +
+        ";outstanding_before=" +
+          CsrTraceInteger (completionBefore.neighborOutstanding) +
+        ";outstanding_after=" +
+          CsrTraceInteger (completionAfter.neighborOutstanding) +
+        ";threshold_before=" +
+          CsrTraceInteger (completionBefore.neighborThreshold) +
+        ";threshold_after=" +
+          CsrTraceInteger (completionAfter.neighborThreshold) +
+        ";resend_queue_before=" +
+          CsrTraceInteger (completionResendQueueBefore) +
+        ";resend_queue_after=" +
+          CsrTraceInteger (completionResendQueueBefore - 1) +
+        ";nsdp_released=1;capacity_released=1";
+      WriteDifferentialAdmissionTrace (completionEvent);
+    }
+
   for (auto it = m_resendQueue.begin (); it != m_resendQueue.end (); ++it)
     {
       if (&(*it) == entry)
@@ -3032,6 +3284,12 @@ CsrHopLayer::CheckDack ()
     {
       if (now >= it->expiry)
         {
+          const DataAdmissionSnapshot capacityBefore =
+            GetDataAdmissionSnapshot (it->dest);
+          CsrDifferentialAppTag capacityAppTag;
+          const bool capacityAppSequenceValid =
+            it->frame->PeekPacketTag (capacityAppTag);
+
           // NSDP was already released when the DACK arrived.
           // Legacy holds only the HOP per-neighbor flow-control
           // slot until the DACK timer expires.
@@ -3066,6 +3324,50 @@ CsrHopLayer::CheckDack ()
                         << " pending="
                         << m_pendingDataCount
                         << std::endl;
+            }
+
+          if (IsDifferentialAdmissionTraceEnabled () &&
+              it->networkFlowMetadataValid)
+            {
+              const DataAdmissionSnapshot capacityAfter =
+                GetDataAdmissionSnapshot (it->dest);
+              CsrDifferentialTraceEvent releaseEvent;
+              releaseEvent.event = "hop_capacity_release";
+              releaseEvent.node = CsrTraceInteger (m_nodeId);
+              releaseEvent.peer = CsrTraceInteger (it->dest);
+              releaseEvent.packetType = "data";
+              releaseEvent.source = CsrTraceInteger (it->networkSource);
+              releaseEvent.destination =
+                CsrTraceInteger (it->networkDestination);
+              if (capacityAppSequenceValid)
+                {
+                  releaseEvent.sequence =
+                    CsrTraceInteger (capacityAppTag.GetSequence ());
+                }
+              releaseEvent.success = "1";
+              releaseEvent.reason = "dack_expiry";
+              releaseEvent.nextHop = CsrTraceInteger (it->dest);
+              releaseEvent.detail =
+                "hop_sequence=" + CsrTraceInteger (it->seq) +
+                ";resend_count=" + CsrTraceInteger (it->resendCount) +
+                ";pending_before=" +
+                  CsrTraceInteger (capacityBefore.pendingData) +
+                ";pending_after=" +
+                  CsrTraceInteger (capacityAfter.pendingData) +
+                ";pending_limit=" +
+                  CsrTraceInteger (capacityAfter.pendingThreshold) +
+                ";outstanding_before=" +
+                  CsrTraceInteger (capacityBefore.neighborOutstanding) +
+                ";outstanding_after=" +
+                  CsrTraceInteger (capacityAfter.neighborOutstanding) +
+                ";threshold_before=" +
+                  CsrTraceInteger (capacityBefore.neighborThreshold) +
+                ";threshold_after=" +
+                  CsrTraceInteger (capacityAfter.neighborThreshold) +
+                ";dack_hold_seconds=" +
+                  CsrTraceDouble ((now - it->receivedAt).GetSeconds ()) +
+                ";nsdp_released=0;capacity_released=1";
+              WriteDifferentialAdmissionTrace (releaseEvent);
             }
 
           // Legacy check_dack() wakes the Network layer
@@ -3109,6 +3411,20 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
       return;
     }
 
+  const DataAdmissionSnapshot completionBefore =
+    GetDataAdmissionSnapshot (entry->dest);
+  const uint32_t completionResendQueueBefore =
+    static_cast<uint32_t> (m_resendQueue.size ());
+  const uint32_t completionResendCount = entry->resendCount;
+  const bool completionNetworkMetadataValid =
+    entry->networkFlowMetadataValid;
+  const CsrNodeId completionNetworkSource = entry->networkSource;
+  const CsrNodeId completionNetworkDestination =
+    entry->networkDestination;
+  CsrDifferentialAppTag completionAppTag;
+  const bool completionAppSequenceValid =
+    entry->frame->PeekPacketTag (completionAppTag);
+
   FlowCtrlEntry &fc =
     GetFlowCtrlEntry (
       entry->dest);
@@ -3147,6 +3463,11 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
   de.expiry =
     Simulator::Now () +
     holdTime;
+  de.networkFlowMetadataValid = completionNetworkMetadataValid;
+  de.networkSource = completionNetworkSource;
+  de.networkDestination = completionNetworkDestination;
+  de.resendCount = completionResendCount;
+  de.receivedAt = Simulator::Now ();
 
   std::cout << "[HOP " << m_nodeId
             << "] DACK received"
@@ -3180,6 +3501,53 @@ CsrHopLayer::HandleDackFrame (const CsrHeader &hdr)
           m_resendQueue.erase (it);
           break;
         }
+    }
+
+  if (IsDifferentialAdmissionTraceEnabled () &&
+      completionNetworkMetadataValid)
+    {
+      const DataAdmissionSnapshot completionAfter =
+        GetDataAdmissionSnapshot (de.dest);
+      CsrDifferentialTraceEvent completionEvent;
+      completionEvent.event = "hop_completion";
+      completionEvent.node = CsrTraceInteger (m_nodeId);
+      completionEvent.peer = CsrTraceInteger (de.dest);
+      completionEvent.packetType = "data";
+      completionEvent.source = CsrTraceInteger (completionNetworkSource);
+      completionEvent.destination =
+        CsrTraceInteger (completionNetworkDestination);
+      if (completionAppSequenceValid)
+        {
+          completionEvent.sequence =
+            CsrTraceInteger (completionAppTag.GetSequence ());
+        }
+      completionEvent.success = "0";
+      completionEvent.reason = "dack";
+      completionEvent.nextHop = CsrTraceInteger (de.dest);
+      completionEvent.detail =
+        "hop_sequence=" + CsrTraceInteger (de.seq) +
+        ";resend_count=" + CsrTraceInteger (completionResendCount) +
+        ";pending_before=" +
+          CsrTraceInteger (completionBefore.pendingData) +
+        ";pending_after=" +
+          CsrTraceInteger (completionAfter.pendingData) +
+        ";pending_limit=" +
+          CsrTraceInteger (completionAfter.pendingThreshold) +
+        ";outstanding_before=" +
+          CsrTraceInteger (completionBefore.neighborOutstanding) +
+        ";outstanding_after=" +
+          CsrTraceInteger (completionAfter.neighborOutstanding) +
+        ";threshold_before=" +
+          CsrTraceInteger (completionBefore.neighborThreshold) +
+        ";threshold_after=" +
+          CsrTraceInteger (completionAfter.neighborThreshold) +
+        ";resend_queue_before=" +
+          CsrTraceInteger (completionResendQueueBefore) +
+        ";resend_queue_after=" +
+          CsrTraceInteger (m_resendQueue.size ()) +
+        ";dack_hold_seconds=" + CsrTraceDouble (holdTime.GetSeconds ()) +
+        ";nsdp_released=1;capacity_released=0";
+      WriteDifferentialAdmissionTrace (completionEvent);
     }
 }
 
@@ -3433,6 +3801,14 @@ CsrHopLayer::CheckResend ()
           // and, for a grouped routing frame, can penalize the primary target
           // even after that target already ACKed.
 
+          const DataAdmissionSnapshot timeoutBefore =
+            GetDataAdmissionSnapshot (e.dest);
+          const uint32_t timeoutResendQueueBefore =
+            static_cast<uint32_t> (m_resendQueue.size ());
+          CsrDifferentialAppTag timeoutAppTag;
+          const bool timeoutAppSequenceValid =
+            e.frame->PeekPacketTag (timeoutAppTag);
+
           // Inform Net layer that this flow lost a packet
           NotifyNsdpFromEntry (e);
 
@@ -3484,6 +3860,53 @@ CsrHopLayer::CheckResend ()
                     << " reason=no-ACK"
                     << std::endl;
                 }
+            }
+
+          if (IsDifferentialAdmissionTraceEnabled () &&
+              e.flowControlTracked &&
+              e.networkFlowMetadataValid)
+            {
+              const DataAdmissionSnapshot timeoutAfter =
+                GetDataAdmissionSnapshot (e.dest);
+              CsrDifferentialTraceEvent completionEvent;
+              completionEvent.event = "hop_completion";
+              completionEvent.node = CsrTraceInteger (m_nodeId);
+              completionEvent.peer = CsrTraceInteger (e.dest);
+              completionEvent.packetType = "data";
+              completionEvent.source = CsrTraceInteger (e.networkSource);
+              completionEvent.destination =
+                CsrTraceInteger (e.networkDestination);
+              if (timeoutAppSequenceValid)
+                {
+                  completionEvent.sequence =
+                    CsrTraceInteger (timeoutAppTag.GetSequence ());
+                }
+              completionEvent.success = "0";
+              completionEvent.reason = "no_ack";
+              completionEvent.nextHop = CsrTraceInteger (e.dest);
+              completionEvent.detail =
+                "hop_sequence=" + CsrTraceInteger (e.seq) +
+                ";resend_count=" + CsrTraceInteger (e.resendCount) +
+                ";pending_before=" +
+                  CsrTraceInteger (timeoutBefore.pendingData) +
+                ";pending_after=" +
+                  CsrTraceInteger (timeoutAfter.pendingData) +
+                ";pending_limit=" +
+                  CsrTraceInteger (timeoutAfter.pendingThreshold) +
+                ";outstanding_before=" +
+                  CsrTraceInteger (timeoutBefore.neighborOutstanding) +
+                ";outstanding_after=" +
+                  CsrTraceInteger (timeoutAfter.neighborOutstanding) +
+                ";threshold_before=" +
+                  CsrTraceInteger (timeoutBefore.neighborThreshold) +
+                ";threshold_after=" +
+                  CsrTraceInteger (timeoutAfter.neighborThreshold) +
+                ";resend_queue_before=" +
+                  CsrTraceInteger (timeoutResendQueueBefore) +
+                ";resend_queue_after=" +
+                  CsrTraceInteger (timeoutResendQueueBefore - 1) +
+                ";nsdp_released=1;capacity_released=1";
+              WriteDifferentialAdmissionTrace (completionEvent);
             }
 
           it = m_resendQueue.erase (it);
