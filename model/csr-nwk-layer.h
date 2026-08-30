@@ -85,6 +85,40 @@ public:
     NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
                      "CSR NWK node identifier exceeds 24 bits");
     m_nodeId = id;
+
+    // routesCreate() owns a local destination independently of the wrapper's
+    // forwarding table.  Keep the same separation here: this state is
+    // serialized into routing control, but FindBestRoute() never returns it
+    // for DATA forwarding.
+    m_localSelfRoute = RouteEntry {};
+    m_localSelfRoute.nwkDst = id;
+    // routesCreate() leaves capability zero.  routesSetCapability(), modeled
+    // by SetNodeType(), is the only operation that changes and signals it.
+    m_localSelfRoute.capability = 0;
+    m_localSelfRoute.immediate = true;
+    m_localSelfRoute.nextHop = id;
+    m_localSelfRoute.numHop = 0;
+    m_localSelfRoute.cost = 0;
+    m_localSelfRoute.energyLevel = 100;
+    m_localSelfRoute.learnedFrom = id;
+    m_localSelfRoute.path.clear ();
+    m_localSelfRoute.lastUpdated = Simulator::Now ();
+    m_localSelfRoute.valid = true;
+    m_localSelfRouteInitialized = true;
+
+    if (m_nodeTypeExplicitlySet)
+      {
+        uint8_t capability =
+          static_cast<uint8_t> (m_nodeType);
+
+        if (capability != 0)
+          {
+            m_localSelfRoute.capability = capability;
+            MarkSelectedRouteChanged (
+              m_nodeId,
+              "local capability initialized");
+          }
+      }
   }
 
   /**
@@ -421,6 +455,47 @@ public:
    */
   bool GetSelectedRouteCost (CsrNodeId destination,
                              uint32_t &costOut) const;
+
+  /** Read the capability carried by the selected forwarding route. */
+  bool GetSelectedRouteCapability (CsrNodeId destination,
+                                   uint8_t &capabilityOut) const;
+
+  /**
+   * Build the exact routes.c snapshot sections for focused wire tests.
+   *
+   * The returned packets still contain the ns-3/HOP envelope.  Removing
+   * CsrHelloHeader exposes the six-byte routes.c section prefix and record
+   * stream used by production StartReliableRoutingSnapshot().
+   */
+  std::vector<Ptr<Packet>>
+  BuildArlRoutingSnapshotPayloadsForTest (uint32_t routingSequence)
+  {
+    return BuildArlRoutingSnapshotPayloads (routingSequence);
+  }
+
+  /** Build the production payload for the current local capability change. */
+  Ptr<Packet>
+  BuildLocalSelfCapabilityChangePayloadForTest (uint32_t routingSequence)
+  {
+    if (ShouldAdvertiseLocalSelfRoute ())
+      {
+        return BuildTargetedRoutingUpdatePayload (
+          m_nodeId,
+          routingSequence);
+      }
+
+    return BuildRoutingDeletePayload (
+      m_nodeId,
+      routingSequence);
+  }
+
+  /** Report whether routesSetCapability() queued the local destination. */
+  bool
+  HasPendingLocalSelfCapabilityChangeForTest () const
+  {
+    return m_pendingSelectedRouteChanges.find (m_nodeId) !=
+           m_pendingSelectedRouteChanges.end ();
+  }
 
   /**
    * Read the last complete legacy ARL INFO record from a neighbor.
@@ -760,6 +835,9 @@ public:
         neighbor.arlActive = false;
         neighbor.wasActiveBeforeLastHello = false;
         neighbor.arlRoutingReassemblies.clear ();
+        neighbor.routingSequenceValid = false;
+        neighbor.routingSequence = 0;
+        neighbor.routingUpdateSectionStateValid = false;
 
         // Legacy routesMakeNeighborInactive() increments failures,
         // capped below an effectively unreachable upper bound.
@@ -773,6 +851,18 @@ public:
     // discovery, Verify, or RoutingUpdate traffic to rebuild them.
     for (auto &route : m_routes)
       {
+        if (route.immediate &&
+            route.nwkDst == route.nextHop)
+          {
+            // routesDeleteNeighborRoutes() removes the neighbor's learned
+            // zero-hop self candidate.  The compact direct-route entry must
+            // therefore lose both its capability and message sequence before
+            // a later HELLO recreates the capability-zero direct fallback.
+            route.capability = 0;
+            route.routingSequenceValid = false;
+            route.routingSequence = 0;
+          }
+
         if (route.valid)
           {
             route.valid = false;
@@ -1644,8 +1734,7 @@ public:
         return;
       }
 
-    if (destination == CSR_BROADCAST_ID ||
-        destination == m_nodeId)
+    if (destination == CSR_BROADCAST_ID)
       {
         std::cout << "[NWK " << m_nodeId
                   << "] RoutingDelete rejected"
@@ -1683,10 +1772,14 @@ public:
       NextRoutingSequence ();
 
     Ptr<Packet> payload =
-      BuildRoutingMarkerPayload (
-        CsrRoutingOperation::Delete,
-        sequence,
-        destination);
+      BuildRoutingDeletePayload (
+        destination,
+        sequence);
+
+    if (payload == nullptr)
+      {
+        return;
+      }
 
     std::cout << "[NWK " << m_nodeId
               << "] Sending reliable RoutingDelete"
@@ -2539,7 +2632,31 @@ private:
 public:
   void SetNodeType (CsrNodeType type)
   {
+    uint8_t previousCapability =
+      m_localSelfRouteInitialized
+        ? m_localSelfRoute.capability
+        : static_cast<uint8_t> (m_nodeType);
+
     m_nodeType = type;
+    m_nodeTypeExplicitlySet = true;
+
+    uint8_t capability =
+      static_cast<uint8_t> (m_nodeType);
+
+    if (m_localSelfRouteInitialized &&
+        previousCapability != capability)
+      {
+        m_localSelfRoute.capability = capability;
+        m_localSelfRoute.lastUpdated = Simulator::Now ();
+
+        // routesSetCapability() marks only the source-owned destination and
+        // wakes routesProcess().  The existing changed-destination path is
+        // retained here; capability zero will select DELETE, while a nonzero
+        // capability builds the zero-hop self UPDATE.
+        MarkSelectedRouteChanged (
+          m_nodeId,
+          "local capability changed");
+      }
 
     if (m_nodeType != CsrNodeType::Gateway &&
         m_gatewayStartupDiscoveryEvent.IsPending ())
@@ -2874,6 +2991,10 @@ private:
   std::deque<NwkQueueEntry>             m_nwkQueue;
   EventId                               m_checkNwkQueueEvent;
   std::vector<RouteEntry>               m_routes;
+  // Source-owned routes.c self destination.  br_nwk deliberately omits this
+  // record from its forwarding table, so it must not live in m_routes.
+  RouteEntry                            m_localSelfRoute;
+  bool                                  m_localSelfRouteInitialized {false};
   // routesFindDestination() inserts new logical destinations at destHead.
   // Keep that newest-first order independently of alternate route records.
   std::deque<CsrNodeId>                 m_destinationCreationOrder;
@@ -3008,6 +3129,14 @@ private:
     double snrDb,
     uint32_t linkCost);
 
+  bool ApplyNeighborSelfCapability (
+    CsrNodeId helloSrc,
+    uint8_t capability,
+    uint32_t routingSequence,
+    double pathlossDb,
+    uint32_t linkCost,
+    const char *reason);
+
   void ProcessDiscover (const CsrHelloHeader &hh,
                         CsrNodeId helloSrc,
                         double pathlossDb,
@@ -3061,6 +3190,7 @@ private:
   const char* ArlRouteMsgTypeName (CsrArlRouteMsgType t) const;
 
   bool ShouldAdvertiseRoute (const RouteEntry &re) const;
+  bool ShouldAdvertiseLocalSelfRoute () const;
 
   void ScheduleDiscoveryHello ();
   void DiscoveryHelloTick ();
@@ -3087,6 +3217,7 @@ private:
   uint32_t m_discoverySequence {0};
 
   CsrNodeType m_nodeType {CsrNodeType::Routable};
+  bool m_nodeTypeExplicitlySet {false};
 
   // Independent from legacy capability. This provides a guaranteed
   // non-relaying node for UAV/mobile-leaf experiments.
@@ -3118,6 +3249,10 @@ private:
   }
 
   Ptr<Packet> BuildTargetedRoutingUpdatePayload (
+    CsrNodeId destination,
+    uint32_t routingSequence);
+
+  Ptr<Packet> BuildRoutingDeletePayload (
     CsrNodeId destination,
     uint32_t routingSequence);
 
@@ -3679,6 +3814,9 @@ CsrNetLayer::MakeNeighborInactive (
   entry.checkMessageActive = false;
   entry.admissionDiscoveryCheckActive = false;
   entry.arlRoutingReassemblies.clear ();
+  entry.routingSequenceValid = false;
+  entry.routingSequence = 0;
+  entry.routingUpdateSectionStateValid = false;
 
   std::cout << "[NWK " << m_nodeId
             << "] ARL neighbor INACTIVE"
@@ -3689,8 +3827,21 @@ CsrNetLayer::MakeNeighborInactive (
 
   // routesMakeNeighborInactive() calls routesDeleteNeighborRoutes() before
   // recomputing affected destinations.  Direct-neighbor state remains, but
-  // every transit candidate learned from this reporter is discarded so it
-  // cannot silently resurrect if the neighbor is admitted again.
+  // its learned self capability does not: readmission starts from the
+  // capability-zero direct fallback until a new self UPDATE arrives.  Every
+  // transit candidate learned from this reporter is discarded as well.
+  for (auto &route : m_routes)
+    {
+      if (route.immediate &&
+          route.nwkDst == neighbor &&
+          route.nextHop == neighbor)
+        {
+          route.capability = 0;
+          route.routingSequenceValid = false;
+          route.routingSequence = 0;
+        }
+    }
+
   const auto oldRouteCount = m_routes.size ();
   m_routes.erase (
     std::remove_if (
@@ -4169,15 +4320,34 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
               << linkCost
               << std::endl;
 
+  // The outer HELLO Capability/NodeType remains authoritative for wrapper
+  // neighbor metadata and gateway discovery, but routes.c gives a direct
+  // neighbor capability zero until that neighbor's source-owned self UPDATE
+  // is decoded.  Preserve a capability learned from an earlier self UPDATE
+  // across later HELLO link refreshes.
+  uint8_t directRouteCapability = 0;
+  for (const auto &route : m_routes)
+    {
+      if (route.valid &&
+          route.immediate &&
+          route.nwkDst == src &&
+          route.nextHop == src)
+        {
+          directRouteCapability = route.capability;
+          break;
+        }
+    }
+
   AddOrUpdateRoute (src,
-                  src,
-                  true,
-                  1,
-                  pathlossDb,
-                  linkCost,
-                  0,
-                  src,   // learned from the neighbor itself
-                  static_cast<uint8_t> (senderType));
+                    src,
+                    true,
+                    1,
+                    pathlossDb,
+                    linkCost,
+                    0,
+                    src,   // learned from the neighbor itself
+                    directRouteCapability,
+                    {src});
 
     // ------------------------------------------------------------
     // 3) Advertised route from HELLO sender
@@ -4482,6 +4652,86 @@ CsrNetLayer::ProcessArlRoutingSection (
     linkCost);
 }
 
+bool
+CsrNetLayer::ApplyNeighborSelfCapability (
+  CsrNodeId helloSrc,
+  uint8_t capability,
+  uint32_t routingSequence,
+  double pathlossDb,
+  uint32_t linkCost,
+  const char *reason)
+{
+  RouteEntry *directRoute = nullptr;
+
+  for (auto &route : m_routes)
+    {
+      if (route.immediate &&
+          route.nwkDst == helloSrc &&
+          route.nextHop == helloSrc)
+        {
+          directRoute = &route;
+          break;
+        }
+    }
+
+  if (directRoute == nullptr)
+    {
+      return false;
+    }
+
+  if (directRoute->routingSequenceValid &&
+      CompareRoutingSequence (
+        directRoute->routingSequence,
+        routingSequence) >= 0)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Ignoring stale/duplicate neighbor self capability"
+                << " neighbor=" << helloSrc
+                << " incomingSequence=" << routingSequence
+                << " currentSequence="
+                << directRoute->routingSequence
+                << std::endl;
+      return false;
+    }
+
+  SelectedRouteState before =
+    CaptureSelectedRouteState (helloSrc);
+
+  directRoute->capability = capability;
+  directRoute->pathlossDb = pathlossDb;
+  directRoute->numHop = 1;
+  directRoute->linkCostToNextHop = linkCost;
+  directRoute->advertisedCost = 0;
+  directRoute->cost = linkCost == 0 ? 1 : linkCost;
+  directRoute->learnedFrom = helloSrc;
+  directRoute->path = {helloSrc};
+  directRoute->lastUpdated = Simulator::Now ();
+  directRoute->valid = true;
+  directRoute->selectionDeferred = false;
+  directRoute->routingSequenceValid = true;
+  directRoute->routingSequence = routingSequence;
+
+  SelectedRouteState after =
+    CaptureSelectedRouteState (helloSrc);
+
+  if (!SameSelectedRouteState (before, after))
+    {
+      MarkSelectedRouteChanged (
+        helloSrc,
+        reason);
+    }
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Applied source-owned neighbor capability"
+            << " neighbor=" << helloSrc
+            << " capability=" << unsigned (capability)
+            << " routingSequence=" << routingSequence
+            << " directCost=" << directRoute->cost
+            << std::endl;
+
+  return true;
+}
+
 void
 CsrNetLayer::ApplyCompleteArlRoutingMessage (
   CsrNodeId helloSrc,
@@ -4501,6 +4751,8 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
 
   NwkNeighborEntry &neighbor = neighborIt->second;
   bool sawFlush = false;
+  bool sawInfo = false;
+  bool sawReporterSelfRecord = false;
 
   auto isIncomingNewer = [routingSequence] (
     bool currentValid,
@@ -4532,6 +4784,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
           break;
 
         case CsrRoutingOperation::Info:
+          sawInfo = true;
           if (isIncomingNewer (
                 neighbor.routingInfoValid,
                 neighbor.routingInfoSequence))
@@ -4566,14 +4819,44 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
         case CsrRoutingOperation::Update:
           {
             if (record.nodeId >= CSR_BROADCAST_ID ||
-                record.nodeId == m_nodeId ||
-                record.nodeId == helloSrc)
+                record.nodeId == m_nodeId)
               {
                 std::cout << "[NWK " << m_nodeId
                           << "] Ignoring unsupported ARL UPDATE node"
                           << " node24=" << record.nodeId
                           << " from=" << helloSrc
                           << std::endl;
+                break;
+              }
+
+            if (record.nodeId == helloSrc)
+              {
+                // routesCreate()/routesSetCapability() advertise the
+                // reporter itself with zero cost, zero hops, and no path
+                // identifiers.  The receiver combines that capability with
+                // the already-measured direct-link route.
+                if (record.hopCount != 0 ||
+                    record.cost != 0 ||
+                    !record.path.empty ())
+                  {
+                    std::cout << "[NWK " << m_nodeId
+                              << "] Ignoring malformed source-owned self UPDATE"
+                              << " from=" << helloSrc
+                              << " hopCount=" << record.hopCount
+                              << " cost=" << record.cost
+                              << " pathNodes=" << record.path.size ()
+                              << std::endl;
+                    break;
+                  }
+
+                ApplyNeighborSelfCapability (
+                  helloSrc,
+                  record.capability,
+                  routingSequence,
+                  pathlossDb,
+                  linkCost,
+                  "ARL self UPDATE");
+                sawReporterSelfRecord = true;
                 break;
               }
 
@@ -4740,6 +5023,22 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                 break;
               }
 
+            if (record.nodeId == helloSrc)
+              {
+                // A local capability transition to Ordinary is encoded as a
+                // DELETE.  It removes the advertised capability, not the
+                // direct physical reachability proved by this same packet.
+                ApplyNeighborSelfCapability (
+                  helloSrc,
+                  0,
+                  routingSequence,
+                  pathlossDb,
+                  linkCost,
+                  "ARL self DELETE");
+                sawReporterSelfRecord = true;
+                break;
+              }
+
             CsrNodeId destination = record.nodeId;
             SelectedRouteState before =
               CaptureSelectedRouteState (destination);
@@ -4878,7 +5177,23 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
         case CsrRoutingOperation::None:
         default:
           break;
-        }
+      }
+    }
+
+  if (sawInfo && sawFlush && !sawReporterSelfRecord)
+    {
+      // A full snapshot from an Ordinary node omits its capability-zero self
+      // destination.  In routes.c, FLUSH removes the older advertised
+      // candidate and reveals the still-valid direct route at capability
+      // zero.  The compact ns-3 route representation stores that selected
+      // result in one entry, so reproduce the same observable transition.
+      ApplyNeighborSelfCapability (
+        helloSrc,
+        0,
+        routingSequence,
+        pathlossDb,
+        linkCost,
+        "ARL snapshot omitted self capability");
     }
 
   if (!neighbor.routingSequenceValid ||
@@ -4924,16 +5239,9 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
 
     auto neighborIt = m_nwkNeighbors.find (helloSrc);
 
-    if (neighborIt != m_nwkNeighbors.end () &&
-        neighborIt->second.nodeType == CsrNodeType::Ordinary)
-      {
-        std::cout << "[NWK " << m_nodeId
-                  << "] Ignoring transit route advertisements from "
-                  << "Ordinary neighbor=" << helloSrc
-                  << std::endl;
-
-        return acceptedDestinations;
-      }
+    bool senderIsOrdinary =
+      neighborIt != m_nwkNeighbors.end () &&
+      neighborIt->second.nodeType == CsrNodeType::Ordinary;
 
     if (advCount == 0)
       {
@@ -4949,6 +5257,34 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
     for (uint8_t idx = 0; idx < advCount; ++idx)
       {
         auto ar = hh.GetAdvertisedRoute (idx);
+
+        if (ar.dst == helloSrc &&
+            ar.hops == 0 &&
+            ar.cost == 0 &&
+            ar.path.empty ())
+          {
+            if (ApplyNeighborSelfCapability (
+                  helloSrc,
+                  ar.capability,
+                  hh.GetRoutingSequence (),
+                  pathlossDb,
+                  linkCost,
+                  "compatibility self UPDATE"))
+              {
+                acceptedDestinations.insert (helloSrc);
+              }
+            continue;
+          }
+
+        if (senderIsOrdinary)
+          {
+            std::cout << "[NWK " << m_nodeId
+                      << "] Ignoring transit route advertisement from "
+                      << "Ordinary neighbor=" << helloSrc
+                      << " dst=" << ar.dst
+                      << std::endl;
+            continue;
+          }
 
         bool pathContainsLocalNode = false;
 
@@ -5577,6 +5913,20 @@ CsrNetLayer::ProcessRoutingUpdate (
             return;
           }
 
+        if (destination == helloSrc)
+          {
+            ApplyNeighborSelfCapability (
+              helloSrc,
+              0,
+              incomingSequence,
+              pathlossDb,
+              linkCost,
+              "compatibility self DELETE");
+
+            DumpRoutes ();
+            return;
+          }
+
         SelectedRouteState selectedBefore =
             CaptureSelectedRouteState (
                destination);
@@ -5863,6 +6213,25 @@ CsrNetLayer::ProcessRoutingUpdate (
                           << after.cost
                           << std::endl;
               }
+          }
+
+        bool snapshotContainsSelf =
+          neighbor
+            .routingSnapshotSeenDestinations
+            .find (helloSrc) !=
+          neighbor
+            .routingSnapshotSeenDestinations
+            .end ();
+
+        if (!snapshotContainsSelf)
+          {
+            ApplyNeighborSelfCapability (
+              helloSrc,
+              0,
+              incomingSequence,
+              pathlossDb,
+              linkCost,
+              "compatibility snapshot omitted self capability");
           }
 
         neighbor.routingSnapshotActive =
@@ -7016,6 +7385,24 @@ CsrNetLayer::SendHelloBroadcast (
 
   if (type == CsrArlRouteMsgType::RoutingUpdate)
     {
+      if (ShouldAdvertiseLocalSelfRoute () &&
+          hh.AddAdvertisedRoute (
+            m_localSelfRoute.nwkDst,
+            0,
+            0,
+            0,
+            m_localSelfRoute.capability,
+            {}))
+        {
+          added++;
+
+          std::cout << "[NWK " << m_nodeId
+                    << "] HELLO add source-owned self route"
+                    << " capability="
+                    << unsigned (m_localSelfRoute.capability)
+                    << std::endl;
+        }
+
       for (const auto &re : m_routes)
         {
           if (!ShouldAdvertiseRoute (re))
@@ -7759,6 +8146,18 @@ CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
   return true;
 }
 
+bool
+CsrNetLayer::ShouldAdvertiseLocalSelfRoute () const
+{
+  // routesProcess() emits the source-owned self destination only while its
+  // hop is valid and capability is nonzero.  The hop, cost, and hop count are
+  // deliberately not subjected to normal forwarding-route admission: the
+  // authoritative self record is hop=self, cost=0, and numHops=0.
+  return m_localSelfRouteInitialized &&
+         m_localSelfRoute.valid &&
+         m_localSelfRoute.capability != 0;
+}
+
 const char*
 CsrNetLayer::NeighborCheckTypeName (CsrNeighborCheckType t) const
 {
@@ -7789,7 +8188,10 @@ uint32_t
 CsrNetLayer::
 CountAdvertisableSelectedRoutes () const
 {
-  uint32_t count = 0;
+  uint32_t count =
+    ShouldAdvertiseLocalSelfRoute ()
+      ? 1
+      : 0;
 
   for (const auto &route : m_routes)
     {
@@ -7879,8 +8281,30 @@ CsrNetLayer::BuildRoutingUpdatePayload (
       routingSection) *
     ROUTES_PER_SECTION;
 
+  if (ShouldAdvertiseLocalSelfRoute ())
+    {
+      if (eligibleIndex >= firstRouteIndex &&
+          hh.AddAdvertisedRoute (
+            m_localSelfRoute.nwkDst,
+            0,
+            0,
+            0,
+            m_localSelfRoute.capability,
+            {}))
+        {
+          added++;
+        }
+
+      eligibleIndex++;
+    }
+
   for (const auto &route : m_routes)
     {
+      if (added >= ROUTES_PER_SECTION)
+        {
+          break;
+        }
+
       const RouteEntry *best =
         FindBestRoute (
           route.nwkDst);
@@ -7959,9 +8383,45 @@ BuildTargetedRoutingUpdatePayload (
   CsrNodeId destination,
   uint32_t routingSequence)
 {
+  bool localSelf =
+    destination == m_nodeId &&
+    ShouldAdvertiseLocalSelfRoute ();
+
+  if (localSelf)
+    {
+      CsrArlRoutingMessage::Builder builder;
+      std::string error;
+      std::vector<std::vector<uint8_t>> sections;
+
+      if (!builder.AddUpdate (
+            m_localSelfRoute.nwkDst,
+            m_localSelfRoute.capability,
+            0,
+            0,
+            {},
+            &error) ||
+          !builder.BuildSections (
+            routingSequence,
+            sections,
+            &error) ||
+          sections.size () != 1)
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Failed to build targeted source-owned self UPDATE"
+                    << " reason=" << error
+                    << std::endl;
+          return nullptr;
+        }
+
+      return BuildArlRoutingSectionPayload (
+        sections.front (),
+        routingSequence,
+        0,
+        1);
+    }
+
   const RouteEntry *route =
-    FindBestRoute (
-      destination);
+    FindBestRoute (destination);
 
   if (route == nullptr ||
       !ShouldAdvertiseRoute (*route))
@@ -8072,6 +8532,46 @@ BuildTargetedRoutingUpdatePayload (
   packet->AddHeader (hh);
 
   return packet;
+}
+
+Ptr<Packet>
+CsrNetLayer::
+BuildRoutingDeletePayload (
+  CsrNodeId destination,
+  uint32_t routingSequence)
+{
+  if (destination != m_nodeId)
+    {
+      return BuildRoutingMarkerPayload (
+        CsrRoutingOperation::Delete,
+        routingSequence,
+        destination);
+    }
+
+  // routesSetCapability(0) is serialized by routesProcess() as a four-byte
+  // DELETE record inside the ordinary six-byte section prefix.  Preserve the
+  // current per-neighbor fanout boundary while using the exact source record
+  // for this bounded self-route step.
+  CsrArlRoutingMessage::Builder builder;
+  std::string error;
+  std::vector<std::vector<uint8_t>> sections;
+
+  if (!builder.AddDelete (destination, &error) ||
+      !builder.BuildSections (routingSequence, sections, &error) ||
+      sections.size () != 1)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Failed to build source-owned self DELETE"
+                << " reason=" << error
+                << std::endl;
+      return nullptr;
+    }
+
+  return BuildArlRoutingSectionPayload (
+    sections.front (),
+    routingSequence,
+    0,
+    1);
 }
 
 Ptr<Packet>
@@ -8322,6 +8822,28 @@ CsrNetLayer::BuildArlRoutingSnapshotPayloads (
   builder.AddInfo (info);
 
   uint32_t advertisedRoutes = 0;
+
+  if (ShouldAdvertiseLocalSelfRoute ())
+    {
+      std::string error;
+      if (builder.AddUpdate (
+            m_localSelfRoute.nwkDst,
+            m_localSelfRoute.capability,
+            0,
+            0,
+            {},
+            &error))
+        {
+          advertisedRoutes++;
+        }
+      else
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Failed to encode source-owned self route"
+                    << " reason=" << error
+                    << std::endl;
+        }
+    }
 
   for (const auto &route : m_routes)
     {
@@ -8970,12 +9492,22 @@ void
 CsrNetLayer::MarkSelectedRouteChanged (
   CsrNodeId destination,
   const char *reason)
-  {
-    const RouteEntry *selectedRoute =
-    FindBestRoute (
-      destination);
+{
+  bool localSelf =
+    destination == m_nodeId &&
+    m_localSelfRouteInitialized;
 
-  if (selectedRoute != nullptr)
+  const RouteEntry *selectedRoute =
+    localSelf
+      ? &m_localSelfRoute
+      : FindBestRoute (destination);
+
+  bool routeAvailable =
+    selectedRoute != nullptr &&
+    (!localSelf ||
+     ShouldAdvertiseLocalSelfRoute ());
+
+  if (routeAvailable && !localSelf)
     {
       m_selectedRoutePreferredNextHop[
         destination] =
@@ -9004,9 +9536,9 @@ CsrNetLayer::MarkSelectedRouteChanged (
   traceEvent.event = "route_change";
   traceEvent.node = CsrTraceInteger (m_nodeId);
   traceEvent.destination = CsrTraceInteger (destination);
-  traceEvent.success = selectedRoute != nullptr ? "1" : "0";
+  traceEvent.success = routeAvailable ? "1" : "0";
   traceEvent.reason = reason;
-  if (selectedRoute != nullptr)
+  if (routeAvailable)
     {
       traceEvent.nextHop = CsrTraceInteger (selectedRoute->nextHop);
       traceEvent.routeCost = CsrTraceInteger (selectedRoute->cost);
@@ -9236,9 +9768,11 @@ TrySendAutomaticRouteUpdates ()
           destination);
 
       bool sendUpdate =
-        selectedRoute != nullptr &&
-        ShouldAdvertiseRoute (
-          *selectedRoute);
+        destination == m_nodeId
+          ? ShouldAdvertiseLocalSelfRoute ()
+          : selectedRoute != nullptr &&
+            ShouldAdvertiseRoute (
+              *selectedRoute);
 
       if (sendUpdate)
         {
@@ -9354,6 +9888,23 @@ CsrNetLayer::GetSelectedRouteCost (
 }
 
 bool
+CsrNetLayer::GetSelectedRouteCapability (
+  CsrNodeId destination,
+  uint8_t &capabilityOut) const
+{
+  const RouteEntry *best =
+    FindBestRoute (destination);
+
+  if (best == nullptr)
+    {
+      return false;
+    }
+
+  capabilityOut = best->capability;
+  return true;
+}
+
+bool
 CsrNetLayer::GetNeighborRoutingInfo (
   CsrNodeId neighbor,
   CsrHelloHeader::RoutingInfo &infoOut) const
@@ -9423,6 +9974,21 @@ void
 CsrNetLayer::DumpBestRoute (
   CsrNodeId destination) const
 {
+  if (destination == m_nodeId &&
+      m_localSelfRouteInitialized)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Source-owned self route"
+                << " dst=" << m_nodeId
+                << " nextHop=" << m_nodeId
+                << " cost=0 hops=0 capability="
+                << unsigned (m_localSelfRoute.capability)
+                << " advertised="
+                << (ShouldAdvertiseLocalSelfRoute () ? 1 : 0)
+                << std::endl;
+      return;
+    }
+
   uint32_t candidateCount = 0;
   uint32_t validCount = 0;
 

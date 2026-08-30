@@ -107,6 +107,12 @@ ARL routing byte-stream and reassembly parity test:
 3. Run: ./ns3 run csr-nwk-arl-routing-stream-smoke
 4. Expected: PASS: ARL routing byte-stream parity test
 
+Source-owned self-route capability parity test:
+1. Copy csr-nwk-self-capability-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-nwk-self-capability-smoke
+3. Run: ./ns3 run csr-nwk-self-capability-smoke
+4. Expected: PASS: source-owned self-route capability parity test
+
 Gateway-driven discovery/SNMP convergence test:
 1. Copy csr-nwk-autonomous-convergence-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-nwk-autonomous-convergence-smoke
