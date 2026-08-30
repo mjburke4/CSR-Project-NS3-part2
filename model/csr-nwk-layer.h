@@ -497,6 +497,24 @@ public:
            m_pendingSelectedRouteChanges.end ();
   }
 
+  /** Observe exact automatic routing payloads immediately before HOP. */
+  void
+  SetAutomaticRoutingControlObserverForTest (
+    Callback<void, std::vector<CsrNodeId>, Ptr<Packet>> observer)
+  {
+    m_automaticRoutingControlObserver = observer;
+  }
+
+  /** Exercise the routesRcvUnAuthedMsg() neighbor-creation path. */
+  void
+  NoteAuthenticatedGroupKeyNeededForTest (
+    CsrNodeId neighbor,
+    double pathlossDb = 70.0,
+    double snrDb = 20.0)
+  {
+    NoteAuthenticatedGroupKeyNeeded (neighbor, pathlossDb, snrDb);
+  }
+
   /**
    * Read the last complete legacy ARL INFO record from a neighbor.
    *
@@ -593,6 +611,7 @@ public:
   void
   SendNoPath (CsrNodeId neighbor, CsrNodeId unreachableDest)
   {
+    GetOrCreateNwkNeighbor (neighbor);
     SendNeighborCheck (neighbor,
                       CsrNeighborCheckType::NoPath,
                       unreachableDest);
@@ -600,7 +619,7 @@ public:
 
   void NoteLinkFailure (CsrNodeId nextHop)
   {
-    auto &ne = m_nwkNeighbors[nextHop];
+    auto &ne = GetOrCreateNwkNeighbor (nextHop);
 
     ne.nodeId = nextHop;
     ne.numFailures++;
@@ -626,8 +645,6 @@ public:
     CsrNeighborCheckType type,
     uint32_t discoverySequence)
   {
-    auto it = m_nwkNeighbors.find (neighbor);
-
     if (type == CsrNeighborCheckType::Verify &&
       discoverySequence != 0 &&
       discoverySequence != m_discoverySequence)
@@ -644,7 +661,10 @@ public:
         return;
       }
 
-    if (it == m_nwkNeighbors.end ())
+    bool created = false;
+    NwkNeighborEntry &ne =
+      GetOrCreateNwkNeighbor (neighbor, &created);
+    if (created)
       {
         std::cout << "[NWK " << m_nodeId
                   << "] NeighborCheck ACK from unknown neighbor="
@@ -652,8 +672,6 @@ public:
                   << std::endl;
         return;
       }
-
-    NwkNeighborEntry &ne = it->second;
 
     uint32_t oldFailures = ne.numFailures;
     bool wasStale = ne.stale;
@@ -1769,7 +1787,7 @@ public:
       }
 
     uint32_t sequence =
-      NextRoutingSequence ();
+      AllocateRoutingSequence ();
 
     Ptr<Packet> payload =
       BuildRoutingDeletePayload (
@@ -1885,7 +1903,35 @@ private:
   ReportPendingSelectedRouteChanges ();
 
   void
-  TrySendAutomaticRouteUpdates ();
+  ScheduleRoutesProcess ();
+
+  std::vector<CsrNodeId>
+  OrderChangedDestinations (
+    const std::set<CsrNodeId> &destinations) const;
+
+  std::vector<CsrNodeId>
+  CollectActiveRoutingNeighbors () const;
+
+  std::vector<Ptr<Packet>>
+  BuildGroupedRouteChangePayloads (
+    const std::vector<CsrNodeId> &destinations,
+    uint32_t routingSequence);
+
+  bool
+  AppendGroupedRouteChangeRecord (
+    CsrArlRoutingMessage::Builder &builder,
+    CsrNodeId destination);
+
+  bool
+  IsChangedInCurrentRoutingProcess (
+    CsrNodeId destination) const;
+
+  void
+  ClearProcessedRouteChangeCycle ();
+
+  void
+  SendGroupedAutomaticRouteChanges (
+    const std::vector<CsrNodeId> &destinations);
 
   struct ReverseRouteEntry
   {
@@ -2820,17 +2866,6 @@ public:
                   << unsigned (snapshot.totalSections)
                   << std::endl;
 
-        // Resume any automatic route propagation that
-        // was blocked while this snapshot was active.
-        if (!m_pendingAutomaticRouteChanges.empty () &&
-            !m_automaticRouteUpdateEvent.IsPending ())
-          {
-            m_automaticRouteUpdateEvent =
-              Simulator::ScheduleNow (
-                &CsrNetLayer::
-                  TrySendAutomaticRouteUpdates,
-                this);
-          }
       }
   }
 
@@ -2937,22 +2972,18 @@ public:
         return;
       }
 
-    ++m_routingSequence;
-
-    if (m_routingSequence == 0)
-      {
-        ++m_routingSequence;
-      }
+    uint32_t routingSequence =
+      AllocateRoutingSequence ();
 
     Ptr<Packet> payload =
       BuildRoutingUpdatePayload (
-        m_routingSequence);
+        routingSequence);
 
     std::cout << "[NWK " << m_nodeId
               << "] Sending reliable RoutingUpdate"
               << " neighbor=" << neighbor
               << " routingSequence="
-              << m_routingSequence
+              << routingSequence
               << std::endl;
 
     m_hop->SendRoutingControl (
@@ -2998,6 +3029,9 @@ private:
   // routesFindDestination() inserts new logical destinations at destHead.
   // Keep that newest-first order independently of alternate route records.
   std::deque<CsrNodeId>                 m_destinationCreationOrder;
+  // routesFindNeighbor() uses the same head-insertion rule.  This order is
+  // authoritative for MAX_DEST_NUM multicast grouping.
+  std::deque<CsrNodeId>                 m_neighborCreationOrder;
   std::map<CsrNodeId, ReverseRouteEntry> m_reverseRoutes;
   std::map<CsrNodeId, NwkNeighborEntry>  m_nwkNeighbors;
   std::map<std::pair<CsrNodeId,CsrNodeId>, NsdpEntry> m_nsdp;
@@ -3012,9 +3046,13 @@ private:
 
   EventId m_selectedRouteChangeEvent;
 
-  Time m_selectedRouteChangeDelay {
-    MilliSeconds (25)
-  };
+  std::set<CsrNodeId> m_pendingRoutingSnapshots;
+
+  std::set<CsrNodeId> m_lastProcessedRouteChanges;
+  Time m_lastProcessedRouteChangeTime {Seconds (-1)};
+
+  Callback<void, std::vector<CsrNodeId>, Ptr<Packet>>
+    m_automaticRoutingControlObserver;
 
   bool    m_discoveryActive { false };
 
@@ -3086,6 +3124,10 @@ private:
   void EnsureDiscoveryEntry (CsrNodeId node, bool discoveryNeeded);
   void MarkDiscoveryNotNeeded (CsrNodeId node);
   void NoteDestinationCreated (CsrNodeId node);
+  void NoteNeighborCreated (CsrNodeId node);
+  NwkNeighborEntry &GetOrCreateNwkNeighbor (
+    CsrNodeId node,
+    bool *created = nullptr);
   void ReleaseDeferredRouteCandidates (CsrNodeId destination);
   bool LookupDiscoveryNextHop (CsrNodeId destination,
                                CsrNodeId &nextHopOut) const;
@@ -3303,16 +3345,12 @@ private:
     m_outboundRoutingSnapshots;
 
   uint32_t
-  NextRoutingSequence ()
+  AllocateRoutingSequence (
+    uint32_t advances = 1)
   {
-    ++m_routingSequence;
-
-    if (m_routingSequence == 0)
-      {
-        ++m_routingSequence;
-      }
-
-    return m_routingSequence;
+    uint32_t sequence = m_routingSequence;
+    m_routingSequence += advances;
+    return sequence;
   }
 
   Time m_routingRequestTimeout {
@@ -3330,20 +3368,6 @@ private:
     true
   };
 
-  // Changed destinations waiting to be advertised,
-  // grouped by receiving neighbor.
-  std::map<CsrNodeId, std::set<CsrNodeId>>
-    m_pendingAutomaticRouteChanges;
-
-  EventId m_automaticRouteUpdateEvent;
-
-  Time m_automaticRouteUpdateSpacing {
-    MilliSeconds (20)
-  };
-
-  Time m_automaticRouteUpdateRetryDelay {
-    MilliSeconds (100)
-};
 };
 
 
@@ -3568,7 +3592,7 @@ CsrNetLayer::SendKeyRequest (
       return;
     }
 
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
   entry.nodeId = neighbor;
 
   if (resetDelay)
@@ -3601,7 +3625,7 @@ CsrNetLayer::SendKeyUpdate (CsrNodeId neighbor)
       return;
     }
 
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
   entry.nodeId = neighbor;
   SyncNeighborKeyState (neighbor);
 
@@ -3675,7 +3699,7 @@ CsrNetLayer::EnsureCheckMessage (
       return;
     }
 
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
   entry.nodeId = neighbor;
 
   if (entry.arlActive ||
@@ -3762,17 +3786,19 @@ CsrNetLayer::TryMakeNeighborActive (
   SelectedRouteState directRouteAfter =
     CaptureSelectedRouteState (neighbor);
 
+  // routesMakeNeighborActive() sets needsUpdate; routesProcess() later walks
+  // all such neighbors before its changed-destination block.  Keep this as
+  // pending process state so admission handling never re-enters HOP/MAC.
+  m_pendingRoutingSnapshots.insert (neighbor);
+
   if (!SameSelectedRouteState (directRouteBefore, directRouteAfter))
     {
       MarkSelectedRouteChanged (neighbor, "neighbor admitted");
     }
-
-  // routesMakeNeighborActive() sets needsUpdate.  A complete reliable ARL
-  // snapshot is this model's INFO/UPDATE/FLUSH equivalent of that flag.
-  Simulator::ScheduleNow (
-    &CsrNetLayer::StartReliableRoutingSnapshot,
-    this,
-    neighbor);
+  else
+    {
+      ScheduleRoutesProcess ();
+    }
 
   if (entry.admissionNeedsRoutingRequest)
     {
@@ -3968,13 +3994,14 @@ CsrNetLayer::EvaluateNeighborAdmission (
 bool
 CsrNetLayer::AcceptFromNeighbor (CsrNodeId neighbor)
 {
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
+  entry.nodeId = neighbor;
+
   if (!m_arlNeighborAdmissionEnabled)
     {
       return true;
     }
 
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
-  entry.nodeId = neighbor;
   SyncNeighborKeyState (neighbor);
 
   if (!entry.arlActive)
@@ -3989,7 +4016,7 @@ CsrNetLayer::AcceptFromNeighbor (CsrNodeId neighbor)
 void
 CsrNetLayer::NoteKeyRequestReceived (CsrNodeId neighbor)
 {
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
   entry.nodeId = neighbor;
   SyncNeighborKeyState (neighbor);
 
@@ -4021,7 +4048,7 @@ CsrNetLayer::NoteKeyRequestReceived (CsrNodeId neighbor)
 void
 CsrNetLayer::NoteKeyUpdateReceived (CsrNodeId neighbor)
 {
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
   entry.nodeId = neighbor;
   SyncNeighborKeyState (neighbor);
   m_keyUpdateReceivedCount++;
@@ -4043,13 +4070,8 @@ CsrNetLayer::NoteKeyUpdateCompletion (
   CsrNodeId neighbor,
   bool acknowledged)
 {
-  auto it = m_nwkNeighbors.find (neighbor);
-  if (it == m_nwkNeighbors.end ())
-    {
-      return;
-    }
-
-  NwkNeighborEntry &entry = it->second;
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
+  entry.nodeId = neighbor;
   entry.keySendActive = false;
   SyncNeighborKeyState (neighbor);
 
@@ -4066,7 +4088,7 @@ CsrNetLayer::NoteKeyUpdateCompletion (
 void
 CsrNetLayer::NoteSecurityCountChange (CsrNodeId neighbor)
 {
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
+  NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
   entry.nodeId = neighbor;
 
   MakeNeighborInactive (neighbor, "security count changed");
@@ -4100,8 +4122,10 @@ CsrNetLayer::NoteAuthenticatedGroupKeyNeeded (
   double pathlossDb,
   double snrDb)
 {
-  NwkNeighborEntry &entry = m_nwkNeighbors[neighbor];
-  bool isNew = entry.lastHeardSec < 0.0;
+  bool isNew = false;
+  NwkNeighborEntry &entry =
+    GetOrCreateNwkNeighbor (neighbor, &isNew);
+
   entry.nodeId = neighbor;
   entry.lastHeardSec = Simulator::Now ().GetSeconds ();
   entry.lastPathlossDb = pathlossDb;
@@ -4219,9 +4243,10 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
     // ------------------------------------------------------------
     // 1) Update NWK neighbor table, similar to OPNET proc_hello()
     // ------------------------------------------------------------
-  auto &ne = m_nwkNeighbors[src];
+  auto &ne = GetOrCreateNwkNeighbor (src);
   bool isNew = (ne.lastHeardSec < 0.0);
   bool wasStale = ne.stale;
+
   ne.nodeType = senderType;
 
   ne.wasActiveBeforeLastHello =
@@ -4885,6 +4910,10 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
 
                 CsrNodeId node = pathNode;
                 advertisedPath.push_back (node);
+                if (node != m_nodeId)
+                  {
+                    GetOrCreateNwkNeighbor (node);
+                  }
                 if (node == m_nodeId)
                   {
                     containsLocalNode = true;
@@ -5040,6 +5069,7 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
               }
 
             CsrNodeId destination = record.nodeId;
+            NoteDestinationCreated (destination);
             SelectedRouteState before =
               CaptureSelectedRouteState (destination);
             RouteEntry *matchingRoute = nullptr;
@@ -5351,6 +5381,11 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
         for (CsrNodeId pathNode :
             ar.path)
           {
+            if (pathNode != m_nodeId &&
+                pathNode < CSR_BROADCAST_ID)
+              {
+                GetOrCreateNwkNeighbor (pathNode);
+              }
             candidatePath.push_back (
               pathNode);
 
@@ -5927,6 +5962,7 @@ CsrNetLayer::ProcessRoutingUpdate (
             return;
           }
 
+        NoteDestinationCreated (destination);
         SelectedRouteState selectedBefore =
             CaptureSelectedRouteState (
                destination);
@@ -6518,12 +6554,6 @@ CsrNetLayer::CheckNeighborFreshness ()
               snapshot.active = false;
             }
 
-          // Do not leave a stale neighbor queued for
-          // automatic route-update fanout.
-          bool removedPendingAutomaticUpdate =
-            m_pendingAutomaticRouteChanges.erase (
-              ne.nodeId) > 0;
-
           std::cout << "[NWK " << m_nodeId
                     << "] Cleared stale routing transaction state"
                     << " neighbor=" << ne.nodeId
@@ -6533,10 +6563,6 @@ CsrNetLayer::CheckNeighborFreshness ()
                     << (hadInboundSnapshot ? 1 : 0)
                     << " outboundSnapshot="
                     << (hadOutboundSnapshot ? 1 : 0)
-                    << " removedAutomaticUpdate="
-                    << (removedPendingAutomaticUpdate
-                          ? 1
-                          : 0)
                     << std::endl;
 
           // Do not reuse radio limits learned before
@@ -6912,7 +6938,7 @@ CsrNetLayer::ProcessNeighborCheck (const CsrHelloHeader &hh,
         uint32_t responseSequence = hh.GetDiscoverySequence ();
 
         NwkNeighborEntry &admissionNeighbor =
-          m_nwkNeighbors[helloSrc];
+          GetOrCreateNwkNeighbor (helloSrc);
         admissionNeighbor.nodeId = helloSrc;
 
         bool remoteArlActive =
@@ -7494,18 +7520,12 @@ CsrNetLayer::GetNeighborCount () const
 void
 CsrNetLayer::SendRoutingUpdate ()
 {
-  ++m_routingSequence;
-
-  // Avoid zero after wrap so zero remains useful for
-  // non-routing control packets.
-  if (m_routingSequence == 0)
-    {
-      ++m_routingSequence;
-    }
+  uint32_t routingSequence =
+    AllocateRoutingSequence ();
 
   std::cout << "[NWK " << m_nodeId
             << "] Sending ARL RoutingUpdate"
-            << " routingSequence=" << m_routingSequence
+            << " routingSequence=" << routingSequence
             << std::endl;
 
   if (m_nodeType == CsrNodeType::Ordinary)
@@ -7520,7 +7540,7 @@ CsrNetLayer::SendRoutingUpdate ()
     CsrNeighborCheckType::None,
     CsrDiscoverType::None,
     0,
-    m_routingSequence);
+    routingSequence);
 }
 
 void
@@ -7679,6 +7699,43 @@ CsrNetLayer::NoteDestinationCreated (CsrNodeId node)
 
   // routesFindDestination() links every new record at h->destHead.
   m_destinationCreationOrder.push_front (node);
+}
+
+void
+CsrNetLayer::NoteNeighborCreated (CsrNodeId node)
+{
+  if (node == m_nodeId || node == CSR_BROADCAST_ID)
+    {
+      return;
+    }
+
+  if (std::find (m_neighborCreationOrder.begin (),
+                 m_neighborCreationOrder.end (),
+                 node) != m_neighborCreationOrder.end ())
+    {
+      return;
+    }
+
+  // routesFindNeighbor() links every new record at h->neighborHead.
+  m_neighborCreationOrder.push_front (node);
+}
+
+CsrNetLayer::NwkNeighborEntry &
+CsrNetLayer::GetOrCreateNwkNeighbor (
+  CsrNodeId node,
+  bool *created)
+{
+  auto result = m_nwkNeighbors.try_emplace (node);
+  if (created != nullptr)
+    {
+      *created = result.second;
+    }
+  if (result.second)
+    {
+      result.first->second.nodeId = node;
+      NoteNeighborCreated (node);
+    }
+  return result.first->second;
 }
 
 void
@@ -8823,7 +8880,8 @@ CsrNetLayer::BuildArlRoutingSnapshotPayloads (
 
   uint32_t advertisedRoutes = 0;
 
-  if (ShouldAdvertiseLocalSelfRoute ())
+  if (ShouldAdvertiseLocalSelfRoute () &&
+      !IsChangedInCurrentRoutingProcess (m_nodeId))
     {
       std::string error;
       if (builder.AddUpdate (
@@ -8847,6 +8905,11 @@ CsrNetLayer::BuildArlRoutingSnapshotPayloads (
 
   for (const auto &route : m_routes)
     {
+      if (IsChangedInCurrentRoutingProcess (route.nwkDst))
+        {
+          continue;
+        }
+
       const RouteEntry *best = FindBestRoute (route.nwkDst);
 
       if (best != &route || !ShouldAdvertiseRoute (route))
@@ -8993,7 +9056,7 @@ CsrNetLayer::StartReliableRoutingSnapshot (
     }
 
   uint32_t snapshotSequence =
-    NextRoutingSequence ();
+    AllocateRoutingSequence ();
 
   std::vector<Ptr<Packet>> payloads =
     BuildArlRoutingSnapshotPayloads (
@@ -9158,17 +9221,6 @@ RoutingSnapshotWatchdogExpired (
   snapshot.watchdogPhase =
     "aborted";
 
-  // A selected-route change may have been waiting
-  // behind this snapshot.
-  if (!m_pendingAutomaticRouteChanges.empty () &&
-      !m_automaticRouteUpdateEvent.IsPending ())
-    {
-      m_automaticRouteUpdateEvent =
-        Simulator::ScheduleNow (
-          &CsrNetLayer::
-            TrySendAutomaticRouteUpdates,
-          this);
-    }
 }
 
 void
@@ -9212,7 +9264,7 @@ CsrNetLayer::SendRoutingRequestAttempt (
     }
 
   uint32_t sequence =
-    NextRoutingSequence ();
+    AllocateRoutingSequence ();
 
   entry.routingRequestSequence =
     sequence;
@@ -9561,30 +9613,82 @@ CsrNetLayer::MarkSelectedRouteChanged (
             << m_pendingSelectedRouteChanges.size ()
             << std::endl;
 
-  if (!m_selectedRouteChangeEvent.IsPending ())
+  ScheduleRoutesProcess ();
+}
+
+void
+CsrNetLayer::ScheduleRoutesProcess ()
+{
+  if (m_selectedRouteChangeEvent.IsPending ())
     {
-      m_selectedRouteChangeEvent =
-        Simulator::Schedule (
-          m_selectedRouteChangeDelay,
-          &CsrNetLayer::
-            ReportPendingSelectedRouteChanges,
-          this);
+      return;
     }
+
+  m_selectedRouteChangeEvent =
+    Simulator::ScheduleNow (
+      &CsrNetLayer::ReportPendingSelectedRouteChanges,
+      this);
 }
 
 void
 CsrNetLayer::
 ReportPendingSelectedRouteChanges ()
 {
-  std::set<CsrNodeId> destinations;
+  std::set<CsrNodeId> changedSet;
 
-  destinations.swap (
+  changedSet.swap (
     m_pendingSelectedRouteChanges);
 
+  std::vector<CsrNodeId> destinations =
+    OrderChangedDestinations (changedSet);
+
+  m_lastProcessedRouteChanges = changedSet;
+  m_lastProcessedRouteChangeTime = Simulator::Now ();
+
+  std::vector<CsrNodeId> snapshotNeighbors;
+  snapshotNeighbors.reserve (m_pendingRoutingSnapshots.size ());
+  std::set<CsrNodeId> orderedSnapshots;
+
+  for (CsrNodeId neighbor : m_neighborCreationOrder)
+    {
+      if (m_pendingRoutingSnapshots.find (neighbor) ==
+          m_pendingRoutingSnapshots.end ())
+        {
+          continue;
+        }
+      snapshotNeighbors.push_back (neighbor);
+      orderedSnapshots.insert (neighbor);
+    }
+
+  for (CsrNodeId neighbor : m_pendingRoutingSnapshots)
+    {
+      if (orderedSnapshots.find (neighbor) == orderedSnapshots.end ())
+        {
+          snapshotNeighbors.push_back (neighbor);
+        }
+    }
+  m_pendingRoutingSnapshots.clear ();
+
+  // Keep the frozen flags visible to snapshot events that routesProcess()
+  // would have handled in this same pass, then clear after all already-
+  // queued events at this timestamp have observed them.
+  Simulator::ScheduleNow (
+    &CsrNetLayer::ClearProcessedRouteChangeCycle,
+    this);
+
+  // This is the routesProcess() needsUpdate block.  It deliberately runs in
+  // the same event as, but before, the grouped changed-destination block.
+  for (CsrNodeId neighbor : snapshotNeighbors)
+    {
+      StartReliableRoutingSnapshot (neighbor);
+    }
+
   std::cout << "[NWK " << m_nodeId
-            << "] Consolidated selected-route changes"
+            << "] routesProcess grouped selected-route changes"
             << " count="
             << destinations.size ()
+            << " time="
+            << Simulator::Now ().GetSeconds ()
             << std::endl;
 
   for (CsrNodeId destination :
@@ -9603,271 +9707,294 @@ ReportPendingSelectedRouteChanges ()
       return;
     }
 
-  uint32_t queuedNeighbors = 0;
-  uint32_t queuedDestinationPairs = 0;
+  SendGroupedAutomaticRouteChanges (destinations);
+}
 
-  for (const auto &entry :
-      m_nwkNeighbors)
+std::vector<CsrNodeId>
+CsrNetLayer::OrderChangedDestinations (
+  const std::set<CsrNodeId> &destinations) const
+{
+  std::vector<CsrNodeId> ordered;
+  ordered.reserve (destinations.size ());
+  std::set<CsrNodeId> emitted;
+
+  for (CsrNodeId destination : m_destinationCreationOrder)
     {
-      const NwkNeighborEntry &neighbor =
-        entry.second;
-
-      bool fresh =
-        neighbor.lastHeardSec >= 0.0 &&
-        !neighbor.stale &&
-        IsArlNeighborUsable (neighbor.nodeId);
-
-      if (!fresh)
+      if (destinations.find (destination) == destinations.end ())
         {
           continue;
         }
+      ordered.push_back (destination);
+      emitted.insert (destination);
+    }
 
-      std::set<CsrNodeId>
-        &pendingDestinations =
-          m_pendingAutomaticRouteChanges[
-            neighbor.nodeId];
+  // routesCreate() creates the permanent self destination before every
+  // learned destination.  Head insertion therefore leaves self at the tail.
+  if (destinations.find (m_nodeId) != destinations.end ())
+    {
+      ordered.push_back (m_nodeId);
+      emitted.insert (m_nodeId);
+    }
 
-      bool wasEmpty =
-        pendingDestinations.empty ();
-
-      for (CsrNodeId destination :
-          destinations)
+  // Defensive compatibility for destinations introduced by older helpers
+  // without NoteDestinationCreated().  Production routes never use this.
+  for (CsrNodeId destination : destinations)
+    {
+      if (emitted.find (destination) == emitted.end ())
         {
-          bool inserted =
-            pendingDestinations.insert (
-              destination)
-              .second;
-
-          if (inserted)
-            {
-              queuedDestinationPairs++;
-            }
-        }
-
-      if (wasEmpty &&
-          !pendingDestinations.empty ())
-        {
-          queuedNeighbors++;
+          ordered.push_back (destination);
         }
     }
 
-  std::cout << "[NWK " << m_nodeId
-            << "] Queued automatic destination-specific"
-            << " route propagation"
-            << " freshNeighborsAdded="
-            << queuedNeighbors
-            << " destinationPairsAdded="
-            << queuedDestinationPairs
-            << " pendingNeighbors="
-            << m_pendingAutomaticRouteChanges.size ()
-            << std::endl;
+  return ordered;
+}
 
-  if (!m_pendingAutomaticRouteChanges.empty () &&
-      !m_automaticRouteUpdateEvent.IsPending ())
+std::vector<CsrNodeId>
+CsrNetLayer::CollectActiveRoutingNeighbors () const
+{
+  std::vector<CsrNodeId> active;
+  std::set<CsrNodeId> emitted;
+
+  auto appendIfActive = [this, &active, &emitted] (CsrNodeId node) {
+    auto it = m_nwkNeighbors.find (node);
+    if (it == m_nwkNeighbors.end () ||
+        !it->second.arlActive ||
+        it->second.stale ||
+        !IsArlNeighborUsable (node))
+      {
+        return;
+      }
+    active.push_back (node);
+    emitted.insert (node);
+  };
+
+  // routesFindNeighbor() prepends new records at neighborHead.
+  for (CsrNodeId node : m_neighborCreationOrder)
     {
-      m_automaticRouteUpdateEvent =
-        Simulator::ScheduleNow (
-          &CsrNetLayer::
-            TrySendAutomaticRouteUpdates,
-          this);
+      appendIfActive (node);
+    }
+
+  for (const auto &entry : m_nwkNeighbors)
+    {
+      if (emitted.find (entry.first) == emitted.end ())
+        {
+          appendIfActive (entry.first);
+        }
+    }
+
+  return active;
+}
+
+bool
+CsrNetLayer::AppendGroupedRouteChangeRecord (
+  CsrArlRoutingMessage::Builder &builder,
+  CsrNodeId destination)
+{
+  std::string error;
+
+  if (destination == m_nodeId)
+    {
+      if (ShouldAdvertiseLocalSelfRoute ())
+        {
+          return builder.AddUpdate (
+            m_nodeId,
+            m_localSelfRoute.capability,
+            0,
+            0,
+            {},
+            &error);
+        }
+      return builder.AddDelete (m_nodeId, &error);
+    }
+
+  const RouteEntry *route = FindBestRoute (destination);
+  if (route == nullptr || route->capability == 0)
+    {
+      return builder.AddDelete (destination, &error);
+    }
+
+  std::vector<CsrNodeId> path;
+  path.reserve (route->numHop);
+  for (CsrNodeId pathNode : route->path)
+    {
+      if (path.size () >= route->numHop)
+        {
+          break;
+        }
+      path.push_back (pathNode);
+    }
+  if (path.empty () && route->numHop > 0)
+    {
+      path.push_back (route->nextHop);
+    }
+  while (path.size () < route->numHop)
+    {
+      path.push_back (route->nwkDst);
+    }
+
+  bool added = builder.AddUpdate (
+    route->nwkDst,
+    route->capability,
+    route->numHop,
+    route->cost,
+    path,
+    &error);
+
+  if (!added)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Failed to append grouped route change"
+                << " destination=" << destination
+                << " reason=" << error
+                << std::endl;
+    }
+  return added;
+}
+
+std::vector<Ptr<Packet>>
+CsrNetLayer::BuildGroupedRouteChangePayloads (
+  const std::vector<CsrNodeId> &destinations,
+  uint32_t routingSequence)
+{
+  CsrArlRoutingMessage::Builder builder;
+  for (CsrNodeId destination : destinations)
+    {
+      if (!AppendGroupedRouteChangeRecord (builder, destination))
+        {
+          return {};
+        }
+    }
+
+  std::vector<std::vector<uint8_t>> sectionBytes;
+  std::string error;
+  if (!builder.BuildSections (routingSequence, sectionBytes, &error))
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Failed to section grouped route changes"
+                << " reason=" << error
+                << std::endl;
+      return {};
+    }
+
+  std::vector<Ptr<Packet>> payloads;
+  payloads.reserve (sectionBytes.size ());
+  for (uint32_t section = 0; section < sectionBytes.size (); ++section)
+    {
+      payloads.push_back (BuildArlRoutingSectionPayload (
+        sectionBytes[section],
+        routingSequence,
+        static_cast<uint8_t> (section),
+        static_cast<uint8_t> (sectionBytes.size ())));
+    }
+  return payloads;
+}
+
+bool
+CsrNetLayer::IsChangedInCurrentRoutingProcess (
+  CsrNodeId destination) const
+{
+  if (m_pendingSelectedRouteChanges.find (destination) !=
+      m_pendingSelectedRouteChanges.end ())
+    {
+      return true;
+    }
+
+  return m_lastProcessedRouteChangeTime == Simulator::Now () &&
+         m_lastProcessedRouteChanges.find (destination) !=
+           m_lastProcessedRouteChanges.end ();
+}
+
+void
+CsrNetLayer::ClearProcessedRouteChangeCycle ()
+{
+  if (m_lastProcessedRouteChangeTime == Simulator::Now ())
+    {
+      m_lastProcessedRouteChanges.clear ();
+      m_lastProcessedRouteChangeTime = Seconds (-1);
     }
 }
 
 void
-CsrNetLayer::
-TrySendAutomaticRouteUpdates ()
+CsrNetLayer::SendGroupedAutomaticRouteChanges (
+  const std::vector<CsrNodeId> &destinations)
 {
-  if (!m_automaticRoutePropagationEnabled ||
-      m_hop == nullptr)
+  if (destinations.empty ())
     {
       return;
     }
 
-  bool sentAction = false;
-  bool blockedBySnapshot = false;
+  std::vector<CsrNodeId> neighbors =
+    CollectActiveRoutingNeighbors ();
 
-  auto pendingIt =
-    m_pendingAutomaticRouteChanges.begin ();
-
-  while (pendingIt !=
-         m_pendingAutomaticRouteChanges.end ())
-    {
-      CsrNodeId neighborId =
-        pendingIt->first;
-
-      auto neighborIt =
-        m_nwkNeighbors.find (
-          neighborId);
-
-      if (neighborIt ==
-            m_nwkNeighbors.end () ||
-          neighborIt->second.stale ||
-          !IsArlNeighborUsable (neighborId))
-        {
-          std::cout << "[NWK " << m_nodeId
-                    << "] Dropping automatic route propagation"
-                    << " unavailableNeighbor="
-                    << neighborId
-                    << " destinations="
-                    << pendingIt->second.size ()
-                    << std::endl;
-
-          pendingIt =
-            m_pendingAutomaticRouteChanges.erase (
-              pendingIt);
-
-          continue;
-        }
-
-      auto snapshotIt =
-        m_outboundRoutingSnapshots.find (
-          neighborId);
-
-      bool snapshotActive =
-        snapshotIt !=
-          m_outboundRoutingSnapshots.end () &&
-        snapshotIt->second.active;
-
-      if (snapshotActive)
-        {
-          blockedBySnapshot = true;
-          ++pendingIt;
-          continue;
-        }
-
-      std::set<CsrNodeId>
-        &pendingDestinations =
-          pendingIt->second;
-
-      if (pendingDestinations.empty ())
-        {
-          pendingIt =
-            m_pendingAutomaticRouteChanges.erase (
-              pendingIt);
-
-          continue;
-        }
-
-      CsrNodeId destination =
-        *pendingDestinations.begin ();
-
-      pendingDestinations.erase (
-        pendingDestinations.begin ());
-
-      bool neighborCompleted =
-        pendingDestinations.empty ();
-
-      if (neighborCompleted)
-        {
-          m_pendingAutomaticRouteChanges.erase (
-            pendingIt);
-        }
-
-      const RouteEntry *selectedRoute =
-        FindBestRoute (
-          destination);
-
-      bool sendUpdate =
-        destination == m_nodeId
-          ? ShouldAdvertiseLocalSelfRoute ()
-          : selectedRoute != nullptr &&
-            ShouldAdvertiseRoute (
-              *selectedRoute);
-
-      if (sendUpdate)
-        {
-          uint32_t sequence =
-            NextRoutingSequence ();
-
-          Ptr<Packet> payload =
-            BuildTargetedRoutingUpdatePayload (
-              destination,
-              sequence);
-
-          if (payload != nullptr)
-            {
-              std::cout << "[NWK " << m_nodeId
-                        << "] Sending automatic targeted RoutingUpdate"
-                        << " neighbor="
-                        << neighborId
-                        << " destination="
-                        << destination
-                        << " routingSequence="
-                        << sequence
-                        << std::endl;
-
-              m_hop->SendRoutingControl (
-                neighborId,
-                payload);
-            }
-          else
-            {
-              // The selected route changed again between
-              // queueing and packet construction.
-              std::cout << "[NWK " << m_nodeId
-                        << "] Targeted Update became unavailable;"
-                        << " sending Delete instead"
-                        << " neighbor="
-                        << neighborId
-                        << " destination="
-                        << destination
-                        << std::endl;
-
-              SendReliableRoutingDelete (
-                neighborId,
-                destination);
-            }
-        }
-      else
-        {
-          std::cout << "[NWK " << m_nodeId
-                    << "] Sending automatic targeted RoutingDelete"
-                    << " neighbor="
-                    << neighborId
-                    << " destination="
-                    << destination
-                    << std::endl;
-
-          SendReliableRoutingDelete (
-            neighborId,
-            destination);
-        }
-
-      sentAction = true;
-      break;
-    }
-
-  if (m_pendingAutomaticRouteChanges.empty ())
+  // routesProcess() consumes changed flags even when there is nobody to
+  // notify, and in that case routesUpdateSend() never advances the sequence.
+  if (neighbors.empty () || m_hop == nullptr)
     {
       std::cout << "[NWK " << m_nodeId
-                << "] Automatic destination-specific"
-                << " route propagation completed"
+                << "] Consumed grouped route changes without recipients"
+                << " destinations=" << destinations.size ()
                 << std::endl;
-
       return;
     }
 
-  Time nextDelay =
-    sentAction
-      ? m_automaticRouteUpdateSpacing
-      : m_automaticRouteUpdateRetryDelay;
+  std::vector<std::vector<CsrNodeId>> groups;
+  for (uint32_t first = 0; first < neighbors.size ();
+       first += CsrHeader::MAX_DESTINATIONS)
+    {
+      uint32_t last = std::min<uint32_t> (
+        first + CsrHeader::MAX_DESTINATIONS,
+        neighbors.size ());
+      groups.emplace_back (
+        neighbors.begin () + first,
+        neighbors.begin () + last);
+    }
+
+  uint32_t routingSequence = m_routingSequence;
+
+  std::vector<Ptr<Packet>> payloads =
+    BuildGroupedRouteChangePayloads (
+      destinations,
+      routingSequence);
+
+  if (payloads.empty ())
+    {
+      return;
+    }
+
+  // routesUpdateSend() advances once for every destination group after the
+  // shared byte stream exists; an encoding failure consumes no sequence.
+  AllocateRoutingSequence (
+    static_cast<uint32_t> (groups.size ()));
 
   std::cout << "[NWK " << m_nodeId
-            << "] Automatic route propagation rescheduled"
-            << " pendingNeighbors="
-            << m_pendingAutomaticRouteChanges.size ()
-            << " blockedBySnapshot="
-            << (blockedBySnapshot ? 1 : 0)
-            << " delayMs="
-            << nextDelay.GetMilliSeconds ()
+            << "] Sending source-exact grouped route changes"
+            << " routingSequence=" << routingSequence
+            << " destinations=" << destinations.size ()
+            << " neighbors=" << neighbors.size ()
+            << " groups=" << groups.size ()
+            << " sections=" << payloads.size ()
             << std::endl;
 
-  m_automaticRouteUpdateEvent =
-    Simulator::Schedule (
-      nextDelay,
-      &CsrNetLayer::
-        TrySendAutomaticRouteUpdates,
-      this);
+  // routesUpdateSend() is called for newest-neighbor groups first and walks
+  // sections forward, but routesSendMessage() prepends each retained owner.
+  // Reverse both loops to reproduce the resulting unblocked HOP handoff.
+  for (auto group = groups.rbegin (); group != groups.rend (); ++group)
+    {
+      for (auto payload = payloads.rbegin ();
+           payload != payloads.rend ();
+           ++payload)
+        {
+          if (!m_automaticRoutingControlObserver.IsNull ())
+            {
+              m_automaticRoutingControlObserver (
+                *group,
+                (*payload)->Copy ());
+            }
+          m_hop->SendRoutingControl (
+            *group,
+            (*payload)->Copy ());
+        }
+    }
 }
 
 bool

@@ -296,6 +296,11 @@ CheckLocalSnapshot (CsrNodeType nodeType,
   nwk->SetNodeId (LOCAL_NODE);
   nwk->SetNodeType (nodeType);
 
+  // Initial routesSetCapability() is consumed by the same-time routesProcess
+  // pass even with no active neighbors.  A later neighbor snapshot then
+  // carries the stable source-owned self route.
+  Simulator::Run ();
+
   uint32_t localCost = 0;
   Require (!nwk->GetSelectedRouteCost (LOCAL_NODE, localCost),
            "source-owned self state leaked into DATA forwarding");
