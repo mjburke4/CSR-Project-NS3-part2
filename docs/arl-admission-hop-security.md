@@ -144,8 +144,8 @@ count is absent.
   trips; wrong-key, wrong-type, tamper, malformed, and replay rejection;
   authentication-before-ACK/delivery; exact-once AppNeighborcast; and live
   over-air sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
-- The complete build and regression pass: 31 focused smoke targets,
-  `csr-mac-demo-split`, and the imported-scenario runner (33/33).
+- The complete build and regression pass: 33 focused smoke targets,
+  `csr-mac-demo-split`, and the imported-scenario runner (35/35).
 
 ## Deliberate boundary
 
@@ -161,9 +161,15 @@ This route-admission increment covers the inactive-peer selection boundary and
 source-owned destination recomputation after normal or looped UPDATEs,
 selected-route DELETE/FLUSH/stale fallback, inactive-reporter route deletion,
 and eligible link-cost reroutes.
-Self-route capability advertisement, grouped same-time changed-route
-propagation, and retry ownership for partially acknowledged destination sets
-remain separate parity work.
+Source-owned self-route capability advertisement is now covered, including
+zero-hop UPDATE serialization, HELLO-independent receive authority, and
+DELETE-to-ordinary behavior that preserves direct reachability. Grouped
+same-time changed-route propagation is also source-exact through the NWK-to-HOP
+handoff when no routing-INFO mutation is pending, including destination/
+neighbor creation order, combined UPDATE/DELETE records, section splitting,
+ten-neighbor grouping, sequence advancement, and same-pass snapshot exclusion.
+Optional same-pass INFO coupling and retry ownership for partially acknowledged
+destination sets remain separate parity work.
 
 The default ns-3 key arrays are deterministic and non-secret so existing
 scenarios remain runnable; parity or security experiments should explicitly

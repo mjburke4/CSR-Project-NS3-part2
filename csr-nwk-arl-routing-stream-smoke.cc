@@ -371,6 +371,7 @@ RunIndependentHopTransmissionScenario ()
   hop->SetMac (&device->GetMac ());
   nwk->SetNodeId (sourceId);
   nwk->SetHop (hop);
+  nwk->SetAutomaticRoutePropagationEnabled (false);
   device->GetMac ().SetRxCallback (
     MakeCallback (&CsrHopLayer::ReceiveFromMac, hop));
 
@@ -395,6 +396,10 @@ RunIndependentHopTransmissionScenario ()
         1,
         {neighborId, destination});
     }
+
+  // Consume the same-time routesProcess() pass that owns these changes.
+  // A snapshot started later includes the now-stable selected routes.
+  Simulator::Run ();
 
   nwk->StartReliableRoutingSnapshot (neighborId);
 

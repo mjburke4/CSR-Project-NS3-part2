@@ -130,6 +130,37 @@ MakeRoutingInfo (CsrNodeId nodeId)
   return packet;
 }
 
+Ptr<Packet>
+MakeSelfRoutingUpdate (CsrNodeId nodeId,
+                       CsrNodeType capability,
+                       uint32_t routingSequence)
+{
+  CsrHelloHeader update;
+  update.SetNodeId (nodeId);
+  update.SetHelloSeq (2);
+  update.SetNodeType (capability);
+  update.SetSpeedKey (8);
+  update.SetRxPowerDbmX10 (-1050);
+  update.SetActiveNodes (1);
+  update.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
+  update.SetRoutingSequence (routingSequence);
+  update.SetRoutingSection (0);
+  update.SetRoutingTotalSections (1);
+  update.SetRoutingOperation (CsrRoutingOperation::Update);
+  Require (update.AddAdvertisedRoute (
+             nodeId,
+             0,
+             0,
+             0,
+             static_cast<uint8_t> (capability),
+             {}),
+           "failed to build source-owned self UPDATE");
+
+  Ptr<Packet> packet = Create<Packet> ();
+  packet->AddHeader (update);
+  return packet;
+}
+
 void
 RunQueueOrderingAndTicScenario ()
 {
@@ -242,13 +273,29 @@ RunDirectCapabilityScenario ()
     70.0,
     20.0);
   nwk->ProcessHello (
+    MakeSelfRoutingUpdate (
+      ALTERNATE_NODE,
+      CsrNodeType::Routable,
+      1),
+    ALTERNATE_NODE,
+    70.0,
+    20.0);
+  nwk->ProcessHello (
     MakeHello (DESTINATION_NODE, CsrNodeType::Routable),
+    DESTINATION_NODE,
+    70.0,
+    20.0);
+  nwk->ProcessHello (
+    MakeSelfRoutingUpdate (
+      DESTINATION_NODE,
+      CsrNodeType::Routable,
+      1),
     DESTINATION_NODE,
     70.0,
     20.0);
 
   // Learn a conflicting reverse route to node 2 through node 3.  A direct
-  // Routable destination must still win when its HELLO capability is kept.
+  // Routable destination must still win after its source-owned self UPDATE.
   Ptr<Packet> reverseTraffic = Create<Packet> (8);
   CsrNetHeader reverseHeader (DESTINATION_NODE, SOURCE_NODE, 0);
   reverseTraffic->AddHeader (reverseHeader);
@@ -260,7 +307,7 @@ RunDirectCapabilityScenario ()
   Simulator::Run ();
 
   Require (hop->GetOutstandingDataCount (DESTINATION_NODE) == 1,
-           "HELLO capability was lost and direct Routable path was bypassed");
+           "self-advertised capability was lost and direct path was bypassed");
   Require (hop->GetOutstandingDataCount (ALTERNATE_NODE) == 0,
            "reverse route incorrectly overrode a direct Routable path");
 
