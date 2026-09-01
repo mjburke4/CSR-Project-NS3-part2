@@ -144,8 +144,13 @@ count is absent.
   trips; wrong-key, wrong-type, tamper, malformed, and replay rejection;
   authentication-before-ACK/delivery; exact-once AppNeighborcast; and live
   over-air sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
-- The complete build and regression pass: 33 focused smoke targets,
-  `csr-mac-demo-split`, and the imported-scenario runner (35/35).
+- `csr-nwk-residual-routing-retry-smoke.cc` checks that NWK retains the exact
+  grouped plaintext owner while HOP retries the original multicast, removes
+  one destination per ACK, defers final-NACK recovery to a later same-time
+  event, prunes inactive residuals, reuses unchanged routing bytes/metadata,
+  and assigns fresh HOP sequences only to the ordered residual group.
+- The complete build and regression pass: 34 focused smoke targets,
+  `csr-mac-demo-split`, and the imported-scenario runner (36/36).
 
 ## Deliberate boundary
 
@@ -168,8 +173,13 @@ same-time changed-route propagation is also source-exact through the NWK-to-HOP
 handoff when no routing-INFO mutation is pending, including destination/
 neighbor creation order, combined UPDATE/DELETE records, section splitting,
 ten-neighbor grouping, sequence advancement, and same-pass snapshot exclusion.
-Optional same-pass INFO coupling and retry ownership for partially acknowledged
-destination sets remain separate parity work.
+NWK-owned residual retry is now source-backed for those grouped automatic
+updates: partial ACKs mutate only NWK's retained destination set, HOP keeps its
+whole-frame retry ownership, and a final NACK schedules an exact-payload retry
+after HOP releases custody. The routes-library all-or-none buffer check is
+preserved behind a default-not-full seam because the supplied operational
+OPNET wrapper hardcodes `hopSecCheckBufferFull()` to return zero. Optional
+same-pass INFO coupling remains separate parity work.
 
 The default ns-3 key arrays are deterministic and non-secret so existing
 scenarios remain runnable; parity or security experiments should explicitly

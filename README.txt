@@ -77,6 +77,12 @@ OPNET multidestination routing ACK parity test:
 3. Run: ./ns3 run csr-hop-multidest-routing-smoke
 4. Expected: PASS: OPNET multidestination routing ACK parity test
 
+OPNET NWK-owned residual routing retry parity test:
+1. Copy csr-nwk-residual-routing-retry-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-nwk-residual-routing-retry-smoke
+3. Run: ./ns3 run csr-nwk-residual-routing-retry-smoke
+4. Expected: PASS: NWK-owned residual routing retry
+
 OPNET preamble freshness and aggregate selection parity test:
 1. Copy csr-mac-preamble-selection-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-mac-preamble-selection-smoke

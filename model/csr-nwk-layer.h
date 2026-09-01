@@ -4,6 +4,7 @@
 #include "csr-hello-header.h"
 #include "csr-hop-layer.h"
 #include <cmath>
+#include <list>
 #include <set>
 #include <algorithm>
 #include <sstream>
@@ -503,6 +504,46 @@ public:
     Callback<void, std::vector<CsrNodeId>, Ptr<Packet>> observer)
   {
     m_automaticRoutingControlObserver = observer;
+  }
+
+  /**
+   * Install the routes.c hopSecCheckBufferFull() observation seam.
+   *
+   * The supplied OPNET br_nwk adapter always returns zero from that API, so
+   * the production default here is likewise "not full". Focused tests can
+   * expose the latent routes.c all-or-none retry branch without conflating it
+   * with DATA flow control or ns-3's global resend-queue limit.
+   */
+  void
+  SetRoutingControlBufferFullCallbackForTest (
+    Callback<bool, CsrNodeId, uint8_t> callback)
+  {
+    m_routingControlBufferFullCallback = callback;
+    ScheduleOwnedRoutingControlRetry ();
+  }
+
+  uint32_t
+  GetOwnedRoutingControlCountForTest () const
+  {
+    return static_cast<uint32_t> (
+      m_ownedRoutingControls.size ());
+  }
+
+  std::vector<CsrNodeId>
+  GetFirstOwnedRoutingControlResidualForTest () const
+  {
+    if (m_ownedRoutingControls.empty ())
+      {
+        return {};
+      }
+    return m_ownedRoutingControls.front ().remainingDestinations;
+  }
+
+  bool
+  IsFirstOwnedRoutingControlReadyForTest () const
+  {
+    return !m_ownedRoutingControls.empty () &&
+           m_ownedRoutingControls.front ().ready;
   }
 
   /** Exercise the routesRcvUnAuthedMsg() neighbor-creation path. */
@@ -1933,6 +1974,57 @@ private:
   SendGroupedAutomaticRouteChanges (
     const std::vector<CsrNodeId> &destinations);
 
+  struct OwnedRoutingControl
+  {
+    uint32_t routingSequence {0};
+    CsrRoutingOperation operation {CsrRoutingOperation::None};
+    uint8_t routingSection {0};
+    uint8_t routingTotalSections {1};
+
+    // HOP keeps retransmitting inFlightDestinations as one original frame.
+    // NWK independently removes successful destinations from remaining.
+    std::vector<CsrNodeId> inFlightDestinations;
+    std::vector<CsrNodeId> remainingDestinations;
+    Ptr<Packet> payload;
+    bool awaitingHopCompletion {true};
+    bool ready {false};
+  };
+
+  std::list<OwnedRoutingControl> m_ownedRoutingControls;
+  EventId m_ownedRoutingControlRetryEvent;
+
+  Callback<bool, CsrNodeId, uint8_t>
+    m_routingControlBufferFullCallback;
+
+  // csr_api_system.h ARLPktTypeRoutingUpdate. This is deliberately distinct
+  // from the routing byte-stream operation (UPDATE/DELETE/INFO/FLUSH).
+  static constexpr uint8_t ARL_ROUTING_UPDATE_PACKET_TYPE = 0x08;
+
+  void SendOwnedRoutingControl (
+    const std::vector<CsrNodeId> &destinations,
+    Ptr<Packet> payload);
+
+  void NoteOwnedRoutingControlSuccess (
+    CsrNodeId neighbor,
+    uint32_t routingSequence,
+    CsrRoutingOperation operation,
+    uint8_t routingSection,
+    uint8_t routingTotalSections,
+    bool lastOfInfo);
+
+  void NoteOwnedRoutingControlFailure (
+    const std::vector<CsrNodeId> &neighbors,
+    uint32_t routingSequence,
+    CsrRoutingOperation operation,
+    uint8_t routingSection,
+    uint8_t routingTotalSections,
+    bool lastOfInfo);
+
+  void ScheduleOwnedRoutingControlRetry ();
+  void ProcessOwnedRoutingControlRetries ();
+  bool IsOwnedRoutingControlDestinationActive (
+    CsrNodeId destination) const;
+
   struct ReverseRouteEntry
   {
     CsrNodeId netSrc {CSR_BROADCAST_ID};
@@ -2785,6 +2877,14 @@ public:
 	              << (lastOfInfo ? 1 : 0)
 	              << std::endl;
 
+    NoteOwnedRoutingControlSuccess (
+      neighbor,
+      routingSequence,
+      operation,
+      routingSection,
+      routingTotalSections,
+      lastOfInfo);
+
     // A partial destination ACK is progress for this section's grouped HOP
     // transaction.  Only lastOfInfo means every destination for the section
     // has ACKed.
@@ -2905,10 +3005,17 @@ public:
               << (lastOfInfo ? 1 : 0)
               << std::endl;
 
-    // For now, leave recovery to the existing
-    // snapshot watchdog. The next parity step can
-    // use this callback to retry the exact failed
-    // INFO/UPDATE/FLUSH immediately.
+    NoteOwnedRoutingControlFailure (
+      neighbors,
+      routingSequence,
+      operation,
+      routingSection,
+      routingTotalSections,
+      lastOfInfo);
+
+    // Unowned snapshot/request traffic retains its existing watchdog state.
+    // This bounded parity path owns only grouped automatic updates that can
+    // receive partial multicast completion.
   }
 
   const char*
@@ -9915,6 +10022,288 @@ CsrNetLayer::ClearProcessedRouteChangeCycle ()
 }
 
 void
+CsrNetLayer::SendOwnedRoutingControl (
+  const std::vector<CsrNodeId> &destinations,
+  Ptr<Packet> payload)
+{
+  if (m_hop == nullptr ||
+      payload == nullptr ||
+      destinations.empty ())
+    {
+      return;
+    }
+
+  Ptr<Packet> metadataPacket = payload->Copy ();
+  CsrHelloHeader metadata;
+  NS_ABORT_MSG_IF (
+    metadataPacket->RemoveHeader (metadata) == 0,
+    "owned routing control requires routing metadata");
+
+  OwnedRoutingControl owner;
+  owner.routingSequence = metadata.GetRoutingSequence ();
+  owner.operation = metadata.GetRoutingOperation ();
+  owner.routingSection = metadata.GetRoutingSection ();
+  owner.routingTotalSections = metadata.GetRoutingTotalSections ();
+  owner.inFlightDestinations = destinations;
+  owner.remainingDestinations = destinations;
+  owner.payload = payload->Copy ();
+  owner.awaitingHopCompletion = true;
+  owner.ready = false;
+
+  m_ownedRoutingControls.push_back (owner);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Retained grouped routing-control owner"
+            << " routingSequence=" << owner.routingSequence
+            << " operation=" << RoutingOperationName (owner.operation)
+            << " section=" << unsigned (owner.routingSection)
+            << "/" << unsigned (owner.routingTotalSections)
+            << " destinations=" << destinations.size ()
+            << " owners=" << m_ownedRoutingControls.size ()
+            << std::endl;
+
+  if (!m_automaticRoutingControlObserver.IsNull ())
+    {
+      m_automaticRoutingControlObserver (
+        destinations,
+        payload->Copy ());
+    }
+
+  m_hop->SendRoutingControl (
+    destinations,
+    payload->Copy ());
+}
+
+void
+CsrNetLayer::NoteOwnedRoutingControlSuccess (
+  CsrNodeId neighbor,
+  uint32_t routingSequence,
+  CsrRoutingOperation operation,
+  uint8_t routingSection,
+  uint8_t routingTotalSections,
+  bool lastOfInfo)
+{
+  for (auto it = m_ownedRoutingControls.begin ();
+       it != m_ownedRoutingControls.end ();
+       ++it)
+    {
+      OwnedRoutingControl &owner = *it;
+      if (!owner.awaitingHopCompletion ||
+          owner.routingSequence != routingSequence ||
+          owner.operation != operation ||
+          owner.routingSection != routingSection ||
+          owner.routingTotalSections != routingTotalSections ||
+          std::find (owner.inFlightDestinations.begin (),
+                     owner.inFlightDestinations.end (),
+                     neighbor) == owner.inFlightDestinations.end ())
+        {
+          continue;
+        }
+
+      auto remaining =
+        std::find (owner.remainingDestinations.begin (),
+                   owner.remainingDestinations.end (),
+                   neighbor);
+      bool removed = remaining != owner.remainingDestinations.end ();
+      if (removed)
+        {
+          owner.remainingDestinations.erase (remaining);
+        }
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Updated grouped routing-control residual"
+                << " ACKed=" << neighbor
+                << " removed=" << (removed ? 1 : 0)
+                << " lastOfInfo=" << (lastOfInfo ? 1 : 0)
+                << " remaining="
+                << owner.remainingDestinations.size ()
+                << std::endl;
+
+      if (lastOfInfo && owner.remainingDestinations.empty ())
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Released completed grouped routing-control owner"
+                    << " routingSequence=" << routingSequence
+                    << " section=" << unsigned (routingSection)
+                    << std::endl;
+          m_ownedRoutingControls.erase (it);
+        }
+      return;
+    }
+}
+
+void
+CsrNetLayer::NoteOwnedRoutingControlFailure (
+  const std::vector<CsrNodeId> &neighbors,
+  uint32_t routingSequence,
+  CsrRoutingOperation operation,
+  uint8_t routingSection,
+  uint8_t routingTotalSections,
+  bool lastOfInfo)
+{
+  if (!lastOfInfo)
+    {
+      return;
+    }
+
+  for (OwnedRoutingControl &owner : m_ownedRoutingControls)
+    {
+      if (!owner.awaitingHopCompletion ||
+          owner.routingSequence != routingSequence ||
+          owner.operation != operation ||
+          owner.routingSection != routingSection ||
+          owner.routingTotalSections != routingTotalSections ||
+          owner.inFlightDestinations != neighbors)
+        {
+          continue;
+        }
+
+      owner.awaitingHopCompletion = false;
+      owner.ready = true;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Grouped routing-control owner ready for residual retry"
+                << " routingSequence=" << routingSequence
+                << " section=" << unsigned (routingSection)
+                << " originalAttempt=" << neighbors.size ()
+                << " residual=" << owner.remainingDestinations.size ()
+                << std::endl;
+
+      // HOP invokes this callback before erasing its resend entry.  The
+      // legacy Sent_Info stream and routing semaphore put routesProcess() in
+      // a later same-time event, so never re-enter HOP synchronously here.
+      ScheduleOwnedRoutingControlRetry ();
+      return;
+    }
+}
+
+void
+CsrNetLayer::ScheduleOwnedRoutingControlRetry ()
+{
+  if (m_ownedRoutingControlRetryEvent.IsPending ())
+    {
+      return;
+    }
+
+  bool ready = std::any_of (
+    m_ownedRoutingControls.begin (),
+    m_ownedRoutingControls.end (),
+    [] (const OwnedRoutingControl &owner) {
+      return owner.ready && !owner.awaitingHopCompletion;
+    });
+  if (!ready)
+    {
+      return;
+    }
+
+  m_ownedRoutingControlRetryEvent =
+    Simulator::ScheduleNow (
+      &CsrNetLayer::ProcessOwnedRoutingControlRetries,
+      this);
+}
+
+bool
+CsrNetLayer::IsOwnedRoutingControlDestinationActive (
+  CsrNodeId destination) const
+{
+  auto neighbor = m_nwkNeighbors.find (destination);
+  return neighbor != m_nwkNeighbors.end () &&
+         neighbor->second.arlActive &&
+         !neighbor->second.stale &&
+         IsArlNeighborUsable (destination);
+}
+
+void
+CsrNetLayer::ProcessOwnedRoutingControlRetries ()
+{
+  for (auto it = m_ownedRoutingControls.begin ();
+       it != m_ownedRoutingControls.end ();)
+    {
+      OwnedRoutingControl &owner = *it;
+      if (!owner.ready || owner.awaitingHopCompletion)
+        {
+          ++it;
+          continue;
+        }
+
+      owner.remainingDestinations.erase (
+        std::remove_if (
+          owner.remainingDestinations.begin (),
+          owner.remainingDestinations.end (),
+          [this] (CsrNodeId destination) {
+            return !IsOwnedRoutingControlDestinationActive (destination);
+          }),
+        owner.remainingDestinations.end ());
+
+      if (owner.remainingDestinations.empty ())
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Released grouped routing-control owner"
+                    << " after inactive residual pruning"
+                    << " routingSequence=" << owner.routingSequence
+                    << " section=" << unsigned (owner.routingSection)
+                    << std::endl;
+          it = m_ownedRoutingControls.erase (it);
+          continue;
+        }
+
+      bool bufferFull = false;
+      if (!m_routingControlBufferFullCallback.IsNull ())
+        {
+          for (CsrNodeId destination : owner.remainingDestinations)
+            {
+              if (m_routingControlBufferFullCallback (
+                    destination,
+                    ARL_ROUTING_UPDATE_PACKET_TYPE))
+                {
+                  bufferFull = true;
+                  break;
+                }
+            }
+        }
+
+      if (bufferFull || m_hop == nullptr)
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Deferred entire grouped routing-control residual"
+                    << " routingSequence=" << owner.routingSequence
+                    << " section=" << unsigned (owner.routingSection)
+                    << " destinations="
+                    << owner.remainingDestinations.size ()
+                    << " bufferFull=" << (bufferFull ? 1 : 0)
+                    << std::endl;
+          ++it;
+          continue;
+        }
+
+      owner.inFlightDestinations = owner.remainingDestinations;
+      owner.awaitingHopCompletion = true;
+      owner.ready = false;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Retrying grouped routing-control residual"
+                << " routingSequence=" << owner.routingSequence
+                << " operation=" << RoutingOperationName (owner.operation)
+                << " section=" << unsigned (owner.routingSection)
+                << "/" << unsigned (owner.routingTotalSections)
+                << " destinations=" << owner.inFlightDestinations.size ()
+                << std::endl;
+
+      if (!m_automaticRoutingControlObserver.IsNull ())
+        {
+          m_automaticRoutingControlObserver (
+            owner.inFlightDestinations,
+            owner.payload->Copy ());
+        }
+
+      m_hop->SendRoutingControl (
+        owner.inFlightDestinations,
+        owner.payload->Copy ());
+      ++it;
+    }
+}
+
+void
 CsrNetLayer::SendGroupedAutomaticRouteChanges (
   const std::vector<CsrNodeId> &destinations)
 {
@@ -9984,13 +10373,7 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
            payload != payloads.rend ();
            ++payload)
         {
-          if (!m_automaticRoutingControlObserver.IsNull ())
-            {
-              m_automaticRoutingControlObserver (
-                *group,
-                (*payload)->Copy ());
-            }
-          m_hop->SendRoutingControl (
+          SendOwnedRoutingControl (
             *group,
             (*payload)->Copy ());
         }
