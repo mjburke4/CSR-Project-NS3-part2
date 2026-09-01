@@ -1,6 +1,6 @@
 # OPNET aggregate comparison
 
-Updated: 2026-08-28
+Updated: 2026-09-01
 
 ## Purpose and evidence boundary
 
@@ -10,10 +10,10 @@ the packet/event comparator: bucketed output vectors can validate traffic,
 drop, delay, and queue statistics, but they cannot recover chronological MAC
 reservation or collision events that were not recorded by Modeler.
 
-The recovered archive contains 10 complete Modeler 17.1 `*.ov` files. The
-read-only extractor decodes 109 vectors and 10,900 buckets across those runs
-and cross-checks their labels and aggregation identities against paired
-`*.pb.m` definitions. Two additional partial fragments contain zero-length
+The selected recovered evidence set contains 11 complete Modeler 17.1 `*.ov`
+files. The read-only extractor decodes 127 vectors and 12,700 buckets across
+those runs and cross-checks their labels and aggregation identities against
+paired `*.pb.m` definitions. Two additional partial fragments contain zero-length
 vector records; `--strict` writes their diagnostic manifests and exits with
 status 3 without inventing samples.
 
@@ -58,6 +58,46 @@ exactly. A statistic expressed in seconds is therefore never numerically
 compared with a statistic expressed in milliseconds, nor is a bucket sum
 compared with a sample mean. Unknown values remain empty rather than being
 guessed.
+
+### Nested latency-result layout
+
+`CSR_Validation-2_Nodes_Latency-DES-1.ov` adds a source-observed nested
+metadata shape. The u32 after the description table is a declared metadata
+unit count, not a free format tag. The decoder requires it to equal
+`hierarchy_containers + statistic_groups + 2*statistics`; the recovered value
+is exactly 62 (`3 + 11 + 2*24`). Linked 0x22 hierarchy containers hold
+`Campus Network`, `node_2`, and `node_1`; their 0x23 statistic groups and every
+statistic link must end exactly at the decoded zero terminator.
+
+The file contains 18 canonical bucket aggregates with 100 12-second buckets
+and six per-node `All values` records. Only the aggregates are emitted to the
+canonical CSV. Each excluded record must independently have the exact
+`All values` metadata, marker 0x81, encoding/cookie/reserved fields, two-array
+extent, boundary sentinels, and a finite nondecreasing time axis from 0 to
+1,200 seconds. The paired probe definition provides 18 exact aggregate
+identities and three wildcard node identities that expand to the six records.
+Other archived 0x224 records use bucket aggregation and marker 0x82, so 0x224
+alone is never treated as evidence of an `All values` record.
+
+Formula-based metadata counts intentionally replace the earlier empirical
+count allowlist. Acceptance is still shape-gated: only the observed linked
+0x22/0x23 hierarchy, 0x124/0x224 statistic records, exact reserved fields,
+known details variants, ordered unique data offsets, and validated 0x81/0x82
+record forms pass. Unknown nesting depth, mixed ordering, aliases, malformed
+terminators, and unsupported aggregation/record combinations fail closed.
+Every supported complete 0x82 record in the recovered corpus declares exactly
+100 buckets, encodes count 101, starts at time zero, and has a positive
+execution duration; those are enforced before allocating bucket state. The
+latency result's largest 0x81 record encodes 11,019 entries, which is also the
+strict upper bound for this bounded decoder.
+
+The paired-probe scan is likewise source-bounded before retaining labels:
+15,123 bytes, 27 declared probes, 489 printable tagged strings, and 32 bytes
+per tagged string are the recovered corpus maxima. Metadata counts are checked
+incrementally against both their file declaration and the 113-unit corpus
+maximum. Reconstructed timestamps must remain finite, scope/name identities
+must be nonempty, and the 4e100 All-values end sentinel is rejected inside an
+aggregate sample payload.
 
 Modeler encodes an empty sample-mean bucket as the numeric sentinel `2e+100`.
 The extractor converts it to an empty `value`, preserves `raw_value=2e+100`,
@@ -219,10 +259,12 @@ named scenario as the same evidence.
 |  | `*-DES-1.ov` | `b643bee5c1d0260581a0135c0add5c87441bd98f70f66388fac0bf95096c39ee` |
 |  | `*.pb.m` | `2871b54d0c531198f8ff77b1aa2a3cc81da6f05814c9ca00e64ed6a544a6470f` |
 |  | `*.dev32.i1.nt.so` | `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` |
+| `CSR_Validation-2_Nodes_Latency` | `*-DES-1.ov` | `c9ebc87410b68780abac187a5164939cd95ffe5ba4a5a7e393012117d4235493` |
+|  | `*.pb.m` | `a43c81806e6216491cad831482d509481239934b5f3d8980df4b588fb6d9ff94` |
 
 ## Measured exact-tolerance results
 
-The three completed full-duration core-statistic comparisons align all 800
+The four completed full-duration core-statistic comparisons align all 800
 selected points in each case, with no missing or extra timestamps. They do not
 pass numeric parity:
 
@@ -240,6 +282,19 @@ pass numeric parity:
 |  | Traffic received | 1.9016667 packet/s | 2.2900000 packet/s | 20.4207% error vs OPNET mean |
 |  | End-to-end delay | 112.7480 s | 91.4031 s | 18.9315% error vs OPNET mean |
 |  | Application packet size | 1,536 bits | 1,536 bits | Exact in 95 measured buckets; 5 no-sample buckets |
+| `CSR_Validation-2_Nodes_Latency` | Traffic sent | 8.6366667 packet/s | 8.6708333 packet/s | 0.3956% high vs OPNET mean |
+|  | Traffic received | 8.6283333 packet/s | 8.6625000 packet/s | 0.3960% high vs OPNET mean |
+|  | End-to-end delay | 1.0508268 s | 1.0694113 s | 1.7686% high vs OPNET mean |
+|  | Application packet size | 4,736 bits | 4,736 bits | Exact in all 75 measured buckets |
+
+The 1,200-second latency run is a canonical workflow execution through the
+comparison stage, but it does not pass zero-tolerance numeric parity. It
+aligns all 800 selected bucket identities; 100 OPNET no-sample buckets are
+skipped, 700 numeric points are compared, and 517 differ. Packet-size values
+match in all 75 measured buckets. The runner records 45,000 application
+attempts, 10,405 admissions, 34,595 source-exact NSDP blocks, 10,395 matched
+deliveries, no unmatched delivery, and no packet-size mismatch. Thus the close
+headline means are aggregate evidence, not an exact bucket-level parity claim.
 
 These runs use the hash-bound historical application and MAC profiles, FIFO
 DSCP 0, source-ordered generator gates, and the common 0.988-second wake

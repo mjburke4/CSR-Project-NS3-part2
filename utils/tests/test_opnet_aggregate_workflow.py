@@ -1111,6 +1111,7 @@ class AggregateWorkflowTests(unittest.TestCase):
     def test_supported_mac_profiles_are_accepted(self) -> None:
         profiles = (
             "current-fine-free-slot",
+            "hist-2014-coarse-inclusive-no-avoid",
             "hist-2014-zero-based-rebuild-list",
             "hist-2015-fine-one-based-table-no-avoid",
             "hist-2014-next-tslot-modulo-probe",

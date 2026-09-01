@@ -35,6 +35,7 @@ APPLICATION_PROFILES = {
 }
 MAC_PROFILES = {
     "current-fine-free-slot",
+    "hist-2014-coarse-inclusive-no-avoid",
     "hist-2014-zero-based-rebuild-list",
     "hist-2015-fine-one-based-table-no-avoid",
     "hist-2014-next-tslot-modulo-probe",
