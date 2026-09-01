@@ -116,6 +116,8 @@ RecordAutomaticAck (Ptr<Packet> frame, double, double)
            "automatic routing ACK has no CSR header");
   Require (header.IsAck () && !header.HasAckWindow (),
            "multidestination routing receiver did not send an exact ACK");
+  Require (CsrGetOpnetWireSize (frame) == 30,
+           "Pairwise16 control ACK did not retain its 30-byte envelope");
 
   if (g_autoAckSequence == 0)
     {

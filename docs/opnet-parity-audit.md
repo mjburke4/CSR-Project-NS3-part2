@@ -94,9 +94,13 @@ completion.
   unacknowledged DATA, plus Pairwise32Encrypt for explicit encrypted one-hop
   DATA. HMAC binds the source, destination, packet type, length, and protected
   record; AES-CTR uses the legacy source/destination/count/key/sequence IV.
-- Source-exact Pairwise16 protection for the common ACK/DACK packet type 0.
-  The complete logical ACK body authenticates before cancellation, custody
-  mutation, or the delayed NWK wake, and the modeled envelope is 30 bytes.
+- Source-exact Pairwise16 policy for the common ACK/DACK packet type 0. The
+  ns-3 logical ACK body authenticates before cancellation, custody mutation,
+  or the delayed NWK wake. Pairwise16 exact control ACKs model 30 bytes;
+  cumulative DATA ACK/DACK feedback models 46 bytes because both
+  source-defined 64-bit receive registers are present. Exact production
+  protected-body byte mapping remains unverified without a legacy golden
+  ACK/DACK security record.
 - Live Group32Encrypt AppNeighborcast with a broadcast, non-ACKable envelope,
   authentication and replay checks before decrypt/delivery, and no HOP ACK.
 - Shared 12-bit group sequence/key-ID evolution, same-epoch one-way key

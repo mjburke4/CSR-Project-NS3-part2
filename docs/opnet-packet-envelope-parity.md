@@ -10,8 +10,11 @@ concatenation, PHY packet length, and payload-airtime calculations.
 
 OPNET packet fields fall into two different categories:
 
-- Fixed-bit fields contribute to `op_pk_total_size_get()` and appear in the
-  direct serializer.
+- Always-set fixed-bit fields contribute to `op_pk_total_size_get()` and
+  appear in the direct serializer. Optional fixed-bit fields contribute only
+  when set; the two `br_Ack` registers are carried by `CsrHeader` and charged
+  conditionally by the envelope model rather than added to the eight-byte
+  direct `br_Ack` base serializer.
 - Pointer, structure, annotation, and explicitly zero-bit fields carry
   simulator state but contribute no bits.  The ns-3 compatibility headers
   retain this state, while `CsrOpnetEnvelopeTag` prevents its storage bytes
@@ -25,7 +28,7 @@ model.
 
 | Format | Fixed modeled fields, in order | Fixed size |
 | --- | --- | ---: |
-| `br_Ack` | Source 24, Destination 24, Sequence 16 | 8 B |
+| `br_Ack` | Source 24, Destination 24, Sequence 16; optional ACK and DACK registers, 64 bits each | 8 B base; 24 B with both registers set |
 | `br_Hello` | Sequence 8, Node ID 24, Capability Number 8, Capability 8, Cost 16, Time Offset 32 | 12 B |
 | `br_Hop` | Source 24, destination count 8, Destination 24, Sequence 8, inherited Payload | 8 B + payload |
 | `br_Mac` | Global Time 32, Global Address 24, Global Cost 8, Tx Power 8, Rx Power 8, Active 8, Source 24, Payload Length 16, Type 8, inherited Payload | 17 B + payload |
@@ -53,7 +56,8 @@ The executable wrapper, not format names alone, determines the modeled size:
 | Logical traffic | OPNET envelope tree | Modeled fixed bytes before application or security content |
 | --- | --- | ---: |
 | DATA | `br_Mac -> br_Hop -> br_Network` | 32 B |
-| ACK or DACK | `br_Mac -> br_Ack` | 25 B before security |
+| Exact control ACK | `br_Mac -> br_Ack` | 25 B before security |
+| Cumulative DATA ACK or DACK | `br_Mac -> br_Ack` with both 64-bit registers set | 41 B before security |
 | Routed SNMP | `br_Mac -> br_Hop -> br_SNMP` | 31 B |
 | HELLO | `br_Hello` | 12 B |
 | ARL route control | `br_Routes` | 11 B |
@@ -70,7 +74,8 @@ wrapper:
 
 - GroupEstablish HELLO/Discover adds seven bytes.
 - Group16 HELLO adds five bytes.
-- Pairwise16 ACK/DACK adds five bytes to `br_Mac -> br_Ack`, for 30 bytes.
+- Pairwise16 adds five bytes to `br_Mac -> br_Ack`: exact control ACKs are
+  30 bytes, while cumulative DATA ACK/DACK feedback is 46 bytes.
 - KeyRequest and KeyUpdate add their exact seven- and 51-byte records to
   `br_Routes`.
 - Reliable Group16 routing control adds five security bytes plus actual ARL

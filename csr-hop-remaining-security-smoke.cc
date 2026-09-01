@@ -34,6 +34,7 @@ std::vector<std::vector<uint8_t>> g_livePayloads;
 
 std::vector<Time> g_ackWakeTimes;
 Ptr<Packet> g_capturedDack;
+uint32_t g_capturedDackPacketBits = 0;
 
 void
 Require (bool condition, const char *message)
@@ -671,7 +672,11 @@ CheckLiveOutboundDackWrapper ()
 
   CsrPerModelFn noErrors = [] (int, double, uint32_t) { return 0.0; };
   dackDevice->GetPhy ().SetPerModel (noErrors);
-  captureDevice->GetPhy ().SetPerModel (noErrors);
+  captureDevice->GetPhy ().SetPerModel (
+    [] (int, double, uint32_t packetBits) {
+      g_capturedDackPacketBits = packetBits;
+      return 0.0;
+    });
   dackDevice->GetPhy ().SetLinkDistanceMeters (
     DESTINATION,
     SOURCE,
@@ -715,6 +720,7 @@ CheckLiveOutboundDackWrapper ()
   dataFrame->AddHeader (dataHeader);
 
   g_capturedDack = nullptr;
+  g_capturedDackPacketBits = 0;
   dackHop->ReceiveFromMac (dataFrame, 60.0, 40.0);
   Require (dackDevice->GetMac ().GetAckQueuedFrameCount () == 1,
            "live DACK producer did not enqueue one ACK-class frame");
@@ -723,8 +729,13 @@ CheckLiveOutboundDackWrapper ()
   Simulator::Run ();
   Require (g_capturedDack != nullptr,
            "live DACK frame was not transmitted to the capture peer");
-  Require (CsrGetOpnetWireSize (g_capturedDack) == 30,
-           "Pairwise16 ACK/DACK did not model 25 + 5 bytes");
+  Require (CsrGetOpnetWireSize (g_capturedDack) == 46,
+           "Pairwise16 cumulative DACK did not model 41 + 5 bytes");
+  uint32_t shortPacketBits = 104 + 48 + 46 * 8 + 32;
+  uint32_t longPacketBits = 7888 + 48 + 46 * 8 + 32;
+  Require (g_capturedDackPacketBits == shortPacketBits ||
+             g_capturedDackPacketBits == longPacketBits,
+           "PHY did not charge the 46-byte DACK to packet bits");
 
   Ptr<Packet> securedRecord = g_capturedDack->Copy ();
   CsrHeader outer;
