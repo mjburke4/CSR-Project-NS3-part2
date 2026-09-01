@@ -790,15 +790,132 @@ def _load_and_validate_ns3_provenance(
         raise WorkflowError(
             "ns-3 delay-matching counts are malformed", stage="aggregate_ns3"
         )
-    non_exact = {
+    source_exact_method = "source_exact_dack_retry_duplicate"
+    unsupported = {
         method: count
         for method, count in methods.items()
-        if method != "exact_sequence" and count != 0
+        if method not in {"exact_sequence", source_exact_method} and count != 0
     }
     exact_count = methods.get("exact_sequence", 0)
-    if non_exact or exact_count != matched_count:
+    duplicate_count = methods.get(source_exact_method, 0)
+    if (
+        unsupported
+        or not isinstance(exact_count, int)
+        or isinstance(exact_count, bool)
+        or exact_count < 0
+        or not isinstance(duplicate_count, int)
+        or isinstance(duplicate_count, bool)
+        or duplicate_count < 0
+        or exact_count + duplicate_count != matched_count
+    ):
         raise WorkflowError(
-            "workflow-generated trace used non-exact delay matching",
+            "workflow-generated trace used unsupported delay matching",
+            stage="aggregate_ns3",
+        )
+    duplicate_evidence = provenance.get("source_exact_dack_retry_duplicates")
+    if not isinstance(duplicate_evidence, dict):
+        raise WorkflowError(
+            "ns-3 aggregate provenance lacks DACK-retry duplicate evidence",
+            stage="aggregate_ns3",
+        )
+    proof_count = duplicate_evidence.get("repeated_feedback_proof_count")
+    evidence_matched_count = duplicate_evidence.get(
+        "matched_duplicate_delivery_count"
+    )
+    unused_proof_count = duplicate_evidence.get("unused_proof_count")
+    lineages = duplicate_evidence.get("lineages")
+    if (
+        not isinstance(proof_count, int)
+        or isinstance(proof_count, bool)
+        or proof_count < 0
+        or not isinstance(evidence_matched_count, int)
+        or isinstance(evidence_matched_count, bool)
+        or evidence_matched_count != duplicate_count
+        or not isinstance(unused_proof_count, int)
+        or isinstance(unused_proof_count, bool)
+        or unused_proof_count < 0
+        or proof_count != duplicate_count + unused_proof_count
+        or not isinstance(lineages, list)
+    ):
+        raise WorkflowError(
+            "ns-3 DACK-retry duplicate evidence is inconsistent",
+            stage="aggregate_ns3",
+        )
+    lineage_budget = 0
+    lineage_identities: set[tuple[str, ...]] = set()
+    evidence_event_indexes: set[int] = set()
+    identity_fields = (
+        "src",
+        "dst",
+        "sequence",
+        "relay",
+        "ingress_peer",
+        "hop_sequence",
+    )
+    for lineage in lineages:
+        if not isinstance(lineage, dict):
+            raise WorkflowError(
+                "ns-3 DACK-retry duplicate lineage is malformed",
+                stage="aggregate_ns3",
+            )
+        identity = tuple(lineage.get(field) for field in identity_fields)
+        qualifying = lineage.get("qualifying_feedback_count")
+        dack_count = lineage.get("dack_feedback_count")
+        budget = lineage.get("proven_extra_delivery_budget")
+        pairs = lineage.get("source_ordered_pairs")
+        if (
+            any(not isinstance(value, str) or not value.isdigit() for value in identity)
+            or identity in lineage_identities
+            or not isinstance(qualifying, int)
+            or isinstance(qualifying, bool)
+            or qualifying < 2
+            or not isinstance(dack_count, int)
+            or isinstance(dack_count, bool)
+            or dack_count < 1
+            or dack_count > qualifying
+            or not isinstance(budget, int)
+            or isinstance(budget, bool)
+            or budget != qualifying - 1
+            or dack_count not in {qualifying - 1, qualifying}
+            or not isinstance(pairs, list)
+            or len(pairs) != qualifying
+        ):
+            raise WorkflowError(
+                "ns-3 DACK-retry duplicate lineage is malformed",
+                stage="aggregate_ns3",
+            )
+        previous_feedback_index = -1
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                raise WorkflowError(
+                    "ns-3 DACK-retry duplicate lineage pair is malformed",
+                    stage="aggregate_ns3",
+                )
+            enqueue_index = pair.get("enqueue_event_index")
+            feedback_index = pair.get("feedback_event_index")
+            if (
+                not isinstance(enqueue_index, int)
+                or isinstance(enqueue_index, bool)
+                or enqueue_index < 0
+                or not isinstance(feedback_index, int)
+                or isinstance(feedback_index, bool)
+                or feedback_index <= enqueue_index
+                or enqueue_index <= previous_feedback_index
+                or enqueue_index in evidence_event_indexes
+                or feedback_index in evidence_event_indexes
+            ):
+                raise WorkflowError(
+                    "ns-3 DACK-retry duplicate lineage pair is malformed",
+                    stage="aggregate_ns3",
+                )
+            evidence_event_indexes.add(enqueue_index)
+            evidence_event_indexes.add(feedback_index)
+            previous_feedback_index = feedback_index
+        lineage_identities.add(identity)
+        lineage_budget += budget
+    if lineage_budget != proof_count:
+        raise WorkflowError(
+            "ns-3 DACK-retry duplicate lineage budget is inconsistent",
             stage="aggregate_ns3",
         )
     if unmatched_delivery_count != 0:
@@ -821,7 +938,8 @@ def _load_and_validate_ns3_provenance(
         or delivery_count != matched_count
     ):
         raise WorkflowError(
-            "ns-3 delivery count is not fully accounted for by exact matches",
+            "ns-3 delivery count is not fully accounted for by exact or "
+            "source-exact DACK-retry matches",
             stage="aggregate_ns3",
         )
     size_integrity = provenance.get("matched_packet_size_integrity")
@@ -846,7 +964,11 @@ def _load_and_validate_ns3_provenance(
         )
     return {
         "matched_count": matched_count,
-        "matched_by_method": {"exact_sequence": exact_count},
+        "matched_by_method": {
+            method: count for method, count in sorted(methods.items()) if count
+        },
+        "source_exact_dack_retry_duplicate_proof_count": proof_count,
+        "source_exact_dack_retry_duplicate_delivery_count": duplicate_count,
         "unmatched_delivery_count": unmatched_delivery_count,
         "matched_size_compared_count": size_compared_count,
         "matched_size_mismatch_count": size_mismatch_count,

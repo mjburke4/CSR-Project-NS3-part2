@@ -558,8 +558,9 @@ The retained pre-fix trace has SHA-256
 and contains the 138 pre-15/post-16 DACK decisions that motivated this change.
 Recovered `br_hop.pr.c` obtains the NSDP entry before sending to the separate
 NWK process and tests that pre-event count. ns-3 now decides before its
-synchronous NWK callback: 15 ACKs, 16 DACKs, duplicates ACK without a second
-enqueue, and first no-route receptions remain ACK-suppressed.
+synchronous NWK callback: 15 ACKs and 16 DACKs. ACK-marked duplicates ACK
+without a second enqueue; DACK-marked retries are re-enqueued and reassessed,
+and first no-route receptions remain ACK-suppressed.
 
 The campus blue-radio archive supplies no newer source revision: all 15 C
 files are byte-identical to the previously recovered copies. Its serialized
@@ -683,9 +684,14 @@ one-plus-four resend-limit removal. It now also exercises the real compact
 aggregate writer, direct DATA held until route availability, a forced two-hop
 path, and exact NWK queue-size and residence-delay samples at each forwarding
 node. It also proves the relay feedback boundary: pre-15/post-16 selects ACK,
-pre-16/post-17 selects DACK, a duplicate ACKs without another enqueue, and a
-first no-route reception remains ACK-suppressed. The strict packet-path
-analyzer validates delivered and in-flight event
+pre-16/post-17 selects DACK, an ACK-marked duplicate ACKs without another
+enqueue, a DACK-marked retry is re-enqueued and reassessed, and a first
+no-route reception remains ACK-suppressed. Legacy NWK performs no duplicate
+suppression after that retry and can deliver both relay copies under fresh
+onward HOP sequences. The strict packet-path analyzer currently treats that
+source-exact lost-DACK quirk as a duplicate-delivery failure; a three-hop
+lineage fixture and narrowly scoped analyzer classification remain open. For
+all other paths, the analyzer validates delivered and in-flight event
 grammars, route context, next-hop continuity, loops, and the end-to-end
 residence/transit decomposition.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and

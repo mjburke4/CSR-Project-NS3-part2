@@ -38,13 +38,27 @@ TRACE_COLUMNS = (
     "dst",
     "sequence",
     "size_bytes",
+    "success",
     "reason",
     "node",
     "statistic",
     "value",
+    "peer",
+    "next_hop",
+    "detail",
 )
 
-LEGACY_TRACE_COLUMNS = TRACE_COLUMNS[:-3]
+LEGACY_TRACE_COLUMNS = (
+    "schema",
+    "event_index",
+    "time_s",
+    "event",
+    "src",
+    "dst",
+    "sequence",
+    "size_bytes",
+    "reason",
+)
 
 
 def trace_row(index: int, time_s: float, event: str, **values: str) -> dict[str, str]:
@@ -57,10 +71,14 @@ def trace_row(index: int, time_s: float, event: str, **values: str) -> dict[str,
         "dst": "",
         "sequence": "",
         "size_bytes": "",
+        "success": "",
         "reason": "",
         "node": "",
         "statistic": "",
         "value": "",
+        "peer": "",
+        "next_hop": "",
+        "detail": "",
     }
     row.update(values)
     return row
@@ -751,6 +769,551 @@ class AggregateNs3TraceTests(unittest.TestCase):
                 provenance["delay_matching"]["matched_by_method"],
                 {"exact_sequence": 2},
             )
+
+    def test_reuses_send_time_only_for_lineage_proved_dack_retry(self) -> None:
+        feedback_details = {
+            "dack": (
+                "hop_sequence=9;first_reception=1;ackable=1;"
+                "nsdp_count_before=16;nsdp_count_after=17;"
+                "nsdp_state_valid=1;nsdp_limit=16"
+            ),
+            "ack": (
+                "hop_sequence=9;first_reception=1;ackable=1;"
+                "nsdp_count_before=3;nsdp_count_after=4;"
+                "nsdp_state_valid=1;nsdp_limit=16"
+            ),
+        }
+        for retry_reason in ("ack", "dack"):
+            with self.subTest(retry_reason=retry_reason), tempfile.TemporaryDirectory() as temporary:
+                trace = Path(temporary) / "trace.csv"
+                write_trace(
+                    trace,
+                    [
+                        trace_row(
+                            0,
+                            1,
+                            "app_send",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            size_bytes="10",
+                        ),
+                        trace_row(
+                            1,
+                            1.9,
+                            "nwk_enqueue",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            node="1",
+                            peer="0",
+                            reason="relay",
+                        ),
+                        trace_row(
+                            2,
+                            1.95,
+                            aggregate.STATISTIC_SAMPLE_EVENT,
+                            node="1",
+                            statistic=aggregate.MAC_ACK_QUEUE_SIZE,
+                            value="1",
+                        ),
+                        trace_row(
+                            3,
+                            2,
+                            "hop_feedback",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            node="1",
+                            peer="0",
+                            reason="dack",
+                            detail=feedback_details["dack"],
+                        ),
+                        trace_row(
+                            4,
+                            2.9,
+                            "nwk_enqueue",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            node="1",
+                            peer="0",
+                            reason="relay",
+                        ),
+                        trace_row(
+                            5,
+                            2.95,
+                            aggregate.STATISTIC_SAMPLE_EVENT,
+                            node="1",
+                            statistic=aggregate.MAC_ACK_QUEUE_SIZE,
+                            value="2",
+                        ),
+                        trace_row(
+                            6,
+                            3,
+                            "hop_feedback",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            node="1",
+                            peer="0",
+                            reason=retry_reason,
+                            detail=feedback_details[retry_reason],
+                        ),
+                        trace_row(
+                            7,
+                            4,
+                            "nwk_delivery",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            size_bytes="10",
+                        ),
+                        trace_row(
+                            8,
+                            6,
+                            "nwk_delivery",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            size_bytes="10",
+                        ),
+                    ],
+                )
+
+                rows, provenance = aggregate.derive_series(
+                    trace, "dack-retry", 10.0, 10.0
+                )
+                values = {
+                    row["statistic"]: row["value"]
+                    for row in rows
+                    if row["value_status"] == "observed"
+                }
+
+                self.assertEqual(values[aggregate.RECEIVED_PACKETS], "2")
+                self.assertEqual(values[aggregate.END_TO_END_DELAY], "4")
+                self.assertEqual(
+                    provenance["delay_matching"]["matched_by_method"],
+                    {
+                        "exact_sequence": 1,
+                        aggregate.SOURCE_EXACT_DACK_RETRY_METHOD: 1,
+                    },
+                )
+                self.assertEqual(
+                    provenance["delay_matching"]["unmatched_delivery_count"], 0
+                )
+                evidence = provenance["source_exact_dack_retry_duplicates"]
+                self.assertEqual(evidence["repeated_feedback_proof_count"], 1)
+                self.assertEqual(evidence["matched_duplicate_delivery_count"], 1)
+                self.assertEqual(evidence["unused_proof_count"], 0)
+                self.assertEqual(
+                    evidence["lineages"][0]["source_ordered_pairs"],
+                    [
+                        {"enqueue_event_index": 1, "feedback_event_index": 3},
+                        {"enqueue_event_index": 4, "feedback_event_index": 6},
+                    ],
+                )
+
+    def test_repeated_ack_or_changed_lineage_does_not_prove_duplicate(self) -> None:
+        ack_detail = (
+            "hop_sequence=9;first_reception=1;ackable=1;"
+            "nsdp_count_before=3;nsdp_count_after=4;"
+            "nsdp_state_valid=1;nsdp_limit=16"
+        )
+        for label, second_values in (
+            ("ordinary-ack", {}),
+            ("changed-relay", {"node": "8"}),
+            ("changed-peer", {"peer": "8"}),
+            (
+                "changed-hop-sequence",
+                {"detail": ack_detail.replace("hop_sequence=9", "hop_sequence=10")},
+            ),
+            (
+                "invalid-nsdp-transition",
+                {"detail": ack_detail.replace("nsdp_count_after=4", "nsdp_count_after=3")},
+            ),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                trace = Path(temporary) / "trace.csv"
+                first_reason = "ack" if label == "ordinary-ack" else "dack"
+                first_detail = (
+                    ack_detail
+                    if first_reason == "ack"
+                    else ack_detail.replace(
+                        "nsdp_count_before=3;nsdp_count_after=4",
+                        "nsdp_count_before=16;nsdp_count_after=17",
+                    )
+                )
+                second = {
+                    "src": "0",
+                    "dst": "2",
+                    "sequence": "77",
+                    "node": "1",
+                    "peer": "0",
+                    "reason": "ack",
+                    "detail": ack_detail,
+                }
+                second.update(second_values)
+                write_trace(
+                    trace,
+                    [
+                        trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                        trace_row(
+                            1,
+                            2,
+                            "hop_feedback",
+                            src="0",
+                            dst="2",
+                            sequence="77",
+                            node="1",
+                            peer="0",
+                            reason=first_reason,
+                            detail=first_detail,
+                        ),
+                        trace_row(2, 3, "hop_feedback", **second),
+                        trace_row(3, 4, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                        trace_row(4, 6, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                    ],
+                )
+
+                _, provenance = aggregate.derive_series(
+                    trace, "unproved-duplicate", 10.0, 10.0
+                )
+
+                self.assertEqual(
+                    provenance["delay_matching"]["matched_by_method"],
+                    {"exact_sequence": 1},
+                )
+                self.assertEqual(
+                    provenance["delay_matching"]["unmatched_delivery_count"], 1
+                )
+                self.assertEqual(
+                    provenance["source_exact_dack_retry_duplicates"][
+                        "repeated_feedback_proof_count"
+                    ],
+                    0,
+                )
+
+    def test_ordinary_duplicate_is_unmatched_and_missing_feedback_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                    trace_row(1, 4, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                    trace_row(2, 6, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                ],
+            )
+
+            _, provenance = aggregate.derive_series(
+                trace, "ordinary-duplicate", 10.0, 10.0
+            )
+
+            self.assertEqual(
+                provenance["delay_matching"]["unmatched_delivery_count"], 1
+            )
+            self.assertEqual(
+                provenance["source_exact_dack_retry_duplicates"][
+                    "repeated_feedback_proof_count"
+                ],
+                0,
+            )
+
+            write_trace(
+                trace,
+                [
+                    trace_row(
+                        0,
+                        1,
+                        "hop_feedback",
+                        src="0",
+                        dst="2",
+                        sequence="77",
+                        node="1",
+                        peer="0",
+                        reason="dack",
+                        detail="",
+                    )
+                ],
+            )
+            with self.assertRaisesRegex(
+                aggregate.TraceAggregationError,
+                "hop_feedback DACK requires detail",
+            ):
+                aggregate.derive_series(trace, "missing-detail", 10.0, 10.0)
+
+    def test_rejects_reused_exact_application_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                    trace_row(1, 2, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                    trace_row(2, 3, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                ],
+            )
+
+            with self.assertRaisesRegex(
+                aggregate.TraceAggregationError,
+                "reused application sequence",
+            ):
+                aggregate.derive_series(trace, "reused-key", 10.0, 10.0)
+
+    def test_unpaired_or_failed_feedback_invalidates_open_dack_lineage(self) -> None:
+        dack_detail = (
+            "hop_sequence=9;first_reception=1;ackable=1;"
+            "nsdp_count_before=16;nsdp_count_after=17;"
+            "nsdp_state_valid=1;nsdp_limit=16"
+        )
+        ack_detail = (
+            "hop_sequence=9;first_reception=1;ackable=1;"
+            "nsdp_count_before=3;nsdp_count_after=4;"
+            "nsdp_state_valid=1;nsdp_limit=16"
+        )
+        for label, include_enqueue, feedback_values in (
+            ("missing-enqueue", False, {}),
+            (
+                "wrong-limit",
+                True,
+                {"detail": ack_detail.replace("nsdp_limit=16", "nsdp_limit=15")},
+            ),
+            ("failed-feedback", True, {"success": "0"}),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                trace = Path(temporary) / "trace.csv"
+                rows = [
+                    trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                    trace_row(1, 2, "nwk_enqueue", src="0", dst="2", sequence="77", node="1", peer="0", reason="relay"),
+                    trace_row(2, 2.1, "hop_feedback", src="0", dst="2", sequence="77", node="1", peer="0", reason="dack", detail=dack_detail),
+                ]
+                index = 3
+                if include_enqueue:
+                    rows.append(
+                        trace_row(index, 3, "nwk_enqueue", src="0", dst="2", sequence="77", node="1", peer="0", reason="relay")
+                    )
+                    index += 1
+                invalid_feedback = {
+                    "src": "0",
+                    "dst": "2",
+                    "sequence": "77",
+                    "node": "1",
+                    "peer": "0",
+                    "reason": "ack",
+                    "detail": ack_detail,
+                }
+                invalid_feedback.update(feedback_values)
+                rows.extend(
+                    [
+                        trace_row(index, 3.1, "hop_feedback", **invalid_feedback),
+                        trace_row(index + 1, 4, "nwk_enqueue", src="0", dst="2", sequence="77", node="1", peer="0", reason="relay"),
+                        trace_row(index + 2, 4.1, "hop_feedback", src="0", dst="2", sequence="77", node="1", peer="0", reason="dack", detail=dack_detail),
+                        trace_row(index + 3, 5, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                        trace_row(index + 4, 6, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                    ]
+                )
+                write_trace(trace, rows)
+
+                _, provenance = aggregate.derive_series(
+                    trace, "invalidated-lineage", 10.0, 10.0
+                )
+
+                self.assertEqual(
+                    provenance["source_exact_dack_retry_duplicates"]
+                    ["repeated_feedback_proof_count"],
+                    0,
+                )
+                self.assertEqual(
+                    provenance["delay_matching"]["unmatched_delivery_count"], 1
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                    trace_row(1, 2, "nwk_enqueue", src="0", dst="2", sequence="77", node="1", peer="0", reason="relay"),
+                    trace_row(2, 2.1, "hop_feedback", src="0", dst="2", sequence="77", node="1", peer="0", reason="dack", detail=dack_detail),
+                    trace_row(3, 3, "nwk_enqueue", src="0", dst="2", sequence="77", node="1", peer="0", reason="relay"),
+                    trace_row(4, 3.1, "hop_feedback", src="0", dst="2", sequence="77", node="1", peer="0", reason="ack", success="0", detail=""),
+                ],
+            )
+
+            with self.assertRaisesRegex(
+                aggregate.TraceAggregationError,
+                "hop_feedback ACK requires detail",
+            ):
+                aggregate.derive_series(
+                    trace, "failed-empty-feedback", 10.0, 10.0
+                )
+
+    def test_ack_closes_retry_lineage_and_tagless_duplicate_is_ignored(self) -> None:
+        dack_detail = (
+            "hop_sequence=9;first_reception=1;ackable=1;"
+            "nsdp_count_before=16;nsdp_count_after=17;"
+            "nsdp_state_valid=1;nsdp_limit=16"
+        )
+        ack_detail = (
+            "hop_sequence=9;first_reception=1;ackable=1;"
+            "nsdp_count_before=3;nsdp_count_after=4;"
+            "nsdp_state_valid=1;nsdp_limit=16"
+        )
+        for reasons, expected_proofs in (
+            (("dack", "ack", "dack"), 1),
+            (("ack", "dack", "ack"), 0),
+        ):
+            with self.subTest(reasons=reasons), tempfile.TemporaryDirectory() as temporary:
+                trace = Path(temporary) / "trace.csv"
+                rows = [
+                    trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10")
+                ]
+                index = 1
+                for offset, reason in enumerate(reasons):
+                    rows.extend(
+                        [
+                            trace_row(
+                                index,
+                                2 + offset,
+                                "nwk_enqueue",
+                                src="0",
+                                dst="2",
+                                sequence="77",
+                                node="1",
+                                peer="0",
+                                reason="relay",
+                            ),
+                            trace_row(
+                                index + 1,
+                                2.1 + offset,
+                                "hop_feedback",
+                                src="0",
+                                dst="2",
+                                sequence="77",
+                                node="1",
+                                peer="0",
+                                reason=reason,
+                                detail=dack_detail if reason == "dack" else ack_detail,
+                            ),
+                        ]
+                    )
+                    index += 2
+                rows.extend(
+                    [
+                        trace_row(index, 6, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                        trace_row(index + 1, 7, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                        trace_row(index + 2, 8, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                    ]
+                )
+                write_trace(trace, rows)
+
+                _, provenance = aggregate.derive_series(
+                    trace, "closed-lineage", 10.0, 10.0
+                )
+
+                self.assertEqual(
+                    provenance["source_exact_dack_retry_duplicates"]
+                    ["repeated_feedback_proof_count"],
+                    expected_proofs,
+                )
+                self.assertEqual(
+                    provenance["delay_matching"]["unmatched_delivery_count"],
+                    2 - expected_proofs,
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(
+                trace,
+                [
+                    trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                    trace_row(
+                        1,
+                        2,
+                        "hop_feedback",
+                        reason="ack",
+                        detail=(
+                            "hop_sequence=9;first_reception=0;ackable=1;"
+                            "nsdp_count_before=0;nsdp_count_after=0;"
+                            "nsdp_state_valid=0;nsdp_limit=16"
+                        ),
+                    ),
+                    trace_row(2, 3, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                ],
+            )
+            _, provenance = aggregate.derive_series(
+                trace, "tagless-ack-duplicate", 10.0, 10.0
+            )
+            self.assertEqual(
+                provenance["delay_matching"]["matched_by_method"],
+                {"exact_sequence": 1},
+            )
+
+    def test_conflicting_enqueue_or_feedback_invalidates_pairing(self) -> None:
+        dack_detail = (
+            "hop_sequence=9;first_reception=1;ackable=1;"
+            "nsdp_count_before=16;nsdp_count_after=17;"
+            "nsdp_state_valid=1;nsdp_limit=16"
+        )
+        nonproof_detail = (
+            "hop_sequence=9;first_reception=0;ackable=1;"
+            "nsdp_count_before=0;nsdp_count_after=0;"
+            "nsdp_state_valid=0;nsdp_limit=16"
+        )
+        base_enqueue = {
+            "src": "0",
+            "dst": "2",
+            "sequence": "77",
+            "node": "1",
+            "peer": "0",
+            "reason": "relay",
+        }
+        for conflict in ("enqueue", "feedback"):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as temporary:
+                trace = Path(temporary) / "trace.csv"
+                conflicting_row = (
+                    trace_row(2, 2.1, "nwk_enqueue", **base_enqueue)
+                    if conflict == "enqueue"
+                    else trace_row(
+                        2,
+                        2.1,
+                        "hop_feedback",
+                        src="0",
+                        dst="2",
+                        sequence="77",
+                        node="1",
+                        peer="0",
+                        reason="ack",
+                        detail=nonproof_detail,
+                    )
+                )
+                write_trace(
+                    trace,
+                    [
+                        trace_row(0, 1, "app_send", src="0", dst="2", sequence="77", size_bytes="10"),
+                        trace_row(1, 2, "nwk_enqueue", **base_enqueue),
+                        conflicting_row,
+                        trace_row(3, 2.2, "hop_feedback", src="0", dst="2", sequence="77", node="1", peer="0", reason="dack", detail=dack_detail),
+                        trace_row(4, 3, "nwk_enqueue", **base_enqueue),
+                        trace_row(5, 3.1, "hop_feedback", src="0", dst="2", sequence="77", node="1", peer="0", reason="dack", detail=dack_detail),
+                        trace_row(6, 4, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                        trace_row(7, 5, "nwk_delivery", src="0", dst="2", sequence="77", size_bytes="10"),
+                    ],
+                )
+
+                _, provenance = aggregate.derive_series(
+                    trace, "conflicting-lineage", 10.0, 10.0
+                )
+
+                self.assertEqual(
+                    provenance["source_exact_dack_retry_duplicates"]
+                    ["repeated_feedback_proof_count"],
+                    0,
+                )
+                self.assertEqual(
+                    provenance["delay_matching"]["unmatched_delivery_count"], 1
+                )
 
     def test_marks_empty_delay_bucket_missing_instead_of_zero(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

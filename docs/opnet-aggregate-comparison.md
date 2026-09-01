@@ -148,6 +148,15 @@ if extraction is partial, vector time axes are inconsistent, scenario name,
 seed, or full duration differs, exact sequence correlation is lost, the runner
 fails, or the comparator finds a selected difference.
 
+“Exact sequence correlation” includes one source-exact exception: a duplicate
+delivery may reuse the original send timestamp only when compact `hop_feedback`
+rows prove that the same relay and ingress peer accepted the same incoming HOP
+sequence and application tag after an earlier DACK. The retry's later feedback
+may be ACK or DACK as congestion changes; each feedback consumes a prior,
+unconsumed matching relay enqueue (allowing intervening statistic samples),
+and ACK closes that lineage. Every unproved duplicate remains an unmatched
+delivery and stops the workflow.
+
 Manifest success is `selected_comparison_passed`, never a claim of whole-model
 OPNET parity. `evidence_scope` is
 `historical_bucket_aggregates_not_event_parity`. Exact tolerances, the full core
@@ -438,7 +447,41 @@ It contains 138 DACK decisions whose relay NSDP changes from 15 before enqueue
 to 16 afterward. The recovered `br_hop.pr.c` and the campus archive's embedded
 `br_hop.pr.m` both obtain the NSDP entry before sending to the NWK process and
 then test that pre-event count. ns-3 now preserves that ordering: pre-count 15
-ACKs, pre-count 16 DACKs, and duplicates do not enqueue again.
+ACKs and pre-count 16 DACKs.  ACK-marked duplicates do not enqueue again;
+DACK-marked retries remain eligible for a fresh NWK enqueue and ACK/DACK
+decision because the legacy duplicate test consults only the ACK register.
+
+A subsequent current-code 6,000-second trace at commit `05b6064` (SHA-256
+`0582f1928c93cae9eeebf0a06c573535944e2ed293e9ae53be5e0aeeefd7a3fd`)
+contained 9,400 sends and 8,680 delivery rows for 8,678 unique identities. The
+two repeated identities were `8->1/10446` at 2136.682911086 and
+2158.769911086 seconds, and `7->1/33041` at 4264.899911086 and
+4266.953911086 seconds; both also had repeated relay enqueues and forwards.
+That run stopped at aggregate validation because the older compact trace did
+not retain HOP feedback, so those two cases cannot be retrospectively promoted
+to source-exact duplicates. It remains noncertifying regression evidence. New
+compact traces retain only the needed feedback rows and still fail closed when
+the complete lineage is absent.
+
+The fresh instrumented rerun produced trace SHA-256
+`263e954e3ba1054787c5a32e7386f619d38ee789276c68d0900585ef3b0211f8`.
+Strict aggregation passed with 8,678 exact-sequence matches plus two
+`source_exact_dack_retry_duplicate` matches, zero unmatched delivery rows, and
+zero size mismatches across all 8,680 deliveries. Both proofs contain two
+source-ordered relay-enqueue/feedback pairs, two DACKs, the same ingress HOP
+sequence, and continuous source-valid NSDP increments at or above the DACK
+limit (`16->17->18` and `32->33->34`). The workflow then stopped only at the
+expected zero-tolerance aggregate comparison: 665 of 780 numeric points
+differed, with 20 missing delay-bucket values skipped. Across the 100 buckets,
+ns-3 averaged 1.566667 sent packets/s and 1.446667 received packets/s versus
+OPNET's 2.012000 and 1.901667; across the 95 observed delay buckets, ns-3
+averaged 192.361188 seconds versus OPNET's 112.748007 seconds. This is a
+current-code historical-aggregate checkpoint, not packet-level OPNET evidence.
+It is also diagnostic rather than build-certified: this manifest hashes the
+runner executable but not its dynamically loaded ns-3/CSR shared libraries or
+the already-running workflow wrapper. A later harness-hardening commit should
+record those behavior-bearing binaries before claiming a reproducible build
+identity.
 
 These counts are ns-3 source-ordered isolation evidence combined with a direct
 comparison to recovered OPNET source. They are not an OPNET event-trace

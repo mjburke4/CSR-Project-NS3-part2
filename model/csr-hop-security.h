@@ -155,7 +155,7 @@ struct CsrReceivedPairwiseMessage
   uint16_t keyId {0};
   uint16_t sequence {0};
   // AuthenticatedDuplicate retains its authenticated plaintext so packet-type
-  // policy can preserve idempotent ACK/DACK handling without re-authentication.
+  // policy can apply replay handling without re-authentication.
   std::vector<uint8_t> payload;
 };
 

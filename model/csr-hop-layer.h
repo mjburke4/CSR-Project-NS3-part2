@@ -753,6 +753,7 @@ private:
     bool flowControlTracked);
   void CheckResend ();
   ResendEntry* FindResendEntry (CsrNodeId dst, uint16_t seq);
+  bool IsDataDacked (CsrNodeId src, uint16_t seq) const;
   bool CheckReceivedSeq (CsrNodeId src, uint16_t seq, bool dataTraffic);
   void MarkDataDack (CsrNodeId src, uint16_t seq);
   static int32_t SeqDiff (uint16_t seq1, uint16_t seq2);
@@ -2275,11 +2276,32 @@ CsrHopLayer::HandleProtectedPairwiseData (
   if (received.status ==
         CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
     {
-      // A retransmission reuses both its HOP and pairwise sequences.  Repeat
-      // the ACK only after authenticating it, without delivering it twice.
+      // A retransmission reuses both its HOP and pairwise sequences.  The
+      // security replay result alone is not sufficient to reject a sequence
+      // that HOP previously DACKed: legacy check_rcvd_seq() consults only its
+      // ACK register, then re-enqueues such a retry for a fresh ACK/DACK
+      // decision.  Restrict that exception to a DACK-marked HOP sequence;
+      // an unmarked replay remains a duplicate without changing receive state.
+      bool firstReception = false;
+      Ptr<Packet> plaintext = Create<Packet> ();
+      if (header.IsAckable () &&
+          IsDataDacked (header.GetSrc (), header.GetSeq ()))
+        {
+          plaintext = Create<Packet> (received.payload.data (),
+                                       received.payload.size ());
+          CsrDifferentialAppTag appTag;
+          if (recordPacket->PeekPacketTag (appTag))
+            {
+              plaintext->AddPacketTag (appTag);
+            }
+          firstReception = CheckReceivedSeq (header.GetSrc (),
+                                              header.GetSeq (),
+                                              true);
+        }
+
       if (header.IsAckable ())
         {
-          HandleDataFrame (header, Create<Packet> (), false);
+          HandleDataFrame (header, plaintext, firstReception);
         }
       return true;
     }
@@ -3120,7 +3142,9 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     return;
   }
 
-  const bool traceFeedback = IsDifferentialAdmissionTraceEnabled ();
+  const bool traceFeedback =
+    IsDifferentialAdmissionTraceEnabled () ||
+    IsDifferentialTraceAggregateOnly ();
   CsrNetHeader feedbackNetworkHeader;
   const bool feedbackNetworkMetadataValid =
     traceFeedback &&
@@ -3130,7 +3154,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
   const bool feedbackAppSequenceValid =
     traceFeedback && payload->PeekPacketTag (feedbackAppTag);
   const bool feedbackNsdpStateValid =
-    IsDifferentialAdmissionTraceEnabled () &&
+    traceFeedback &&
     feedbackNetworkMetadataValid &&
     !m_nsdpObservationCb.IsNull ();
   const uint32_t feedbackNsdpBefore = feedbackNsdpStateValid
@@ -3174,7 +3198,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
         ";nsdp_state_valid=" +
           std::string (feedbackNsdpStateValid ? "1" : "0") +
         ";nsdp_limit=16";
-      WriteDifferentialAdmissionTrace (feedbackEvent);
+      WriteDifferentialHopFeedbackTrace (feedbackEvent);
     };
 
   // Legacy proc_mac_pk() records the sequence before consulting the route
@@ -3203,7 +3227,9 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
 
   // proc_mac_pk() looks up the NSDP entry before sending the packet to NWK.
   // The later NWK stream interrupt increments relay NSDP, so ACK/DACK uses
-  // the pre-enqueue count.  Duplicates skip this decision and get plain ACK.
+  // the pre-enqueue count.  ACK-marked duplicates skip this decision and get
+  // a plain ACK; a DACK-marked retry remains a first reception for this pass
+  // and is re-enqueued/reassessed.
   bool sendDack = false;
   if (ackable && firstReception && !m_shouldDackCb.IsNull ())
   {
@@ -3237,16 +3263,18 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
 
     const RxSeqState &rxState = m_rxDataStateBySrc[src];
 
-    CsrHeader ackHdr (m_nodeId, src, hdr.GetSeq (),
-                        /*dscp*/ 7,
-                        /*ackable*/ false,
-                        /*isAck*/ true);
+    CsrHeader ackHdr (m_nodeId,
+                      src,
+                      static_cast<uint16_t> (rxState.highest),
+                      /*dscp*/ 7,
+                      /*ackable*/ false,
+                      /*isAck*/ true);
     ackHdr.SetIsDack (sendDack);
     // OPNET-parity metadata
     ackHdr.SetType (sendDack ? CSR_PKT_DACK : CSR_PKT_ACK);
     ackHdr.SetDestType (CSR_DEST_UNICAST);
     ackHdr.SetHasAckWindow (true);
-    ackHdr.SetAckBitmap (rxState.ackBitmap & ~rxState.dackBitmap);
+    ackHdr.SetAckBitmap (rxState.ackBitmap);
     ackHdr.SetDackBitmap (rxState.dackBitmap);
 
     Ptr<Packet> ackPkt = ProtectAckFrame (ackHdr);
@@ -3261,9 +3289,12 @@ CsrHopLayer::HandleAckWindow (const CsrHeader &hdr)
   CsrNodeId src = hdr.GetSrc ();
   uint16_t baseSeq = hdr.GetSeq ();
 
-  // DACK wins if a malformed or stale peer marks a sequence in both fields.
-  uint64_t dackBitmap = hdr.GetDackBitmap ();
-  uint64_t ackBitmap = hdr.GetAckBitmap () & ~dackBitmap;
+  // The br_hop proc_mac_pk() cumulative-feedback path evaluates the ACK
+  // register before the DACK register.  If both contain the same sequence,
+  // the ACK path completes it and the later DACK lookup no longer finds an
+  // outstanding entry.
+  uint64_t ackBitmap = hdr.GetAckBitmap ();
+  uint64_t dackBitmap = hdr.GetDackBitmap () & ~ackBitmap;
 
   m_mac->CancelAcknowledgedFrames (
     src, baseSeq, ackBitmap, dackBitmap);
@@ -4397,6 +4428,26 @@ CsrHopLayer::SeqDiff (uint16_t seq1, uint16_t seq2)
 }
 
 bool
+CsrHopLayer::IsDataDacked (CsrNodeId src, uint16_t seq) const
+{
+  auto stateIt = m_rxDataStateBySrc.find (src);
+  if (stateIt == m_rxDataStateBySrc.end () || stateIt->second.highest < 0)
+    {
+      return false;
+    }
+
+  const RxSeqState &state = stateIt->second;
+  int32_t diff = SeqDiff (static_cast<uint16_t> (state.highest), seq);
+  if (diff > 0 || -diff >= 64)
+    {
+      return false;
+    }
+
+  return (state.dackBitmap &
+          (1ULL << static_cast<uint32_t> (-diff))) != 0;
+}
+
+bool
 CsrHopLayer::CheckReceivedSeq (CsrNodeId src,
                                uint16_t seq,
                                bool dataTraffic)
@@ -4437,7 +4488,8 @@ CsrHopLayer::CheckReceivedSeq (CsrNodeId src,
     }
   else
     {
-      // seq <= highest; check if within window and already marked
+      // seq <= highest; only an ACKed sequence is already accepted.  A
+      // DACKed sequence remains eligible for reassessment on retry.
       int32_t idx = -diff; // how far behind the highest
       if (idx >= 64)
         {
@@ -4446,14 +4498,15 @@ CsrHopLayer::CheckReceivedSeq (CsrNodeId src,
         }
 
       uint64_t mask = (0x1ULL << idx);
-      if ((state.ackBitmap | state.dackBitmap) & mask)
+      if (state.ackBitmap & mask)
         {
-          // Already seen; duplicate
+          // Already accepted; duplicate
           return false;
         }
       else
         {
-          // Not seen yet within window; mark it
+          // Accept it while preserving any historical DACK bit.  The legacy
+          // sender resolves an overlap by processing the ACK register first.
           state.ackBitmap |= mask;
           return true;
         }
