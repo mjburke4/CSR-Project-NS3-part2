@@ -694,6 +694,12 @@ private:
     CsrRoutingOperation routingOperation {CsrRoutingOperation::None};
     uint8_t routingSection {0};
     uint8_t routingTotalSections {1};
+
+    // NeighborCheck callback metadata remains plaintext even when the resend
+    // frame carries a Pairwise16-protected CsrHelloHeader.
+    bool neighborCheckMetadataValid {false};
+    CsrNeighborCheckType neighborCheckType {CsrNeighborCheckType::None};
+    uint32_t neighborCheckDiscoverySequence {0};
   };
 
   void HandleDataFrame (const CsrHeader &hdr, Ptr<Packet> payload, bool firstReception);
@@ -867,9 +873,11 @@ private:
   static constexpr uint8_t LEGACY_APP_NEIGHBORCAST_PACKET_TYPE = 6;
   static constexpr uint8_t LEGACY_APP_DATA_NO_ACK_PACKET_TYPE = 7;
   static constexpr uint8_t LEGACY_ROUTING_UPDATE_PACKET_TYPE = 8;
+  static constexpr uint8_t LEGACY_NEIGHBOR_CHECK_PACKET_TYPE = 9;
   static constexpr uint8_t LEGACY_ACK_PACKET_TYPE = 0;
   static constexpr uint32_t LEGACY_ACK_HOP_SECURITY_OVERHEAD = 5;
   static constexpr uint32_t LEGACY_ACK_WINDOW_OVERHEAD = 16;
+  static constexpr uint32_t LEGACY_NEIGHBOR_CHECK_SECURITY_OVERHEAD = 5;
 
   LinkControlResult ComputeLinkControl (CsrNodeId dest);
   void ApplyLinkControl (CsrHeader &header,
@@ -1723,6 +1731,18 @@ CsrHopLayer::SendNeighborCheck (CsrNodeId dst, Ptr<Packet> payload)
 {
   NS_ASSERT (m_mac != nullptr);
 
+  CsrHelloHeader neighborCheckMetadata;
+  bool neighborCheckMetadataValid =
+    payload != nullptr && payload->PeekHeader (neighborCheckMetadata);
+
+  uint32_t rawPayloadSize = payload->GetSize ();
+  if (neighborCheckMetadataValid)
+    {
+      Ptr<Packet> rawPayload = payload->Copy ();
+      rawPayload->RemoveHeader (neighborCheckMetadata);
+      rawPayloadSize = rawPayload->GetSize ();
+    }
+
   uint16_t &lastSeq = m_lastSentSeqByDest[dst];
   uint16_t seq = static_cast<uint16_t> ((lastSeq + 1) & 0xFFFF);
   lastSeq = seq;
@@ -1736,16 +1756,40 @@ CsrHopLayer::SendNeighborCheck (CsrNodeId dst, Ptr<Packet> payload)
 
   hdr.SetType (CSR_PKT_NEIGHBOR_CHECK);
   hdr.SetDestType (CSR_DEST_UNICAST);
+  hdr.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
   ApplyLinkControl (hdr, {dst});
 
-  Ptr<Packet> frame = payload->Copy ();
+  // packetTypes.c maps NeighborCheck (packet type 9) to Pairwise16. Protect
+  // once here so every HOP retry reuses the original pairwise key/sequence.
+  Ptr<Packet> frame = ProtectPairwisePayload (
+    dst,
+    CsrPairwiseSecurityMode::Pairwise16,
+    LEGACY_NEIGHBOR_CHECK_PACKET_TYPE,
+    payload);
   frame->AddHeader (hdr);
+  CsrSetOpnetEnvelope (
+    frame,
+    CsrOpnetPacketFormat::Routes,
+    CsrOpnetPacketModel::GetFixedSizeBytes (
+      CsrOpnetPacketFormat::Routes) +
+      LEGACY_NEIGHBOR_CHECK_SECURITY_OVERHEAD +
+      rawPayloadSize);
 
   EnqueueResend (
     dst,
     seq,
     frame->Copy (),
     false);
+
+  ResendEntry *resendEntry = FindResendEntry (dst, seq);
+  if (resendEntry != nullptr && neighborCheckMetadataValid)
+    {
+      resendEntry->neighborCheckMetadataValid = true;
+      resendEntry->neighborCheckType =
+        neighborCheckMetadata.GetNeighborCheckType ();
+      resendEntry->neighborCheckDiscoverySequence =
+        neighborCheckMetadata.GetDiscoverySequence ();
+    }
 
   std::cout << "[HOP " << m_nodeId
             << "] TX reliable NeighborCheck to " << dst
@@ -2718,6 +2762,170 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           return;
         }
 
+      if (hdr.GetDestType () != CSR_DEST_UNICAST ||
+          !hdr.IsAckable () ||
+          hdr.HasDestinationSequences () ||
+          !hdr.HasSecurityCount () ||
+          hdr.HasGroupSecurity ())
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop unsecured/malformed NeighborCheck"
+                    << " from=" << hdr.GetSrc ()
+                    << std::endl;
+          return;
+        }
+
+      std::vector<uint8_t> record (frame->GetSize ());
+      if (!record.empty ())
+        {
+          frame->CopyData (record.data (), record.size ());
+        }
+
+      CsrReceivedPairwiseMessage received =
+        m_hopSecurity.ReceivePairwiseMessage (
+          hdr.GetSrc (),
+          hdr.GetSecurityCount (),
+          CsrPairwiseSecurityMode::Pairwise16,
+          LEGACY_NEIGHBOR_CHECK_PACKET_TYPE,
+          record);
+
+      if (received.status != CsrHopSecurityReceiveStatus::Accepted &&
+          received.status != CsrHopSecurityReceiveStatus::
+            AcceptedSecurityCountChanged &&
+          received.status != CsrHopSecurityReceiveStatus::
+            AuthenticatedDuplicate)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop unauthenticated NeighborCheck"
+                    << " from=" << hdr.GetSrc ()
+                    << " status="
+                    << static_cast<unsigned> (received.status)
+                    << std::endl;
+          return;
+        }
+
+      // The production security dispatcher authenticates before routing owns
+      // the body.  Preserve that ordering, including a security-count reset,
+      // then bound-check the ns-3 compatibility header before deserializing
+      // it.  This parser guard is an intentional defensive extension; the
+      // production NeighborCheck body bytes remain an evidence boundary.
+      if (received.status == CsrHopSecurityReceiveStatus::
+            AcceptedSecurityCountChanged)
+        {
+          DiscardOutstandingKeyUpdate (hdr.GetSrc ());
+          if (!m_securityCountChangeCb.IsNull ())
+            {
+              m_securityCountChangeCb (hdr.GetSrc ());
+            }
+        }
+
+      const std::vector<uint8_t> &body = received.payload;
+      std::size_t compatibilityHeaderSize = 0;
+      auto canConsume = [&body] (std::size_t offset,
+                                 std::size_t length) {
+        return offset <= body.size () &&
+               length <= body.size () - offset;
+      };
+
+      // Fixed fields through routingTarget occupy 30 bytes.  Routing INFO
+      // adds 16 bytes before the chirp and advertised-route vectors.
+      constexpr std::size_t fixedPrefixSize = 30;
+      constexpr std::size_t routingOperationOffset = 26;
+      constexpr std::size_t routingInfoSize = 16;
+      constexpr std::size_t routeFixedSize = 12;
+      constexpr std::size_t routePathCountOffset = 11;
+
+      bool safeLayout = canConsume (0, fixedPrefixSize);
+      std::size_t cursor = fixedPrefixSize;
+      if (safeLayout &&
+          body[routingOperationOffset] == static_cast<uint8_t> (
+            CsrRoutingOperation::Info))
+        {
+          safeLayout = canConsume (cursor, routingInfoSize);
+          cursor += safeLayout ? routingInfoSize : 0;
+        }
+
+      if (safeLayout)
+        {
+          safeLayout = canConsume (cursor, 1);
+        }
+      if (safeLayout)
+        {
+          uint8_t chirpCount = body[cursor++];
+          std::size_t chirpBytes = 3 * static_cast<std::size_t> (chirpCount);
+          safeLayout = canConsume (cursor, chirpBytes);
+          cursor += safeLayout ? chirpBytes : 0;
+        }
+
+      if (safeLayout)
+        {
+          safeLayout = canConsume (cursor, 1);
+        }
+      uint8_t routeCount = safeLayout ? body[cursor++] : 0;
+      for (uint8_t routeIndex = 0;
+           safeLayout && routeIndex < routeCount;
+           ++routeIndex)
+        {
+          safeLayout = canConsume (cursor, routeFixedSize);
+          if (!safeLayout)
+            {
+              break;
+            }
+          uint8_t pathCount = body[cursor + routePathCountOffset];
+          cursor += routeFixedSize;
+          std::size_t pathBytes = 3 * static_cast<std::size_t> (pathCount);
+          safeLayout = canConsume (cursor, pathBytes);
+          cursor += safeLayout ? pathBytes : 0;
+        }
+
+      if (!safeLayout)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop malformed authenticated NeighborCheck layout"
+                    << " from=" << hdr.GetSrc ()
+                    << std::endl;
+          return;
+        }
+      compatibilityHeaderSize = cursor;
+
+      Ptr<Packet> authenticatedFrame =
+        Create<Packet> (received.payload.data (), received.payload.size ());
+      CsrHelloHeader authenticatedHeader;
+      uint32_t authenticatedHeaderSize =
+        authenticatedFrame->PeekHeader (authenticatedHeader);
+
+      bool validAuthenticatedHeader =
+        authenticatedHeaderSize == compatibilityHeaderSize &&
+        authenticatedHeader.GetNodeId () == hdr.GetSrc () &&
+        authenticatedHeader.GetArlRouteMsgType () ==
+          CsrArlRouteMsgType::NeighborCheck &&
+        static_cast<uint8_t> (
+          authenticatedHeader.GetNeighborCheckType ()) <=
+          static_cast<uint8_t> (CsrNeighborCheckType::Verify);
+
+      if (!validAuthenticatedHeader)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop authenticated NeighborCheck with invalid header"
+                    << " from=" << hdr.GetSrc ()
+                    << std::endl;
+          return;
+        }
+
+      if (received.status ==
+          CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
+        {
+          // HOP retries reuse the original pairwise record. Authenticate and
+          // validate the duplicate before repeating its ACK, but do not
+          // deliver it to NWK twice.
+          SendControlAck (
+            hdr,
+            "authenticated duplicate NeighborCheck");
+          return;
+        }
+
+      frame = authenticatedFrame;
+
       bool firstReception =
         CheckReceivedSeq (hdr.GetSrc (), hdr.GetSeq (), false);
 
@@ -2737,31 +2945,8 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
                               snrDb);
         }
 
-      // Always ACK, including duplicates. The original ACK may have been lost.
-      if (hdr.IsAckable ())
-        {
-          CsrHeader ackHdr (m_nodeId,
-                            hdr.GetSrc (),
-                            hdr.GetSeq (),
-                            7,
-                            false,
-                            true);
-
-          ackHdr.SetType (CSR_PKT_ACK);
-          ackHdr.SetDestType (CSR_DEST_UNICAST);
-          Ptr<Packet> ackPkt = ProtectAckFrame (ackHdr);
-
-          std::cout << "[HOP " << m_nodeId
-                    << "] ACK NeighborCheck to "
-                    << hdr.GetSrc ()
-                    << " seq=" << hdr.GetSeq ()
-                    << std::endl;
-
-          m_mac->EnqueueTxFrame (ackPkt,
-                                hdr.GetSrc (),
-                                7,
-                                false);
-        }
+      // Source-owned NeighborChecks are reliable unicast controls.
+      SendControlAck (hdr, "NeighborCheck");
 
       return;
     }
@@ -3198,18 +3383,22 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
             {
               neighborCheckCompleted = true;
 
-              CsrHelloHeader controlHeader;
-
-              if (originalFrame->RemoveHeader (
-                    controlHeader))
+              if (entry->neighborCheckMetadataValid)
                 {
-                  completedType =
-                    controlHeader
-                      .GetNeighborCheckType ();
-
+                  completedType = entry->neighborCheckType;
                   completedDiscoverySequence =
-                    controlHeader
-                      .GetDiscoverySequence ();
+                    entry->neighborCheckDiscoverySequence;
+                }
+              else if (!originalHdr.HasSecurityCount ())
+                {
+                  CsrHelloHeader controlHeader;
+                  if (originalFrame->RemoveHeader (controlHeader))
+                    {
+                      completedType =
+                        controlHeader.GetNeighborCheckType ();
+                      completedDiscoverySequence =
+                        controlHeader.GetDiscoverySequence ();
+                    }
                 }
             }
           else if (
@@ -3920,15 +4109,34 @@ CsrHopLayer::CheckResend ()
                   else if (failedHopHeader.GetType () ==
                            CSR_PKT_NEIGHBOR_CHECK)
                     {
-                      CsrHelloHeader controlHeader;
+                      bool haveMetadata =
+                        e.neighborCheckMetadataValid;
+                      CsrNeighborCheckType checkType =
+                        e.neighborCheckType;
+                      uint32_t discoverySequence =
+                        e.neighborCheckDiscoverySequence;
 
-                      if (failedFrame->RemoveHeader (controlHeader) &&
+                      if (!haveMetadata &&
+                          !failedHopHeader.HasSecurityCount ())
+                        {
+                          CsrHelloHeader controlHeader;
+                          if (failedFrame->RemoveHeader (controlHeader))
+                            {
+                              haveMetadata = true;
+                              checkType =
+                                controlHeader.GetNeighborCheckType ();
+                              discoverySequence =
+                                controlHeader.GetDiscoverySequence ();
+                            }
+                        }
+
+                      if (haveMetadata &&
                           !m_neighborCheckFailureCb.IsNull ())
                         {
                           m_neighborCheckFailureCb (
                             e.dest,
-                            controlHeader.GetNeighborCheckType (),
-                            controlHeader.GetDiscoverySequence ());
+                            checkType,
+                            discoverySequence);
                         }
                     }
                   else if (failedHopHeader.GetType () ==

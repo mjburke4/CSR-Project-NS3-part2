@@ -71,6 +71,35 @@ GetRoutingControlRecordSize (Ptr<const Packet> frame,
   return GROUP16_OVERHEAD + GetRawHelloPayloadSize (plaintextPacket);
 }
 
+inline uint32_t
+GetPairwise16ControlRecordSize (Ptr<const Packet> frame,
+                                const CsrHeader &header)
+{
+  Ptr<Packet> recordPacket = frame->Copy ();
+  CsrHeader removedHeader;
+  if (recordPacket->RemoveHeader (removedHeader) !=
+      header.GetSerializedSize ())
+    {
+      return recordPacket->GetSize ();
+    }
+
+  std::vector<uint8_t> record = CopyPacketBytes (recordPacket);
+  if (record.size () < PAIRWISE16_OVERHEAD)
+    {
+      return static_cast<uint32_t> (record.size ());
+    }
+
+  static constexpr std::size_t keySequenceSize = 3;
+  static constexpr std::size_t authTagSize = 2;
+  std::span<const uint8_t> plaintext (
+    record.data () + keySequenceSize,
+    record.size () - keySequenceSize - authTagSize);
+
+  Ptr<Packet> plaintextPacket = Create<Packet> (plaintext.data (),
+                                                plaintext.size ());
+  return PAIRWISE16_OVERHEAD + GetRawHelloPayloadSize (plaintextPacket);
+}
+
 } // namespace csr_opnet_detail
 
 /**
@@ -146,7 +175,11 @@ CsrAnnotateOpnetEnvelope (Ptr<Packet> packet)
     case CSR_PKT_NEIGHBOR_CHECK:
       rootFormat = CsrOpnetPacketFormat::Routes;
       modeledSize =
-        CsrOpnetPacketModel::GetFixedSizeBytes (CsrOpnetPacketFormat::Routes);
+        CsrOpnetPacketModel::GetFixedSizeBytes (
+          CsrOpnetPacketFormat::Routes) +
+        (header.HasSecurityCount ()
+           ? csr_opnet_detail::GetPairwise16ControlRecordSize (packet, header)
+           : 0);
       break;
     case CSR_PKT_ROUTING_CONTROL:
       rootFormat = CsrOpnetPacketFormat::Routes;
