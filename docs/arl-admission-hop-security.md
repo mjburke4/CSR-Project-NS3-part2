@@ -1,6 +1,6 @@
 # ARL neighbor admission and hop-security foundation
 
-Updated: 2026-08-31
+Updated: 2026-09-01
 
 ## Implemented scope
 
@@ -10,8 +10,9 @@ KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt
 cryptography. The model uses the source's SHA-1, HMAC-SHA1, one-iteration
 PBKDF2 derivations, AES-256-CBC group-key wrapping, AES-256-CTR pairwise/group
 encryption, 128-entry pairwise and group replay windows, reliable completion,
-and admission decisions. Embedded flash and key-manager access are replaced by
-injectable synthetic mission, pairwise, and group keys.
+admission decisions, and the source-owned Pairwise16 ACK/DACK wrapper.
+Embedded flash and key-manager access are replaced by injectable synthetic
+mission, pairwise, and group keys.
 
 The admission invariant is:
 
@@ -32,6 +33,7 @@ advertised.
 | Received KeyRequest sends KeyUpdate unless a previously ACKed key is already recorded | `CsrNetLayer::NoteKeyRequestReceived()` |
 | KeyUpdate is reliable; receive ACKs it and starts a reciprocal KeyUpdate | `CsrHopLayer` KeyUpdate receive path / `CsrNetLayer::NoteKeyUpdateReceived()` |
 | Pairwise protection keys use MNK + pairwise material + A5/5A pads and source/count/key-ID salt | `CsrLegacyCrypto::DeriveProtectionKeys()` |
+| The common `AckMsg` packet type (ACK and DACK subtypes) uses Pairwise16 packet type 0 | `CsrHopLayer::ProtectAckFrame()` / `AuthenticateAckFrame()` |
 | KeyRequest authenticates its packed key-ID/sequence with a four-byte Pairwise32 HMAC | `CsrHopSecurityState::BuildKeyRequest()` / `ReceiveKeyRequest()` |
 | KeyUpdate authenticates the plaintext group key, derives a pairwise wrapping key, and uses AES-256-CBC | `CsrHopSecurityState::BuildKeyUpdate()` / `ReceiveKeyUpdate()` |
 | `getNextGroupKeyIdSeq()` advances the shared 12-bit group sequence and evolves the key at rollover | `CsrHopSecurityState::NextGroupKeySequence()` |
@@ -57,7 +59,7 @@ advertised.
 | --- | --- | ---: | --- |
 | KeyRequest | packed 12-bit pairwise key ID + 12-bit sequence (3), auth tag (4) | 7 bytes | No ACK, no resend |
 | KeyUpdate | packed key ID/sequence (3), reserved/group-key ID (2), data PRN wire field (6), wrapped group key (32), auth tag (8) | 51 bytes | ACK/resend |
-| Pairwise16 | packed pairwise key ID/sequence (3), plaintext, auth tag (2) | 5 bytes | Default acknowledged and unacknowledged DATA |
+| Pairwise16 | packed pairwise key ID/sequence (3), plaintext, auth tag (2) | 5 bytes | Default DATA and common packet-type-0 ACK/DACK |
 | Pairwise32 | packed pairwise key ID/sequence (3), plaintext, auth tag (4) | 7 bytes | Portable provider and golden tests |
 | Pairwise32Encrypt | packed pairwise key ID/sequence (3), AES-CTR ciphertext, auth tag (4) | 7 bytes | Explicit encrypted one-hop DATA path |
 | GroupEstablish | packed group key ID/sequence (3), AES-CTR ciphertext, mission/group auth tag (4) | 7 bytes | Discover broadcasts |
@@ -86,8 +88,9 @@ count is absent.
 - Inbound pairwise key/sequence state uses the target `SLIDINGWINDOW`
   configuration's 128-entry window. Group traffic has an independent window
   with the same semantics. Authenticated out-of-order records inside a window
-  are accepted; authenticated duplicates and records before the window are
-  rejected.
+  are accepted; in-window authenticated duplicates are classified for
+  packet-type-specific idempotent handling, while records before the window
+  are rejected.
 - GroupEstablish authenticates its first two tag bytes with the first 20 bytes
   of the mission key. This permits source authentication without the current
   group key. Only the newest deferred Discover per source is retained, and it
@@ -99,6 +102,9 @@ count is absent.
   delivery, or ACK generation. An authenticated retransmission is ACKed again
   without a second delivery; failed authentication cannot poison either replay
   window.
+- ACK/DACK authenticates the complete logical ACK body before MAC cancellation,
+  resend/custody mutation, or the packet-level delayed NWK wake. The mutable
+  outer header carries only transport-visible security and link metadata.
 - AppNeighborcast requires a broadcast, non-ACKable envelope and authenticates
   and decrypts before one-hop delivery. Tampered, replayed, and malformed
   envelopes are never delivered or ACKed.
@@ -142,8 +148,10 @@ count is absent.
 - `csr-hop-remaining-security-smoke.cc` checks independent Pairwise16,
   Pairwise32, and Pairwise32Encrypt golden records; plaintext/ciphertext round
   trips; wrong-key, wrong-type, tamper, malformed, and replay rejection;
-  authentication-before-ACK/delivery; exact-once AppNeighborcast; and live
-  over-air sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
+  authentication-before-ACK/delivery; plaintext/tampered/malformed ACK
+  rejection; authenticated ACK/DACK state and wake ordering; a live 30-byte
+  Pairwise16 DACK; exact-once AppNeighborcast; and live over-air sends for
+  Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
 - `csr-nwk-residual-routing-retry-smoke.cc` checks that NWK retains the exact
   grouped plaintext owner while HOP retries the original multicast, removes
   one destination per ACK, defers final-NACK recovery to a later same-time
@@ -159,12 +167,13 @@ count is absent.
 ## Deliberate boundary
 
 All enabled HOP-security transforms now have portable provider coverage.
-Pairwise16 is connected to ordinary DATA, Pairwise32Encrypt has an explicit
-one-hop DATA path, and Group32Encrypt is connected to AppNeighborcast. Exact
-security wrapping for every remaining control message, the distinct
-network-security modes, and operational key-store behavior remain outside this
-step and require packet-type-table or differential-trace confirmation before
-they can be claimed as equivalent.
+Pairwise16 is connected to ordinary DATA and the common ACK/DACK packet type,
+Pairwise32Encrypt has an explicit one-hop DATA path, and Group32Encrypt is
+connected to AppNeighborcast. Exact security wrapping for remaining control
+messages (including NeighborCheck), the distinct network-security modes, and
+operational key-store behavior remain outside this step and require
+packet-type-table or differential-trace confirmation before they can be
+claimed as equivalent.
 
 This route-admission increment covers the inactive-peer selection boundary and
 source-owned destination recomputation after normal or looped UPDATEs,

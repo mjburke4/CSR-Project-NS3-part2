@@ -144,7 +144,22 @@ TestHopOverflowRemainsUntracked ()
   ackHeader.SetDestType (CSR_DEST_UNICAST);
   ackHeader.SetSpeedKey (8);
 
-  Ptr<Packet> ack = Create<Packet> ();
+  Ptr<Packet> ackBody = Create<Packet> ();
+  ackBody->AddHeader (ackHeader);
+  std::vector<uint8_t> plaintext (ackBody->GetSize ());
+  ackBody->CopyData (plaintext.data (), plaintext.size ());
+  CsrHopSecurityState ackSender;
+  ackSender.SetNodeId (2);
+  CsrProtectedPairwiseMessage secured =
+    ackSender.ProtectPairwiseMessage (
+      1,
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      plaintext);
+  Ptr<Packet> ack = Create<Packet> (secured.record.data (),
+                                    secured.record.size ());
+  ackHeader.SetSecurityCount (ackSender.GetOwnSecurityCount ());
+  ackHeader.SetLinkControl (8, 0.0, 0.0);
   ack->AddHeader (ackHeader);
   hop->ReceiveFromMac (ack, 0.0, 100.0);
 

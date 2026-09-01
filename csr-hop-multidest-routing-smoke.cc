@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <vector>
 
 using namespace ns3;
@@ -194,6 +195,7 @@ InjectExactAck (Ptr<CsrHopLayer> hop,
                 CsrNodeId source,
                 uint16_t sequence)
 {
+  static std::map<CsrNodeId, CsrHopSecurityState> senders;
   CsrHeader ackHeader (
     source,
     1,
@@ -205,7 +207,25 @@ InjectExactAck (Ptr<CsrHopLayer> hop,
   ackHeader.SetDestType (CSR_DEST_UNICAST);
   ackHeader.SetSpeedKey (8);
 
-  Ptr<Packet> ack = Create<Packet> ();
+  Ptr<Packet> body = Create<Packet> ();
+  body->AddHeader (ackHeader);
+  std::vector<uint8_t> plaintext (body->GetSize ());
+  body->CopyData (plaintext.data (), plaintext.size ());
+  auto [it, inserted] = senders.try_emplace (source);
+  if (inserted)
+    {
+      it->second.SetNodeId (source);
+    }
+  CsrProtectedPairwiseMessage secured =
+    it->second.ProtectPairwiseMessage (
+      1,
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      plaintext);
+  Ptr<Packet> ack = Create<Packet> (secured.record.data (),
+                                    secured.record.size ());
+  ackHeader.SetSecurityCount (it->second.GetOwnSecurityCount ());
+  ackHeader.SetLinkControl (8, 0.0, 0.0);
   ack->AddHeader (ackHeader);
   hop->ReceiveFromMac (ack, 0.0, 100.0);
 }

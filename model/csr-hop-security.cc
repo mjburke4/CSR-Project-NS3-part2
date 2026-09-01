@@ -835,10 +835,6 @@ CsrHopSecurityState::ReceivePairwiseMessage (
     sequence,
     securityCountChanged);
   result.status = status;
-  if (status == CsrHopSecurityReceiveStatus::AuthenticatedDuplicate)
-    {
-      return result;
-    }
 
   std::span<const uint8_t> protectedPayload = authenticatedRecord.subspan (
     CSR_PAIRWISE_KEY_SEQUENCE_SIZE);

@@ -1,6 +1,6 @@
 # OPNET packet and control-envelope parity
 
-Updated: 2026-08-26
+Updated: 2026-09-01
 
 ## Scope
 
@@ -53,7 +53,7 @@ The executable wrapper, not format names alone, determines the modeled size:
 | Logical traffic | OPNET envelope tree | Modeled fixed bytes before application or security content |
 | --- | --- | ---: |
 | DATA | `br_Mac -> br_Hop -> br_Network` | 32 B |
-| ACK or DACK | `br_Mac -> br_Ack` | 25 B |
+| ACK or DACK | `br_Mac -> br_Ack` | 25 B before security |
 | Routed SNMP | `br_Mac -> br_Hop -> br_SNMP` | 31 B |
 | HELLO | `br_Hello` | 12 B |
 | ARL route control | `br_Routes` | 11 B |
@@ -70,6 +70,7 @@ wrapper:
 
 - GroupEstablish HELLO/Discover adds seven bytes.
 - Group16 HELLO adds five bytes.
+- Pairwise16 ACK/DACK adds five bytes to `br_Mac -> br_Ack`, for 30 bytes.
 - KeyRequest and KeyUpdate add their exact seven- and 51-byte records to
   `br_Routes`.
 - Reliable Group16 routing control adds five security bytes plus actual ARL
@@ -95,8 +96,9 @@ silently choosing one source for both purposes.
 - short- and long-preamble sizes and OTA field order;
 - zero-bit metadata exclusion;
 - packet-tag copying and aggregate summation;
-- complete DATA, ACK/DACK, routed-SNMP, HELLO/Discover, NeighborCheck, ARL
-  routing-section, KeyRequest, and KeyUpdate compatibility-envelope inference.
+- complete DATA, bare and Pairwise16 ACK/DACK, routed-SNMP, HELLO/Discover,
+  NeighborCheck, ARL routing-section, KeyRequest, and KeyUpdate
+  compatibility-envelope inference.
 
 The exact serializer now also drives source-derived OTA duration: the preamble,
 SOF, speed, and length fields use the S0 chip duration from `br_txdel.ps.c`,

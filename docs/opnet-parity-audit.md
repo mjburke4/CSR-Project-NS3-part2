@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-08-31
+Updated: 2026-09-01
 
 ## Scope and confidence limits
 
@@ -35,8 +35,8 @@ OPNET/ns-3 event-trace comparison.
 | Visible NWK wrapper behavior | 95-98% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, source-owned self capability, source-exact same-cycle grouped changed-route fanout, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, and fixed packet/control envelopes are covered. |
 | Full NWK routing behavior | 90-94% | ARL byte-stream exchange, self-route capability advertisement, same-pass INFO/changed-route propagation with NWK-owned residual-destination retry, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 93-96% | ACK/DACK windows, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
-| Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
+| HOP | 93-96% | ACK/DACK windows, source-exact Pairwise16 ACK/DACK wrapping, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
+| Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA and packet-type-0 ACK/DACK use Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before state mutation or delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
 | Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and differential traces. |
 | PHY | 84-91% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, gains, bandwidth-scaled noise, mixed-/same-rate interference, exact modulation curves, interval errors, ECC, closure ordering, final accept/drop, and promoted scenario radio/link attributes are live. Remaining uncertainty is threshold variance, opaque off-grid interpolation, external LOS/TMM closure, and authoritative trace calibration. |
@@ -94,6 +94,9 @@ completion.
   unacknowledged DATA, plus Pairwise32Encrypt for explicit encrypted one-hop
   DATA. HMAC binds the source, destination, packet type, length, and protected
   record; AES-CTR uses the legacy source/destination/count/key/sequence IV.
+- Source-exact Pairwise16 protection for the common ACK/DACK packet type 0.
+  The complete logical ACK body authenticates before cancellation, custody
+  mutation, or the delayed NWK wake, and the modeled envelope is 30 bytes.
 - Live Group32Encrypt AppNeighborcast with a broadcast, non-ACKable envelope,
   authentication and replay checks before decrypt/delivery, and no HOP ACK.
 - Shared 12-bit group sequence/key-ID evolution, same-epoch one-way key
@@ -652,7 +655,8 @@ test adds exact GroupEstablish/Group16/Group32Encrypt records, deferred replay,
 both authentication halves, key evolution, previous-key handling, and fresh
 epoch redistribution. The remaining-security test adds independent
 Pairwise16/Pairwise32/Pairwise32Encrypt records, AES-CTR ciphertext, wrong-type
-and wrong-key rejection, pairwise auth-before-ACK/delivery, live encrypted
+and wrong-key rejection, pairwise auth-before-ACK/delivery, source-exact
+Pairwise16 ACK/DACK policy and live DACK capture, live encrypted
 AppNeighborcast, malformed-envelope rejection, and all three live send paths.
 The receive-contention test covers Search/Track timing, simultaneous collision,
 strongest-preamble capture, post-lock interference, RX-induced slot freezing,

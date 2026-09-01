@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <vector>
 
 using namespace ns3;
@@ -13,6 +14,35 @@ namespace
 {
 
 std::vector<Time> g_nwkWakeTimes;
+
+Ptr<Packet>
+ProtectFeedback (CsrHeader header)
+{
+  static std::map<CsrNodeId, CsrHopSecurityState> senders;
+  auto [it, inserted] = senders.try_emplace (header.GetSrc ());
+  if (inserted)
+    {
+      it->second.SetNodeId (header.GetSrc ());
+    }
+
+  Ptr<Packet> body = Create<Packet> ();
+  body->AddHeader (header);
+  std::vector<uint8_t> plaintext (body->GetSize ());
+  body->CopyData (plaintext.data (), plaintext.size ());
+  CsrProtectedPairwiseMessage secured =
+    it->second.ProtectPairwiseMessage (
+      header.GetDst (),
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      plaintext);
+
+  Ptr<Packet> frame = Create<Packet> (secured.record.data (),
+                                      secured.record.size ());
+  header.SetSecurityCount (it->second.GetOwnSecurityCount ());
+  header.SetLinkControl (8, 0.0, 0.0);
+  frame->AddHeader (header);
+  return frame;
+}
 
 void
 Require (bool condition, const char* message)
@@ -33,9 +63,7 @@ MakeAck (uint16_t baseSeq, uint64_t ackBitmap, uint64_t dackBitmap)
   header.SetAckBitmap (ackBitmap);
   header.SetDackBitmap (dackBitmap);
 
-  Ptr<Packet> packet = Create<Packet> ();
-  packet->AddHeader (header);
-  return packet;
+  return ProtectFeedback (header);
 }
 
 Ptr<Packet>
@@ -48,9 +76,7 @@ MakeExactFeedback (uint16_t sequence,
   header.SetIsDack (dack);
   header.SetDestType (CSR_DEST_UNICAST);
 
-  Ptr<Packet> packet = Create<Packet> ();
-  packet->AddHeader (header);
-  return packet;
+  return ProtectFeedback (header);
 }
 
 void

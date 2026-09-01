@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -296,6 +297,7 @@ TestInactivePruneAndAllOrNoneGate ()
 void
 InjectExactAck (CsrNodeId source, uint16_t sequence)
 {
+  static std::map<CsrNodeId, CsrHopSecurityState> senders;
   CsrHeader ack (
     source,
     LOCAL_NODE,
@@ -306,7 +308,25 @@ InjectExactAck (CsrNodeId source, uint16_t sequence)
   ack.SetType (CSR_PKT_ACK);
   ack.SetDestType (CSR_DEST_UNICAST);
   ack.SetSpeedKey (8);
-  Ptr<Packet> packet = Create<Packet> ();
+  Ptr<Packet> body = Create<Packet> ();
+  body->AddHeader (ack);
+  std::vector<uint8_t> plaintext (body->GetSize ());
+  body->CopyData (plaintext.data (), plaintext.size ());
+  auto [it, inserted] = senders.try_emplace (source);
+  if (inserted)
+    {
+      it->second.SetNodeId (source);
+    }
+  CsrProtectedPairwiseMessage secured =
+    it->second.ProtectPairwiseMessage (
+      LOCAL_NODE,
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      plaintext);
+  Ptr<Packet> packet = Create<Packet> (secured.record.data (),
+                                       secured.record.size ());
+  ack.SetSecurityCount (it->second.GetOwnSecurityCount ());
+  ack.SetLinkControl (8, 0.0, 0.0);
   packet->AddHeader (ack);
   g_observedHop->ReceiveFromMac (packet, 0.0, 100.0);
 }

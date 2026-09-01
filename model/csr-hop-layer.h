@@ -3,6 +3,7 @@
 #include "csr-hello-header.h"
 #include "csr-hop-security.h"
 #include "csr-mac-core.h"
+#include "csr-opnet-packet-model.h"
 #include <algorithm>
 
 class CsrHopLayer : public Object
@@ -708,6 +709,8 @@ private:
     CsrPairwiseSecurityMode mode,
     uint8_t legacyPacketType,
     Ptr<Packet> payload);
+  Ptr<Packet> ProtectAckFrame (CsrHeader header);
+  bool AuthenticateAckFrame (CsrHeader &header, Ptr<Packet> record);
   bool HandleProtectedPairwiseData (const CsrHeader &header,
                                     Ptr<Packet> record,
                                     CsrPairwiseSecurityMode mode,
@@ -864,6 +867,8 @@ private:
   static constexpr uint8_t LEGACY_APP_NEIGHBORCAST_PACKET_TYPE = 6;
   static constexpr uint8_t LEGACY_APP_DATA_NO_ACK_PACKET_TYPE = 7;
   static constexpr uint8_t LEGACY_ROUTING_UPDATE_PACKET_TYPE = 8;
+  static constexpr uint8_t LEGACY_ACK_PACKET_TYPE = 0;
+  static constexpr uint32_t LEGACY_ACK_HOP_SECURITY_OVERHEAD = 5;
 
   LinkControlResult ComputeLinkControl (CsrNodeId dest);
   void ApplyLinkControl (CsrHeader &header,
@@ -1200,6 +1205,143 @@ CsrHopLayer::ProtectPairwisePayload (
       protectedPacket->AddPacketTag (appTag);
     }
   return protectedPacket;
+}
+
+Ptr<Packet>
+CsrHopLayer::ProtectAckFrame (CsrHeader header)
+{
+  // packetTypes.c maps the common AckMsg packet type (ACK and DACK subtypes)
+  // to Pairwise16. Authenticate the complete logical ACK body; only the
+  // transport-visible compatibility header carries security/link metadata.
+  Ptr<Packet> plaintext = Create<Packet> ();
+  plaintext->AddHeader (header);
+  Ptr<Packet> protectedFrame = ProtectPairwisePayload (
+    header.GetDst (),
+    CsrPairwiseSecurityMode::Pairwise16,
+    LEGACY_ACK_PACKET_TYPE,
+    plaintext);
+
+  header.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
+  ApplyLinkControl (header, {header.GetDst ()});
+  protectedFrame->AddHeader (header);
+  CsrSetOpnetEnvelope (
+    protectedFrame,
+    CsrOpnetPacketFormat::Mac,
+    CsrOpnetPacketModel::GetFixedSizeBytes (
+      CsrOpnetPacketFormat::Mac) +
+      CsrOpnetPacketModel::GetFixedSizeBytes (
+        CsrOpnetPacketFormat::Ack) +
+      LEGACY_ACK_HOP_SECURITY_OVERHEAD);
+  return protectedFrame;
+}
+
+bool
+CsrHopLayer::AuthenticateAckFrame (CsrHeader &header,
+                                   Ptr<Packet> recordPacket)
+{
+  if (!header.HasSecurityCount () || header.HasGroupSecurity ())
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop unsecured/malformed ACK/DACK"
+                << " from=" << header.GetSrc ()
+                << std::endl;
+      return false;
+    }
+
+  std::vector<uint8_t> record (recordPacket->GetSize ());
+  if (!record.empty ())
+    {
+      recordPacket->CopyData (record.data (), record.size ());
+    }
+
+  CsrReceivedPairwiseMessage received =
+    m_hopSecurity.ReceivePairwiseMessage (
+      header.GetSrc (),
+      header.GetSecurityCount (),
+      CsrPairwiseSecurityMode::Pairwise16,
+      LEGACY_ACK_PACKET_TYPE,
+      record);
+  if (received.status != CsrHopSecurityReceiveStatus::Accepted &&
+      received.status != CsrHopSecurityReceiveStatus::
+        AcceptedSecurityCountChanged &&
+      received.status != CsrHopSecurityReceiveStatus::
+        AuthenticatedDuplicate)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop unauthenticated ACK/DACK"
+                << " from=" << header.GetSrc ()
+                << " status="
+                << static_cast<unsigned> (received.status)
+                << std::endl;
+      return false;
+    }
+
+  static constexpr uint32_t ackBodyBaseSize = 13;
+  if (received.payload.size () < ackBodyBaseSize)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop truncated authenticated ACK/DACK"
+                << " from=" << header.GetSrc ()
+                << std::endl;
+      return false;
+    }
+
+  // Validate the compatibility header's optional-field layout before asking
+  // ns-3 to deserialize it. An authenticated peer must not be able to make the
+  // parser read beyond a short ACK body.
+  uint8_t bodyFlags = received.payload[9];
+  bool hasAckWindow = (bodyFlags & 0x08) != 0;
+  bool hasUnsupportedFields =
+    (bodyFlags & (0x10 | 0x20 | 0x40 | 0x80)) != 0;
+  uint32_t expectedBodySize =
+    ackBodyBaseSize + (hasAckWindow ? 16 : 0);
+  if (hasUnsupportedFields ||
+      received.payload.size () != expectedBodySize)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop malformed authenticated ACK/DACK layout"
+                << " from=" << header.GetSrc ()
+                << std::endl;
+      return false;
+    }
+
+  Ptr<Packet> plaintext = Create<Packet> (received.payload.data (),
+                                          received.payload.size ());
+  CsrHeader authenticated;
+  if (plaintext->RemoveHeader (authenticated) != expectedBodySize ||
+      !authenticated.IsAck () ||
+      authenticated.GetSrc () != header.GetSrc () ||
+      authenticated.GetDst () != m_nodeId ||
+      authenticated.GetDestType () != CSR_DEST_UNICAST ||
+      authenticated.IsAckable () ||
+      authenticated.GetType () !=
+        (authenticated.IsDack () ? CSR_PKT_DACK : CSR_PKT_ACK) ||
+      authenticated.HasLinkControl () ||
+      authenticated.HasSecurityCount () ||
+      authenticated.HasGroupSecurity () ||
+      authenticated.HasDestinationSequences ())
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop malformed authenticated ACK/DACK body"
+                << " from=" << header.GetSrc ()
+                << std::endl;
+      return false;
+    }
+
+  if (received.status == CsrHopSecurityReceiveStatus::
+        AcceptedSecurityCountChanged)
+    {
+      DiscardOutstandingKeyUpdate (header.GetSrc ());
+      if (!m_securityCountChangeCb.IsNull ())
+        {
+          m_securityCountChangeCb (header.GetSrc ());
+        }
+    }
+
+  // From this point onward ACK/DACK state, cancellation, and NWK wake ordering
+  // use only the authenticated logical body, never mutable outer metadata.
+  header = authenticated;
+  return true;
 }
 
 void
@@ -1834,10 +1976,7 @@ CsrHopLayer::SendControlAck (
                        true);
   ackHeader.SetType (CSR_PKT_ACK);
   ackHeader.SetDestType (CSR_DEST_UNICAST);
-  ApplyLinkControl (ackHeader, {received.GetSrc ()});
-
-  Ptr<Packet> ack = Create<Packet> ();
-  ack->AddHeader (ackHeader);
+  Ptr<Packet> ack = ProtectAckFrame (ackHeader);
 
   std::cout << "[HOP " << m_nodeId
             << "] ACK " << label
@@ -2355,8 +2494,15 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
       return;
     }
 
-  if (hdr.IsAck ())
+  if (hdr.IsAck () ||
+      hdr.GetType () == CSR_PKT_ACK ||
+      hdr.GetType () == CSR_PKT_DACK)
     {
+      if (!AuthenticateAckFrame (hdr, frame))
+        {
+          return;
+        }
+
       std::cout << "[HOP " << m_nodeId << "] RX "
                 << (hdr.IsDack () ? "DACK" : "ACK")
                 << " from " << hdr.GetSrc ()
@@ -2601,10 +2747,7 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
           ackHdr.SetType (CSR_PKT_ACK);
           ackHdr.SetDestType (CSR_DEST_UNICAST);
-          ApplyLinkControl (ackHdr, {hdr.GetSrc ()});
-
-          Ptr<Packet> ackPkt = Create<Packet> ();
-          ackPkt->AddHeader (ackHdr);
+          Ptr<Packet> ackPkt = ProtectAckFrame (ackHdr);
 
           std::cout << "[HOP " << m_nodeId
                     << "] ACK NeighborCheck to "
@@ -2728,12 +2871,7 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
           ackHdr.SetType (CSR_PKT_ACK);
           ackHdr.SetDestType (
             CSR_DEST_UNICAST);
-          ApplyLinkControl (ackHdr, {hdr.GetSrc ()});
-
-          Ptr<Packet> ackPkt =
-            Create<Packet> ();
-
-          ackPkt->AddHeader (ackHdr);
+          Ptr<Packet> ackPkt = ProtectAckFrame (ackHdr);
 
           std::cout << "[HOP " << m_nodeId
                     << "] ACK RoutingControl to "
@@ -2920,15 +3058,12 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     // OPNET-parity metadata
     ackHdr.SetType (sendDack ? CSR_PKT_DACK : CSR_PKT_ACK);
     ackHdr.SetDestType (CSR_DEST_UNICAST);
-    ApplyLinkControl (ackHdr, {src});
     ackHdr.SetHasAckWindow (true);
     ackHdr.SetAckBitmap (rxState.ackBitmap & ~rxState.dackBitmap);
     ackHdr.SetDackBitmap (rxState.dackBitmap);
 
-
-    Ptr<Packet> ackPkt = Create<Packet> ();
-    ackPkt->AddHeader (ackHdr);
-     m_mac->EnqueueTxFrame (ackPkt, src, /*dscp*/ 7, /*ackable*/ false);
+    Ptr<Packet> ackPkt = ProtectAckFrame (ackHdr);
+    m_mac->EnqueueTxFrame (ackPkt, src, /*dscp*/ 7, /*ackable*/ false);
     writeFeedback (sendDack ? "dack" : "ack", true);
   }
 }

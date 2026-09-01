@@ -518,6 +518,35 @@ BuildDataFrame (CsrNodeId source,
 }
 
 Ptr<Packet>
+ProtectFeedback (CsrHeader header)
+{
+  static std::map<CsrNodeId, CsrHopSecurityState> senders;
+  auto [it, inserted] = senders.try_emplace (header.GetSrc ());
+  if (inserted)
+    {
+      it->second.SetNodeId (header.GetSrc ());
+    }
+
+  Ptr<Packet> body = Create<Packet> ();
+  body->AddHeader (header);
+  std::vector<uint8_t> plaintext (body->GetSize ());
+  body->CopyData (plaintext.data (), plaintext.size ());
+  CsrProtectedPairwiseMessage secured =
+    it->second.ProtectPairwiseMessage (
+      header.GetDst (),
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      plaintext);
+
+  Ptr<Packet> frame = Create<Packet> (secured.record.data (),
+                                      secured.record.size ());
+  header.SetSecurityCount (it->second.GetOwnSecurityCount ());
+  header.SetLinkControl (8, 0.0, 0.0);
+  frame->AddHeader (header);
+  return frame;
+}
+
+Ptr<Packet>
 BuildExactAck (CsrNodeId source,
                CsrNodeId destination,
                uint16_t sequence)
@@ -530,11 +559,8 @@ BuildExactAck (CsrNodeId source,
                     true);
   header.SetType (CSR_PKT_ACK);
   header.SetDestType (CSR_DEST_UNICAST);
-  header.SetLinkControl (8, 0.0, 0.0);
-
-  Ptr<Packet> frame = Create<Packet> ();
-  frame->AddHeader (header);
-  return frame;
+  header.SetSpeedKey (8);
+  return ProtectFeedback (header);
 }
 
 Ptr<Packet>
@@ -542,14 +568,19 @@ BuildWindowAck (CsrNodeId source,
                 CsrNodeId destination,
                 uint16_t sequence)
 {
-  Ptr<Packet> frame = BuildExactAck (source, destination, sequence);
-  CsrHeader header;
-  frame->RemoveHeader (header);
+  CsrHeader header (source,
+                    destination,
+                    sequence,
+                    0,
+                    false,
+                    true);
+  header.SetType (CSR_PKT_ACK);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetSpeedKey (8);
   header.SetHasAckWindow (true);
   header.SetAckBitmap (1);
   header.SetDackBitmap (0);
-  frame->AddHeader (header);
-  return frame;
+  return ProtectFeedback (header);
 }
 
 Ptr<Packet>
@@ -557,16 +588,20 @@ BuildExactDack (CsrNodeId source,
                 CsrNodeId destination,
                 uint16_t sequence)
 {
-  Ptr<Packet> frame = BuildExactAck (source, destination, sequence);
-  CsrHeader header;
-  frame->RemoveHeader (header);
+  CsrHeader header (source,
+                    destination,
+                    sequence,
+                    0,
+                    false,
+                    true);
   header.SetIsDack (true);
   header.SetType (CSR_PKT_DACK);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetSpeedKey (8);
   header.SetHasAckWindow (true);
   header.SetAckBitmap (0);
   header.SetDackBitmap (1);
-  frame->AddHeader (header);
-  return frame;
+  return ProtectFeedback (header);
 }
 
 Time

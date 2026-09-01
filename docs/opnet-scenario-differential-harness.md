@@ -1,6 +1,6 @@
 # OPNET scenario importer and differential harness
 
-Updated: 2026-08-28
+Updated: 2026-09-01
 
 ## Purpose
 
@@ -462,11 +462,12 @@ evidence:
   `4 s + TIC` followed by the NWK wake one more `TIC` later. It also exercises
   the unmatched-sent fallback and proves that a same-scan final deletion
   completes before another entry is requeued.
-- `csr-ack-window-smoke` proves that ordinary, unknown, stale, DACK, and
-  zero-bit cumulative feedback use the delayed generic wake; requests within
-  one `TIC` coalesce without postponement, while wrong-destination feedback
-  produces no wake. It also proves that the source-disabled single-DACK path
-  leaves a known resend entry and its pending MAC copy untouched.
+- `csr-ack-window-smoke` proves that Pairwise16-authenticated ordinary,
+  unknown, stale, DACK, and zero-bit cumulative feedback use the delayed
+  generic wake; requests within one `TIC` coalesce without postponement, while
+  wrong-destination feedback produces no wake. It also proves that the
+  source-disabled single-DACK path leaves a known resend entry and its pending
+  MAC copy untouched.
 - `csr-hop-dack-hold-smoke` keeps the independent 20-/40-second DACK-release
   timing checks and additionally requires feedback wakes at receipt plus one
   `TIC`, expiry wakes at nominal hold plus two `TIC`s, and coalescing for
