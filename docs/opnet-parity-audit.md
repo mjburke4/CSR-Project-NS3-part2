@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-08-30
+Updated: 2026-08-31
 
 ## Scope and confidence limits
 
@@ -33,7 +33,7 @@ OPNET/ns-3 event-trace comparison.
 | Area | Estimated parity | Evidence and remaining uncertainty |
 | --- | ---: | --- |
 | Visible NWK wrapper behavior | 95-98% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, source-owned self capability, source-exact same-cycle grouped changed-route fanout, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, and fixed packet/control envelopes are covered. |
-| Full NWK routing behavior | 90-94% | ARL byte-stream exchange, self-route capability advertisement, grouped changed-route propagation with NWK-owned residual-destination retry, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. Optional same-pass incremental INFO coupling remains a known discrepancy. |
+| Full NWK routing behavior | 90-94% | ARL byte-stream exchange, self-route capability advertisement, same-pass INFO/changed-route propagation with NWK-owned residual-destination retry, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
 | HOP | 93-96% | ACK/DACK windows, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
 | Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
@@ -121,15 +121,17 @@ completion.
   from snapshots and a nonzero-to-zero change is sent as DELETE. On receipt,
   the advertisement controls routing capability while direct reachability and
   HELLO role metadata remain independent.
-- Source-exact grouped changed-route propagation when no routing-INFO mutation
-  is pending: a same-time processing pass
-  freezes each changed destination once in newest-created-first order, emits
-  one mixed UPDATE/DELETE record stream, excludes those destinations from a
-  same-pass snapshot, and consumes the flags even with no recipients. Active
-  neighbors are grouped newest-created-first in sets of ten; every group reuses
-  the same section bytes and starting sequence, the next logical stream
-  advances by the number of groups, and retained-owner LIFO order determines
-  the NWK-to-HOP section/group handoff.
+- Source-exact grouped same-pass routing propagation: a processing pass freezes
+  each changed destination once in newest-created-first order and optionally
+  prepends the changed 17-byte INFO record to the same mixed UPDATE/DELETE
+  stream. INFO-only passes are sent without FLUSH. Same-pass snapshots run
+  first and omit the frozen destinations; INFO and destination dirty state are
+  consumed even with no recipients. Power and margin fields preserve the
+  wrapper's signed `int16` truncation toward zero. Active neighbors are
+  grouped newest-created-first in sets of ten; every group reuses the same
+  section bytes and starting sequence. The next logical stream advances by the
+  number of groups, and retained-owner LIFO order determines the NWK-to-HOP
+  section/group handoff.
 - End-to-end 24-bit node IDs with `0xFFFFFF` broadcast, exact big-endian node
   serialization in NWK/HOP/HELLO/SNMP headers, and golden 24/16/32-bit ARL
   record tests. HOP sequence and ARL hop-count fields remain 16-bit.
@@ -586,15 +588,11 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Close the remaining source-backed ARL control edge by coupling an optional
-   changed INFO record to the same incremental stream. Keep ECC/prior-stage
-   rejection accounting as a separate statistic-identity problem rather than
-   folding it into queue calibration.
-2. When licensed Modeler access is available, execute the prepared
+1. When licensed Modeler access is available, execute the prepared
    reservation/collision case, retain its CSV and provenance manifest,
    validate it, and run the event-order differential comparison.
-3. Reproduce synchronization-threshold variance for calibrated runs.
-4. Close exact security-wrapper gaps for remaining HOP control packets and the
+2. Reproduce synchronization-threshold variance for calibrated runs.
+3. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
 
@@ -630,9 +628,9 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Current regression baseline
 
-All 36 CSR executable targets build on this audit revision. The 34 focused
+All 37 CSR executable targets build on this audit revision. The 35 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (36/36). All 143 focused Python tests pass; the suite additionally
+workflow pass (37/37). All 143 focused Python tests pass; the suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end

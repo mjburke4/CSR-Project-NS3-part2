@@ -83,6 +83,12 @@ OPNET NWK-owned residual routing retry parity test:
 3. Run: ./ns3 run csr-nwk-residual-routing-retry-smoke
 4. Expected: PASS: NWK-owned residual routing retry
 
+OPNET same-pass routing INFO coupling parity test:
+1. Copy csr-nwk-same-pass-info-coupling-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-nwk-same-pass-info-coupling-smoke
+3. Run: ./ns3 run csr-nwk-same-pass-info-coupling-smoke
+4. Expected: PASS: same-pass routing INFO coupling
+
 OPNET preamble freshness and aggregate selection parity test:
 1. Copy csr-mac-preamble-selection-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-mac-preamble-selection-smoke

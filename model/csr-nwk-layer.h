@@ -151,7 +151,17 @@ public:
   {
     NS_ABORT_MSG_IF (!CsrIsOperationalRateKey (rateKbps),
                      "CSR NWK maximum speed is not operationally defined");
+
+    CsrHelloHeader::RoutingInfo previousInfo =
+      BuildLocalRoutingInfo ();
+
     m_maxCfgSpeedKbps = rateKbps;
+
+    if (!SameRoutingInfo (previousInfo, BuildLocalRoutingInfo ()))
+      {
+        MarkRoutingInfoChanged ("maximum speed changed");
+      }
+
     if (m_hop != nullptr)
       {
         m_hop->SetMaxSpeedKbps (rateKbps);
@@ -180,12 +190,22 @@ public:
                      !std::isfinite (linkMarginDb) ||
                      minPowerDbm > maxPowerDbm,
                      "CSR NWK link-control power range is invalid");
+
+    CsrHelloHeader::RoutingInfo previousInfo =
+      BuildLocalRoutingInfo ();
+
     m_minSpeedKey = minSpeedKbps;
     m_minCfgSpeedKbps = minSpeedKbps;
     m_maxCfgSpeedKbps = maxSpeedKbps;
     m_minTxPowerDbm = minPowerDbm;
     m_maxTxPowerDbm = maxPowerDbm;
     m_linkMarginDb = linkMarginDb;
+
+    if (!SameRoutingInfo (previousInfo, BuildLocalRoutingInfo ()))
+      {
+        MarkRoutingInfoChanged ("link-control limits changed");
+      }
+
     if (m_hop != nullptr)
       {
         m_hop->ConfigureLinkControl (minSpeedKbps,
@@ -1946,6 +1966,18 @@ private:
   void
   ScheduleRoutesProcess ();
 
+  CsrHelloHeader::RoutingInfo
+  BuildLocalRoutingInfo () const;
+
+  static bool
+  SameRoutingInfo (
+    const CsrHelloHeader::RoutingInfo &first,
+    const CsrHelloHeader::RoutingInfo &second);
+
+  void
+  MarkRoutingInfoChanged (
+    const char *reason);
+
   std::vector<CsrNodeId>
   OrderChangedDestinations (
     const std::set<CsrNodeId> &destinations) const;
@@ -1956,7 +1988,8 @@ private:
   std::vector<Ptr<Packet>>
   BuildGroupedRouteChangePayloads (
     const std::vector<CsrNodeId> &destinations,
-    uint32_t routingSequence);
+    uint32_t routingSequence,
+    bool includeRoutingInfo);
 
   bool
   AppendGroupedRouteChangeRecord (
@@ -1972,7 +2005,8 @@ private:
 
   void
   SendGroupedAutomaticRouteChanges (
-    const std::vector<CsrNodeId> &destinations);
+    const std::vector<CsrNodeId> &destinations,
+    bool includeRoutingInfo);
 
   struct OwnedRoutingControl
   {
@@ -2838,11 +2872,19 @@ public:
     int16_t lowCx10,
     int16_t highCx10)
   {
+    CsrHelloHeader::RoutingInfo previousInfo =
+      BuildLocalRoutingInfo ();
+
     m_tempLowCx10 =
       lowCx10;
 
     m_tempHighCx10 =
       highCx10;
+
+    if (!SameRoutingInfo (previousInfo, BuildLocalRoutingInfo ()))
+      {
+        MarkRoutingInfoChanged ("temperature limits changed");
+      }
 
     std::cout << "[NWK " << m_nodeId
               << "] temperature limits"
@@ -3144,6 +3186,10 @@ private:
   std::map<std::pair<CsrNodeId,CsrNodeId>, NsdpEntry> m_nsdp;
   std::set<CsrNodeId>
     m_pendingSelectedRouteChanges;
+
+  // routesNotifyChange() coalesces link/operating-limit changes with every
+  // selected-destination change handled by the next routesProcess() pass.
+  bool m_pendingRoutingInfoChange {false};
 
   // Legacy routesFindBestRoute() prefers the
   // currently selected neighbor when cost and
@@ -8959,31 +9005,9 @@ CsrNetLayer::BuildArlRoutingSnapshotPayloads (
   uint32_t routingSequence)
 {
   CsrArlRoutingMessage::Builder builder;
-  CsrHelloHeader::RoutingInfo info;
-
-  info.minSpeedKbps =
-    static_cast<uint16_t> (
-      std::clamp (m_minCfgSpeedKbps, 0, 65535));
-  info.maxSpeedKbps =
-    static_cast<uint16_t> (
-      std::clamp (m_maxCfgSpeedKbps, 0, 65535));
-  info.minPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (m_minTxPowerDbm * 10.0));
-  info.maxPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (m_maxTxPowerDbm * 10.0));
-  info.linkMarginDbX10 =
-    static_cast<int16_t> (
-      std::round (m_linkMarginDb * 10.0));
-  info.lowPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (m_txAmpBreakpointDbm * 10.0));
-  info.tempLowCx10 = m_tempLowCx10;
-  info.tempHighCx10 = m_tempHighCx10;
 
   // routesProcess() constructs one INFO + UPDATE* + FLUSH record stream.
-  builder.AddInfo (info);
+  builder.AddInfo (BuildLocalRoutingInfo ());
 
   uint32_t advertisedRoutes = 0;
 
@@ -9647,6 +9671,66 @@ CsrNetLayer::SameSelectedRouteState (
       second.path;
 }
 
+CsrHelloHeader::RoutingInfo
+CsrNetLayer::BuildLocalRoutingInfo () const
+{
+  CsrHelloHeader::RoutingInfo info;
+
+  info.minSpeedKbps =
+    static_cast<uint16_t> (
+      std::clamp (m_minCfgSpeedKbps, 0, 65535));
+  info.maxSpeedKbps =
+    static_cast<uint16_t> (
+      std::clamp (m_maxCfgSpeedKbps, 0, 65535));
+  // The OPNET wrapper returns these double-valued limits through int16
+  // accessors, so C conversion truncates the scaled value toward zero.
+  info.minPowerDbmX10 =
+    static_cast<int16_t> (
+      m_minTxPowerDbm * 10.0);
+  info.maxPowerDbmX10 =
+    static_cast<int16_t> (
+      m_maxTxPowerDbm * 10.0);
+  info.linkMarginDbX10 =
+    static_cast<int16_t> (
+      m_linkMarginDb * 10.0);
+  info.lowPowerDbmX10 =
+    static_cast<int16_t> (
+      m_txAmpBreakpointDbm * 10.0);
+  info.tempLowCx10 = m_tempLowCx10;
+  info.tempHighCx10 = m_tempHighCx10;
+
+  return info;
+}
+
+bool
+CsrNetLayer::SameRoutingInfo (
+  const CsrHelloHeader::RoutingInfo &first,
+  const CsrHelloHeader::RoutingInfo &second)
+{
+  return first.minSpeedKbps == second.minSpeedKbps &&
+         first.maxSpeedKbps == second.maxSpeedKbps &&
+         first.minPowerDbmX10 == second.minPowerDbmX10 &&
+         first.maxPowerDbmX10 == second.maxPowerDbmX10 &&
+         first.linkMarginDbX10 == second.linkMarginDbX10 &&
+         first.lowPowerDbmX10 == second.lowPowerDbmX10 &&
+         first.tempLowCx10 == second.tempLowCx10 &&
+         first.tempHighCx10 == second.tempHighCx10;
+}
+
+void
+CsrNetLayer::MarkRoutingInfoChanged (
+  const char *reason)
+{
+  m_pendingRoutingInfoChange = true;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Routing INFO changed"
+            << " reason=" << reason
+            << std::endl;
+
+  ScheduleRoutesProcess ();
+}
+
 void
 CsrNetLayer::MarkSelectedRouteChanged (
   CsrNodeId destination,
@@ -9741,6 +9825,10 @@ void
 CsrNetLayer::
 ReportPendingSelectedRouteChanges ()
 {
+  bool routingInfoChanged =
+    m_pendingRoutingInfoChange;
+  m_pendingRoutingInfoChange = false;
+
   std::set<CsrNodeId> changedSet;
 
   changedSet.swap (
@@ -9794,6 +9882,8 @@ ReportPendingSelectedRouteChanges ()
             << "] routesProcess grouped selected-route changes"
             << " count="
             << destinations.size ()
+            << " infoChanged="
+            << (routingInfoChanged ? 1 : 0)
             << " time="
             << Simulator::Now ().GetSeconds ()
             << std::endl;
@@ -9814,7 +9904,9 @@ ReportPendingSelectedRouteChanges ()
       return;
     }
 
-  SendGroupedAutomaticRouteChanges (destinations);
+  SendGroupedAutomaticRouteChanges (
+    destinations,
+    routingInfoChanged);
 }
 
 std::vector<CsrNodeId>
@@ -9961,9 +10053,18 @@ CsrNetLayer::AppendGroupedRouteChangeRecord (
 std::vector<Ptr<Packet>>
 CsrNetLayer::BuildGroupedRouteChangePayloads (
   const std::vector<CsrNodeId> &destinations,
-  uint32_t routingSequence)
+  uint32_t routingSequence,
+  bool includeRoutingInfo)
 {
   CsrArlRoutingMessage::Builder builder;
+
+  if (includeRoutingInfo)
+    {
+      // routesProcess() places its optional source INFO before every changed
+      // destination in the same logical incremental byte stream.
+      builder.AddInfo (BuildLocalRoutingInfo ());
+    }
+
   for (CsrNodeId destination : destinations)
     {
       if (!AppendGroupedRouteChangeRecord (builder, destination))
@@ -10305,9 +10406,10 @@ CsrNetLayer::ProcessOwnedRoutingControlRetries ()
 
 void
 CsrNetLayer::SendGroupedAutomaticRouteChanges (
-  const std::vector<CsrNodeId> &destinations)
+  const std::vector<CsrNodeId> &destinations,
+  bool includeRoutingInfo)
 {
-  if (destinations.empty ())
+  if (destinations.empty () && !includeRoutingInfo)
     {
       return;
     }
@@ -10322,6 +10424,7 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
       std::cout << "[NWK " << m_nodeId
                 << "] Consumed grouped route changes without recipients"
                 << " destinations=" << destinations.size ()
+                << " infoChanged=" << (includeRoutingInfo ? 1 : 0)
                 << std::endl;
       return;
     }
@@ -10343,7 +10446,8 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
   std::vector<Ptr<Packet>> payloads =
     BuildGroupedRouteChangePayloads (
       destinations,
-      routingSequence);
+      routingSequence,
+      includeRoutingInfo);
 
   if (payloads.empty ())
     {
@@ -10358,6 +10462,7 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
   std::cout << "[NWK " << m_nodeId
             << "] Sending source-exact grouped route changes"
             << " routingSequence=" << routingSequence
+            << " infoChanged=" << (includeRoutingInfo ? 1 : 0)
             << " destinations=" << destinations.size ()
             << " neighbors=" << neighbors.size ()
             << " groups=" << groups.size ()

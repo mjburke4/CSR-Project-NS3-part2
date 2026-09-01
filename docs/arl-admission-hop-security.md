@@ -1,6 +1,6 @@
 # ARL neighbor admission and hop-security foundation
 
-Updated: 2026-08-28
+Updated: 2026-08-31
 
 ## Implemented scope
 
@@ -149,8 +149,12 @@ count is absent.
   one destination per ACK, defers final-NACK recovery to a later same-time
   event, prunes inactive residuals, reuses unchanged routing bytes/metadata,
   and assigns fresh HOP sequences only to the ordered residual group.
-- The complete build and regression pass: 34 focused smoke targets,
-  `csr-mac-demo-split`, and the imported-scenario runner (36/36).
+- `csr-nwk-same-pass-info-coupling-smoke.cc` checks exact INFO-first mixed
+  INFO/UPDATE/DELETE bytes, INFO-only final-value coalescing, 10+1 neighbor
+  grouping, no-recipient consumption without replay or sequence advancement,
+  and exact 694-/83-byte body slicing for a 777-byte logical stream.
+- The complete build and regression pass: 35 focused smoke targets,
+  `csr-mac-demo-split`, and the imported-scenario runner (37/37).
 
 ## Deliberate boundary
 
@@ -169,17 +173,24 @@ and eligible link-cost reroutes.
 Source-owned self-route capability advertisement is now covered, including
 zero-hop UPDATE serialization, HELLO-independent receive authority, and
 DELETE-to-ordinary behavior that preserves direct reachability. Grouped
-same-time changed-route propagation is also source-exact through the NWK-to-HOP
-handoff when no routing-INFO mutation is pending, including destination/
-neighbor creation order, combined UPDATE/DELETE records, section splitting,
-ten-neighbor grouping, sequence advancement, and same-pass snapshot exclusion.
+same-time propagation is also source-exact through the NWK-to-HOP handoff,
+including an optional INFO record before combined UPDATE/DELETE records,
+INFO-only sends, destination/neighbor creation order, section splitting,
+ten-neighbor grouping, sequence advancement, no-recipient consumption, and
+same-pass snapshot exclusion. The INFO power and margin fields also preserve
+the wrapper's signed `int16` conversion, including truncation toward zero.
 NWK-owned residual retry is now source-backed for those grouped automatic
 updates: partial ACKs mutate only NWK's retained destination set, HOP keeps its
 whole-frame retry ownership, and a final NACK schedules an exact-payload retry
 after HOP releases custody. The routes-library all-or-none buffer check is
 preserved behind a default-not-full seam because the supplied operational
-OPNET wrapper hardcodes `hopSecCheckBufferFull()` to return zero. Optional
-same-pass INFO coupling remains separate parity work.
+OPNET wrapper hardcodes `hopSecCheckBufferFull()` to return zero.
+
+The changed-value INFO path is source-exact. Whether a legacy
+`routesNotifyChange()` call whose newly polled fields are byte-identical still
+sets the INFO dirty flag cannot be rechecked from the currently materialized
+source set. ns-3 suppresses that wire-identical setter case as inferred legacy
+behavior; it does not affect the source-confirmed changed-value path.
 
 The default ns-3 key arrays are deterministic and non-secret so existing
 scenarios remain runnable; parity or security experiments should explicitly
