@@ -555,6 +555,12 @@ shifted/mobile schemas, DES parsing, gateway-flow inference, alias
 normalization, timestamp tolerance, missing-event reporting, and both complete
 runner/comparator workflows.
 
+`utils/testdata/opnet-trace-fixture.csv` is a synthetic alias-schema mirror
+used only to test that end-to-end runner/comparator plumbing.  Its time-zero
+gateway `route_change` row mirrors the source-owned self-capability event that
+the live runner now emits during scenario construction.  It is not an exported
+OPNET packet/event trace and does not provide differential parity evidence.
+
 ## Running the historical aggregate workflow
 
 The aggregate workflow accepts the same canonical scenario CSV and runner,

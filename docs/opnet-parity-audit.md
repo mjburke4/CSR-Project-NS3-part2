@@ -640,7 +640,7 @@ extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
 aggregate workflow. The importer decodes all 12 recovered campus network
 models and paired DES environments, while strict vector extraction accepts all
 10 complete historical results and rejects both partial fragments. The event
-end-to-end fixture produces five ordered events on each side with zero missing,
+end-to-end fixture produces six ordered events on each side with zero missing,
 extra, replaced, field-mismatch, or coverage-gap results. The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
