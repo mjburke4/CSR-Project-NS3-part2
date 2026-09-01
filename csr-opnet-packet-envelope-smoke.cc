@@ -302,17 +302,15 @@ CheckCompatibilityInference ()
   Require (CsrGetOpnetWireSize (data) == 42,
            "DATA did not map to br_Mac + br_Hop + br_Network + payload");
 
-  Ptr<Packet> ack = Create<Packet> ();
-  CsrHeader ackHeader (0x010203, 0x040506, 0x1234, 7, false, true);
-  ackHeader.SetType (CSR_PKT_ACK);
-  ackHeader.SetHasAckWindow (true);
-  ackHeader.SetAckBitmap (0x0123456789abcdefULL);
-  ackHeader.SetDackBitmap (0xfedcba9876543210ULL);
-  ack->AddHeader (ackHeader);
-  Require (CsrAnnotateOpnetEnvelope (ack),
-           "ACK compatibility envelope was not recognized");
-  Require (CsrGetOpnetWireSize (ack) == 25,
-           "zero-bit ACK/DACK registers changed the modeled ACK size");
+  Ptr<Packet> controlAck = Create<Packet> ();
+  CsrHeader controlAckHeader (
+    0x010203, 0x040506, 0x1234, 7, false, true);
+  controlAckHeader.SetType (CSR_PKT_ACK);
+  controlAck->AddHeader (controlAckHeader);
+  Require (CsrAnnotateOpnetEnvelope (controlAck),
+           "control ACK compatibility envelope was not recognized");
+  Require (CsrGetOpnetWireSize (controlAck) == 25,
+           "bare control ACK did not model 17 + 8 bytes");
 
   Ptr<Packet> securedAck = Create<Packet> (18);
   CsrHeader securedAckHeader (
@@ -323,7 +321,36 @@ CheckCompatibilityInference ()
   Require (CsrAnnotateOpnetEnvelope (securedAck),
            "Pairwise16 ACK compatibility envelope was not recognized");
   Require (CsrGetOpnetWireSize (securedAck) == 30,
-           "Pairwise16 ACK did not add exactly five security bytes");
+           "Pairwise16 control ACK did not model 17 + 8 + 5 bytes");
+
+  Ptr<Packet> cumulativeAck = Create<Packet> ();
+  CsrHeader cumulativeAckHeader (
+    0x010203, 0x040506, 0x1234, 7, false, true);
+  cumulativeAckHeader.SetType (CSR_PKT_ACK);
+  cumulativeAckHeader.SetHasAckWindow (true);
+  cumulativeAckHeader.SetAckBitmap (0x0123456789abcdefULL);
+  cumulativeAckHeader.SetDackBitmap (0xfedcba9876543210ULL);
+  cumulativeAck->AddHeader (cumulativeAckHeader);
+  Require (CsrAnnotateOpnetEnvelope (cumulativeAck),
+           "cumulative ACK compatibility envelope was not recognized");
+  Require (CsrGetOpnetWireSize (cumulativeAck) == 41,
+           "bare cumulative ACK did not model 17 + 8 + 16 bytes");
+
+  // Pairwise16 wraps the 29-byte cumulative logical body as
+  // key/sequence(3) + plaintext(29) + tag(2).
+  Ptr<Packet> securedCumulativeAck = Create<Packet> (34);
+  CsrHeader securedCumulativeAckHeader (
+    0x010203, 0x040506, 0x1234, 7, false, true);
+  securedCumulativeAckHeader.SetType (CSR_PKT_ACK);
+  securedCumulativeAckHeader.SetHasAckWindow (true);
+  securedCumulativeAckHeader.SetAckBitmap (0x0123456789abcdefULL);
+  securedCumulativeAckHeader.SetDackBitmap (0xfedcba9876543210ULL);
+  securedCumulativeAckHeader.SetSecurityCount (7);
+  securedCumulativeAck->AddHeader (securedCumulativeAckHeader);
+  Require (CsrAnnotateOpnetEnvelope (securedCumulativeAck),
+           "Pairwise16 cumulative ACK envelope was not recognized");
+  Require (CsrGetOpnetWireSize (securedCumulativeAck) == 46,
+           "Pairwise16 cumulative ACK did not model 17 + 8 + 16 + 5 bytes");
 
   Ptr<Packet> snmpPayload = Create<Packet> ();
   CsrSnmpHeader snmpHeader;

@@ -869,6 +869,7 @@ private:
   static constexpr uint8_t LEGACY_ROUTING_UPDATE_PACKET_TYPE = 8;
   static constexpr uint8_t LEGACY_ACK_PACKET_TYPE = 0;
   static constexpr uint32_t LEGACY_ACK_HOP_SECURITY_OVERHEAD = 5;
+  static constexpr uint32_t LEGACY_ACK_WINDOW_OVERHEAD = 16;
 
   LinkControlResult ComputeLinkControl (CsrNodeId dest);
   void ApplyLinkControl (CsrHeader &header,
@@ -1231,6 +1232,7 @@ CsrHopLayer::ProtectAckFrame (CsrHeader header)
       CsrOpnetPacketFormat::Mac) +
       CsrOpnetPacketModel::GetFixedSizeBytes (
         CsrOpnetPacketFormat::Ack) +
+      (header.HasAckWindow () ? LEGACY_ACK_WINDOW_OVERHEAD : 0) +
       LEGACY_ACK_HOP_SECURITY_OVERHEAD);
   return protectedFrame;
 }

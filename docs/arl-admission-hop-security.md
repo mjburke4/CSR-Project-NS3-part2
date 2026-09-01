@@ -149,9 +149,9 @@ count is absent.
   Pairwise32, and Pairwise32Encrypt golden records; plaintext/ciphertext round
   trips; wrong-key, wrong-type, tamper, malformed, and replay rejection;
   authentication-before-ACK/delivery; plaintext/tampered/malformed ACK
-  rejection; authenticated ACK/DACK state and wake ordering; a live 30-byte
-  Pairwise16 DACK; exact-once AppNeighborcast; and live over-air sends for
-  Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
+  rejection; authenticated ACK/DACK state and wake ordering; a live 46-byte
+  cumulative Pairwise16 DACK; exact-once AppNeighborcast; and live over-air
+  sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
 - `csr-nwk-residual-routing-retry-smoke.cc` checks that NWK retains the exact
   grouped plaintext owner while HOP retries the original multicast, removes
   one destination per ACK, defers final-NACK recovery to a later same-time
@@ -169,7 +169,9 @@ count is absent.
 All enabled HOP-security transforms now have portable provider coverage.
 Pairwise16 is connected to ordinary DATA and the common ACK/DACK packet type,
 Pairwise32Encrypt has an explicit one-hop DATA path, and Group32Encrypt is
-connected to AppNeighborcast. Exact security wrapping for remaining control
+connected to AppNeighborcast. The ACK/DACK Pairwise16 policy is source-exact;
+the ns-3 logical-body byte mapping remains unverified without a production
+golden protected record. Exact security wrapping for remaining control
 messages (including NeighborCheck), the distinct network-security modes, and
 operational key-store behavior remain outside this step and require
 packet-type-table or differential-trace confirmation before they can be

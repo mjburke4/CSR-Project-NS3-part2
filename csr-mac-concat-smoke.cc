@@ -46,6 +46,24 @@ BuildFrame (uint16_t seq,
   return frame;
 }
 
+Ptr<Packet>
+BuildProtectedWindowAck (uint16_t seq)
+{
+  CsrHeader header (1, 2, seq, 0, false, true);
+  header.SetType (CSR_PKT_ACK);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetSpeedKey (8);
+  header.SetHasAckWindow (true);
+  header.SetAckBitmap (0x1);
+  header.SetDackBitmap (0);
+  header.SetSecurityCount (7);
+
+  // Pairwise16 key/sequence(3) + cumulative logical body(29) + tag(2).
+  Ptr<Packet> frame = Create<Packet> (34);
+  frame->AddHeader (header);
+  return frame;
+}
+
 void
 RecordFrame (Ptr<Packet> frame, double, double)
 {
@@ -188,6 +206,72 @@ RunByteLimitScenario ()
 }
 
 void
+CheckAckWindowByteLimit (Ptr<CsrNetDevice> sender)
+{
+  Require (g_sequences.size () == 10,
+           "cumulative ACK byte-limit scenario lost a queued segment");
+  Require (g_sequences[0] == 100 &&
+             g_sequences[1] == 1 &&
+             g_sequences[2] == 2 &&
+             g_sequences[3] == 3 &&
+             g_sequences[4] == 4,
+           "46-byte cumulative ACK did not precede exactly four DATA frames");
+  for (std::size_t i = 1; i < 5; ++i)
+    {
+      Require (g_receiveTimes[i] == g_receiveTimes[0],
+               "first cumulative-ACK aggregate split below 214 bytes");
+    }
+  Require (g_sequences[5] == 100 && g_sequences[6] == 5 &&
+             g_receiveTimes[5] > g_receiveTimes[4] &&
+             g_receiveTimes[6] == g_receiveTimes[5],
+           "fifth DATA frame incorrectly fit beside the 46-byte ACK");
+  Require (sender->GetMac ().GetTransmittedFrameCount () == 5,
+           "cumulative ACK did not retain its five-transmission budget");
+  Require (sender->GetMac ().GetQueuedFrameCount () == 0,
+           "cumulative ACK byte-limit scenario left frames queued");
+}
+
+void
+RunAckWindowByteLimitScenario ()
+{
+  g_sequences.clear ();
+  g_receiveTimes.clear ();
+
+  Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (2);
+  sender->AddPeer (receiver);
+  receiver->GetMac ().SetRxCallback (MakeCallback (&RecordFrame));
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  sender->GetPhy ().SetPerModel (noErrors);
+  receiver->GetPhy ().SetPerModel (noErrors);
+
+  for (uint16_t seq = 1; seq <= 5; ++seq)
+    {
+      sender->GetMac ().EnqueueTxFrame (
+        BuildFrame (seq, false, 17), 2, 5, false);
+    }
+
+  Ptr<Packet> ack = BuildProtectedWindowAck (100);
+  Require (CsrAnnotateOpnetEnvelope (ack) &&
+             CsrGetOpnetWireSize (ack) == 46,
+           "protected cumulative ACK did not enter MAC as 46 bytes");
+  sender->GetMac ().EnqueueTxFrame (ack, 2, 0, false);
+
+  // At 8 kbit/s the strict limit is <256 bytes.  The first aggregate is one
+  // 46-byte ACK plus four 42-byte DATA frames (214 bytes); a fifth DATA frame
+  // would reach the strict 256-byte limit and must remain queued for the next
+  // wake.  A wrong 41-byte cumulative ACK would total only 251 bytes and fit.
+  Simulator::Schedule (Seconds (7.5),
+                       &CheckAckWindowByteLimit,
+                       sender);
+  Simulator::Stop (Seconds (7.6));
+  Simulator::Run ();
+  Simulator::Destroy ();
+}
+
+void
 RunSegmentLimitScenario ()
 {
   g_sequences.clear ();
@@ -223,6 +307,7 @@ main ()
   Time::SetResolution (Time::NS);
   RunMixedAckDataScenario ();
   RunByteLimitScenario ();
+  RunAckWindowByteLimitScenario ();
   RunSegmentLimitScenario ();
   std::cout << "PASS: OPNET MAC packet concatenation parity test"
             << std::endl;

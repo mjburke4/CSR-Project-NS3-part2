@@ -15,6 +15,10 @@ namespace csr_opnet_detail {
 static constexpr uint32_t GROUP_ESTABLISH_OVERHEAD = 7;
 static constexpr uint32_t GROUP16_OVERHEAD = 5;
 static constexpr uint32_t PAIRWISE16_OVERHEAD = 5;
+// br_Ack carries two optional 64-bit cumulative receive registers.  They are
+// set for ordinary DATA ACK/DACK feedback and remain unset for exact control
+// ACKs.
+static constexpr uint32_t ACK_WINDOW_OVERHEAD = 16;
 
 inline std::vector<uint8_t>
 CopyPacketBytes (Ptr<const Packet> packet)
@@ -120,6 +124,8 @@ CsrAnnotateOpnetEnvelope (Ptr<Packet> packet)
       modeledSize =
         CsrOpnetPacketModel::GetFixedSizeBytes (CsrOpnetPacketFormat::Mac) +
         CsrOpnetPacketModel::GetFixedSizeBytes (CsrOpnetPacketFormat::Ack) +
+        (header.HasAckWindow () ?
+           csr_opnet_detail::ACK_WINDOW_OVERHEAD : 0) +
         (header.HasSecurityCount () ?
            csr_opnet_detail::PAIRWISE16_OVERHEAD : 0);
       break;
