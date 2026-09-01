@@ -14,6 +14,7 @@ namespace csr_opnet_detail {
 
 static constexpr uint32_t GROUP_ESTABLISH_OVERHEAD = 7;
 static constexpr uint32_t GROUP16_OVERHEAD = 5;
+static constexpr uint32_t PAIRWISE16_OVERHEAD = 5;
 
 inline std::vector<uint8_t>
 CopyPacketBytes (Ptr<const Packet> packet)
@@ -118,7 +119,9 @@ CsrAnnotateOpnetEnvelope (Ptr<Packet> packet)
       rootFormat = CsrOpnetPacketFormat::Mac;
       modeledSize =
         CsrOpnetPacketModel::GetFixedSizeBytes (CsrOpnetPacketFormat::Mac) +
-        CsrOpnetPacketModel::GetFixedSizeBytes (CsrOpnetPacketFormat::Ack);
+        CsrOpnetPacketModel::GetFixedSizeBytes (CsrOpnetPacketFormat::Ack) +
+        (header.HasSecurityCount () ?
+           csr_opnet_detail::PAIRWISE16_OVERHEAD : 0);
       break;
     case CSR_PKT_HELLO:
       rootFormat = CsrOpnetPacketFormat::Hello;

@@ -314,6 +314,17 @@ CheckCompatibilityInference ()
   Require (CsrGetOpnetWireSize (ack) == 25,
            "zero-bit ACK/DACK registers changed the modeled ACK size");
 
+  Ptr<Packet> securedAck = Create<Packet> (18);
+  CsrHeader securedAckHeader (
+    0x010203, 0x040506, 0x1234, 7, false, true);
+  securedAckHeader.SetType (CSR_PKT_ACK);
+  securedAckHeader.SetSecurityCount (7);
+  securedAck->AddHeader (securedAckHeader);
+  Require (CsrAnnotateOpnetEnvelope (securedAck),
+           "Pairwise16 ACK compatibility envelope was not recognized");
+  Require (CsrGetOpnetWireSize (securedAck) == 30,
+           "Pairwise16 ACK did not add exactly five security bytes");
+
   Ptr<Packet> snmpPayload = Create<Packet> ();
   CsrSnmpHeader snmpHeader;
   snmpHeader.SetSource (0x010203);

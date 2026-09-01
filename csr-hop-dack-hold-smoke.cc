@@ -91,7 +91,23 @@ BuildDack (CsrNodeId neighbor)
   header.SetAckBitmap (0);
   header.SetDackBitmap (1);
 
-  Ptr<Packet> frame = Create<Packet> ();
+  Ptr<Packet> body = Create<Packet> ();
+  body->AddHeader (header);
+  std::vector<uint8_t> plaintext (body->GetSize ());
+  body->CopyData (plaintext.data (), plaintext.size ());
+
+  CsrHopSecurityState sender;
+  sender.SetNodeId (neighbor);
+  CsrProtectedPairwiseMessage secured =
+    sender.ProtectPairwiseMessage (
+      SOURCE_NODE,
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      plaintext);
+  Ptr<Packet> frame = Create<Packet> (secured.record.data (),
+                                      secured.record.size ());
+  header.SetSecurityCount (sender.GetOwnSecurityCount ());
+  header.SetLinkControl (8, 0.0, 0.0);
   frame->AddHeader (header);
   return frame;
 }

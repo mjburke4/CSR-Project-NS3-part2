@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-08-30
+Updated: 2026-09-01
 
 ## Scope and confidence limits
 
@@ -33,10 +33,10 @@ OPNET/ns-3 event-trace comparison.
 | Area | Estimated parity | Evidence and remaining uncertainty |
 | --- | ---: | --- |
 | Visible NWK wrapper behavior | 95-98% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, source-owned self capability, source-exact same-cycle grouped changed-route fanout, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, and fixed packet/control envelopes are covered. |
-| Full NWK routing behavior | 88-93% | ARL byte-stream exchange, self-route capability advertisement, grouped changed-route propagation, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. Optional same-pass incremental INFO coupling and NWK-owned residual-destination retry remain known discrepancies. |
+| Full NWK routing behavior | 90-94% | ARL byte-stream exchange, self-route capability advertisement, same-pass INFO/changed-route propagation with NWK-owned residual-destination retry, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 93-96% | ACK/DACK windows, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
-| Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA uses Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before ACK/delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
+| HOP | 93-96% | ACK/DACK windows, source-exact Pairwise16 ACK/DACK wrapping, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
+| Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA and packet-type-0 ACK/DACK use Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before state mutation or delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
 | Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and differential traces. |
 | PHY | 84-91% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, gains, bandwidth-scaled noise, mixed-/same-rate interference, exact modulation curves, interval errors, ECC, closure ordering, final accept/drop, and promoted scenario radio/link attributes are live. Remaining uncertainty is threshold variance, opaque off-grid interpolation, external LOS/TMM closure, and authoritative trace calibration. |
@@ -94,6 +94,9 @@ completion.
   unacknowledged DATA, plus Pairwise32Encrypt for explicit encrypted one-hop
   DATA. HMAC binds the source, destination, packet type, length, and protected
   record; AES-CTR uses the legacy source/destination/count/key/sequence IV.
+- Source-exact Pairwise16 protection for the common ACK/DACK packet type 0.
+  The complete logical ACK body authenticates before cancellation, custody
+  mutation, or the delayed NWK wake, and the modeled envelope is 30 bytes.
 - Live Group32Encrypt AppNeighborcast with a broadcast, non-ACKable envelope,
   authentication and replay checks before decrypt/delivery, and no HOP ACK.
 - Shared 12-bit group sequence/key-ID evolution, same-epoch one-way key
@@ -121,15 +124,17 @@ completion.
   from snapshots and a nonzero-to-zero change is sent as DELETE. On receipt,
   the advertisement controls routing capability while direct reachability and
   HELLO role metadata remain independent.
-- Source-exact grouped changed-route propagation when no routing-INFO mutation
-  is pending: a same-time processing pass
-  freezes each changed destination once in newest-created-first order, emits
-  one mixed UPDATE/DELETE record stream, excludes those destinations from a
-  same-pass snapshot, and consumes the flags even with no recipients. Active
-  neighbors are grouped newest-created-first in sets of ten; every group reuses
-  the same section bytes and starting sequence, the next logical stream
-  advances by the number of groups, and retained-owner LIFO order determines
-  the NWK-to-HOP section/group handoff.
+- Source-exact grouped same-pass routing propagation: a processing pass freezes
+  each changed destination once in newest-created-first order and optionally
+  prepends the changed 17-byte INFO record to the same mixed UPDATE/DELETE
+  stream. INFO-only passes are sent without FLUSH. Same-pass snapshots run
+  first and omit the frozen destinations; INFO and destination dirty state are
+  consumed even with no recipients. Power and margin fields preserve the
+  wrapper's signed `int16` truncation toward zero. Active neighbors are
+  grouped newest-created-first in sets of ten; every group reuses the same
+  section bytes and starting sequence. The next logical stream advances by the
+  number of groups, and retained-owner LIFO order determines the NWK-to-HOP
+  section/group handoff.
 - End-to-end 24-bit node IDs with `0xFFFFFF` broadcast, exact big-endian node
   serialization in NWK/HOP/HELLO/SNMP headers, and golden 24/16/32-bit ARL
   record tests. HOP sequence and ARL hop-count fields remain 16-bit.
@@ -586,16 +591,11 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Highest-priority remaining work
 
-1. Close the remaining source-backed ARL control edges: reproduce NWK-owned
-   reliable-control retry when only part of a destination group remains
-   pending, then couple an optional changed INFO record to the same incremental
-   stream. Keep ECC/prior-stage rejection accounting as a separate statistic-
-   identity problem rather than folding it into queue calibration.
-2. When licensed Modeler access is available, execute the prepared
+1. When licensed Modeler access is available, execute the prepared
    reservation/collision case, retain its CSV and provenance manifest,
    validate it, and run the event-order differential comparison.
-3. Reproduce synchronization-threshold variance for calibrated runs.
-4. Close exact security-wrapper gaps for remaining HOP control packets and the
+2. Reproduce synchronization-threshold variance for calibrated runs.
+3. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
 
@@ -631,16 +631,16 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Current regression baseline
 
-All 35 CSR executable targets build on this audit revision. The 33 focused
+All 37 CSR executable targets build on this audit revision. The 35 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (35/35). All 143 focused Python tests pass; the suite additionally
+workflow pass (37/37). All 143 focused Python tests pass; the suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
 aggregate workflow. The importer decodes all 12 recovered campus network
 models and paired DES environments, while strict vector extraction accepts all
 10 complete historical results and rejects both partial fragments. The event
-end-to-end fixture produces five ordered events on each side with zero missing,
+end-to-end fixture produces six ordered events on each side with zero missing,
 extra, replaced, field-mismatch, or coverage-gap results. The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
 zero-bit metadata, every live control-envelope inference branch, and aggregate
@@ -655,7 +655,8 @@ test adds exact GroupEstablish/Group16/Group32Encrypt records, deferred replay,
 both authentication halves, key evolution, previous-key handling, and fresh
 epoch redistribution. The remaining-security test adds independent
 Pairwise16/Pairwise32/Pairwise32Encrypt records, AES-CTR ciphertext, wrong-type
-and wrong-key rejection, pairwise auth-before-ACK/delivery, live encrypted
+and wrong-key rejection, pairwise auth-before-ACK/delivery, source-exact
+Pairwise16 ACK/DACK policy and live DACK capture, live encrypted
 AppNeighborcast, malformed-envelope rejection, and all three live send paths.
 The receive-contention test covers Search/Track timing, simultaneous collision,
 strongest-preamble capture, post-lock interference, RX-induced slot freezing,

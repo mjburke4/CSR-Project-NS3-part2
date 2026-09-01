@@ -4,6 +4,7 @@
 #include "csr-hello-header.h"
 #include "csr-hop-layer.h"
 #include <cmath>
+#include <list>
 #include <set>
 #include <algorithm>
 #include <sstream>
@@ -150,7 +151,17 @@ public:
   {
     NS_ABORT_MSG_IF (!CsrIsOperationalRateKey (rateKbps),
                      "CSR NWK maximum speed is not operationally defined");
+
+    CsrHelloHeader::RoutingInfo previousInfo =
+      BuildLocalRoutingInfo ();
+
     m_maxCfgSpeedKbps = rateKbps;
+
+    if (!SameRoutingInfo (previousInfo, BuildLocalRoutingInfo ()))
+      {
+        MarkRoutingInfoChanged ("maximum speed changed");
+      }
+
     if (m_hop != nullptr)
       {
         m_hop->SetMaxSpeedKbps (rateKbps);
@@ -179,12 +190,22 @@ public:
                      !std::isfinite (linkMarginDb) ||
                      minPowerDbm > maxPowerDbm,
                      "CSR NWK link-control power range is invalid");
+
+    CsrHelloHeader::RoutingInfo previousInfo =
+      BuildLocalRoutingInfo ();
+
     m_minSpeedKey = minSpeedKbps;
     m_minCfgSpeedKbps = minSpeedKbps;
     m_maxCfgSpeedKbps = maxSpeedKbps;
     m_minTxPowerDbm = minPowerDbm;
     m_maxTxPowerDbm = maxPowerDbm;
     m_linkMarginDb = linkMarginDb;
+
+    if (!SameRoutingInfo (previousInfo, BuildLocalRoutingInfo ()))
+      {
+        MarkRoutingInfoChanged ("link-control limits changed");
+      }
+
     if (m_hop != nullptr)
       {
         m_hop->ConfigureLinkControl (minSpeedKbps,
@@ -503,6 +524,46 @@ public:
     Callback<void, std::vector<CsrNodeId>, Ptr<Packet>> observer)
   {
     m_automaticRoutingControlObserver = observer;
+  }
+
+  /**
+   * Install the routes.c hopSecCheckBufferFull() observation seam.
+   *
+   * The supplied OPNET br_nwk adapter always returns zero from that API, so
+   * the production default here is likewise "not full". Focused tests can
+   * expose the latent routes.c all-or-none retry branch without conflating it
+   * with DATA flow control or ns-3's global resend-queue limit.
+   */
+  void
+  SetRoutingControlBufferFullCallbackForTest (
+    Callback<bool, CsrNodeId, uint8_t> callback)
+  {
+    m_routingControlBufferFullCallback = callback;
+    ScheduleOwnedRoutingControlRetry ();
+  }
+
+  uint32_t
+  GetOwnedRoutingControlCountForTest () const
+  {
+    return static_cast<uint32_t> (
+      m_ownedRoutingControls.size ());
+  }
+
+  std::vector<CsrNodeId>
+  GetFirstOwnedRoutingControlResidualForTest () const
+  {
+    if (m_ownedRoutingControls.empty ())
+      {
+        return {};
+      }
+    return m_ownedRoutingControls.front ().remainingDestinations;
+  }
+
+  bool
+  IsFirstOwnedRoutingControlReadyForTest () const
+  {
+    return !m_ownedRoutingControls.empty () &&
+           m_ownedRoutingControls.front ().ready;
   }
 
   /** Exercise the routesRcvUnAuthedMsg() neighbor-creation path. */
@@ -1905,6 +1966,18 @@ private:
   void
   ScheduleRoutesProcess ();
 
+  CsrHelloHeader::RoutingInfo
+  BuildLocalRoutingInfo () const;
+
+  static bool
+  SameRoutingInfo (
+    const CsrHelloHeader::RoutingInfo &first,
+    const CsrHelloHeader::RoutingInfo &second);
+
+  void
+  MarkRoutingInfoChanged (
+    const char *reason);
+
   std::vector<CsrNodeId>
   OrderChangedDestinations (
     const std::set<CsrNodeId> &destinations) const;
@@ -1915,7 +1988,8 @@ private:
   std::vector<Ptr<Packet>>
   BuildGroupedRouteChangePayloads (
     const std::vector<CsrNodeId> &destinations,
-    uint32_t routingSequence);
+    uint32_t routingSequence,
+    bool includeRoutingInfo);
 
   bool
   AppendGroupedRouteChangeRecord (
@@ -1931,7 +2005,59 @@ private:
 
   void
   SendGroupedAutomaticRouteChanges (
-    const std::vector<CsrNodeId> &destinations);
+    const std::vector<CsrNodeId> &destinations,
+    bool includeRoutingInfo);
+
+  struct OwnedRoutingControl
+  {
+    uint32_t routingSequence {0};
+    CsrRoutingOperation operation {CsrRoutingOperation::None};
+    uint8_t routingSection {0};
+    uint8_t routingTotalSections {1};
+
+    // HOP keeps retransmitting inFlightDestinations as one original frame.
+    // NWK independently removes successful destinations from remaining.
+    std::vector<CsrNodeId> inFlightDestinations;
+    std::vector<CsrNodeId> remainingDestinations;
+    Ptr<Packet> payload;
+    bool awaitingHopCompletion {true};
+    bool ready {false};
+  };
+
+  std::list<OwnedRoutingControl> m_ownedRoutingControls;
+  EventId m_ownedRoutingControlRetryEvent;
+
+  Callback<bool, CsrNodeId, uint8_t>
+    m_routingControlBufferFullCallback;
+
+  // csr_api_system.h ARLPktTypeRoutingUpdate. This is deliberately distinct
+  // from the routing byte-stream operation (UPDATE/DELETE/INFO/FLUSH).
+  static constexpr uint8_t ARL_ROUTING_UPDATE_PACKET_TYPE = 0x08;
+
+  void SendOwnedRoutingControl (
+    const std::vector<CsrNodeId> &destinations,
+    Ptr<Packet> payload);
+
+  void NoteOwnedRoutingControlSuccess (
+    CsrNodeId neighbor,
+    uint32_t routingSequence,
+    CsrRoutingOperation operation,
+    uint8_t routingSection,
+    uint8_t routingTotalSections,
+    bool lastOfInfo);
+
+  void NoteOwnedRoutingControlFailure (
+    const std::vector<CsrNodeId> &neighbors,
+    uint32_t routingSequence,
+    CsrRoutingOperation operation,
+    uint8_t routingSection,
+    uint8_t routingTotalSections,
+    bool lastOfInfo);
+
+  void ScheduleOwnedRoutingControlRetry ();
+  void ProcessOwnedRoutingControlRetries ();
+  bool IsOwnedRoutingControlDestinationActive (
+    CsrNodeId destination) const;
 
   struct ReverseRouteEntry
   {
@@ -2746,11 +2872,19 @@ public:
     int16_t lowCx10,
     int16_t highCx10)
   {
+    CsrHelloHeader::RoutingInfo previousInfo =
+      BuildLocalRoutingInfo ();
+
     m_tempLowCx10 =
       lowCx10;
 
     m_tempHighCx10 =
       highCx10;
+
+    if (!SameRoutingInfo (previousInfo, BuildLocalRoutingInfo ()))
+      {
+        MarkRoutingInfoChanged ("temperature limits changed");
+      }
 
     std::cout << "[NWK " << m_nodeId
               << "] temperature limits"
@@ -2784,6 +2918,14 @@ public:
 	              << " lastOfInfo="
 	              << (lastOfInfo ? 1 : 0)
 	              << std::endl;
+
+    NoteOwnedRoutingControlSuccess (
+      neighbor,
+      routingSequence,
+      operation,
+      routingSection,
+      routingTotalSections,
+      lastOfInfo);
 
     // A partial destination ACK is progress for this section's grouped HOP
     // transaction.  Only lastOfInfo means every destination for the section
@@ -2905,10 +3047,17 @@ public:
               << (lastOfInfo ? 1 : 0)
               << std::endl;
 
-    // For now, leave recovery to the existing
-    // snapshot watchdog. The next parity step can
-    // use this callback to retry the exact failed
-    // INFO/UPDATE/FLUSH immediately.
+    NoteOwnedRoutingControlFailure (
+      neighbors,
+      routingSequence,
+      operation,
+      routingSection,
+      routingTotalSections,
+      lastOfInfo);
+
+    // Unowned snapshot/request traffic retains its existing watchdog state.
+    // This bounded parity path owns only grouped automatic updates that can
+    // receive partial multicast completion.
   }
 
   const char*
@@ -3037,6 +3186,10 @@ private:
   std::map<std::pair<CsrNodeId,CsrNodeId>, NsdpEntry> m_nsdp;
   std::set<CsrNodeId>
     m_pendingSelectedRouteChanges;
+
+  // routesNotifyChange() coalesces link/operating-limit changes with every
+  // selected-destination change handled by the next routesProcess() pass.
+  bool m_pendingRoutingInfoChange {false};
 
   // Legacy routesFindBestRoute() prefers the
   // currently selected neighbor when cost and
@@ -8852,31 +9005,9 @@ CsrNetLayer::BuildArlRoutingSnapshotPayloads (
   uint32_t routingSequence)
 {
   CsrArlRoutingMessage::Builder builder;
-  CsrHelloHeader::RoutingInfo info;
-
-  info.minSpeedKbps =
-    static_cast<uint16_t> (
-      std::clamp (m_minCfgSpeedKbps, 0, 65535));
-  info.maxSpeedKbps =
-    static_cast<uint16_t> (
-      std::clamp (m_maxCfgSpeedKbps, 0, 65535));
-  info.minPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (m_minTxPowerDbm * 10.0));
-  info.maxPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (m_maxTxPowerDbm * 10.0));
-  info.linkMarginDbX10 =
-    static_cast<int16_t> (
-      std::round (m_linkMarginDb * 10.0));
-  info.lowPowerDbmX10 =
-    static_cast<int16_t> (
-      std::round (m_txAmpBreakpointDbm * 10.0));
-  info.tempLowCx10 = m_tempLowCx10;
-  info.tempHighCx10 = m_tempHighCx10;
 
   // routesProcess() constructs one INFO + UPDATE* + FLUSH record stream.
-  builder.AddInfo (info);
+  builder.AddInfo (BuildLocalRoutingInfo ());
 
   uint32_t advertisedRoutes = 0;
 
@@ -9540,6 +9671,66 @@ CsrNetLayer::SameSelectedRouteState (
       second.path;
 }
 
+CsrHelloHeader::RoutingInfo
+CsrNetLayer::BuildLocalRoutingInfo () const
+{
+  CsrHelloHeader::RoutingInfo info;
+
+  info.minSpeedKbps =
+    static_cast<uint16_t> (
+      std::clamp (m_minCfgSpeedKbps, 0, 65535));
+  info.maxSpeedKbps =
+    static_cast<uint16_t> (
+      std::clamp (m_maxCfgSpeedKbps, 0, 65535));
+  // The OPNET wrapper returns these double-valued limits through int16
+  // accessors, so C conversion truncates the scaled value toward zero.
+  info.minPowerDbmX10 =
+    static_cast<int16_t> (
+      m_minTxPowerDbm * 10.0);
+  info.maxPowerDbmX10 =
+    static_cast<int16_t> (
+      m_maxTxPowerDbm * 10.0);
+  info.linkMarginDbX10 =
+    static_cast<int16_t> (
+      m_linkMarginDb * 10.0);
+  info.lowPowerDbmX10 =
+    static_cast<int16_t> (
+      m_txAmpBreakpointDbm * 10.0);
+  info.tempLowCx10 = m_tempLowCx10;
+  info.tempHighCx10 = m_tempHighCx10;
+
+  return info;
+}
+
+bool
+CsrNetLayer::SameRoutingInfo (
+  const CsrHelloHeader::RoutingInfo &first,
+  const CsrHelloHeader::RoutingInfo &second)
+{
+  return first.minSpeedKbps == second.minSpeedKbps &&
+         first.maxSpeedKbps == second.maxSpeedKbps &&
+         first.minPowerDbmX10 == second.minPowerDbmX10 &&
+         first.maxPowerDbmX10 == second.maxPowerDbmX10 &&
+         first.linkMarginDbX10 == second.linkMarginDbX10 &&
+         first.lowPowerDbmX10 == second.lowPowerDbmX10 &&
+         first.tempLowCx10 == second.tempLowCx10 &&
+         first.tempHighCx10 == second.tempHighCx10;
+}
+
+void
+CsrNetLayer::MarkRoutingInfoChanged (
+  const char *reason)
+{
+  m_pendingRoutingInfoChange = true;
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Routing INFO changed"
+            << " reason=" << reason
+            << std::endl;
+
+  ScheduleRoutesProcess ();
+}
+
 void
 CsrNetLayer::MarkSelectedRouteChanged (
   CsrNodeId destination,
@@ -9634,6 +9825,10 @@ void
 CsrNetLayer::
 ReportPendingSelectedRouteChanges ()
 {
+  bool routingInfoChanged =
+    m_pendingRoutingInfoChange;
+  m_pendingRoutingInfoChange = false;
+
   std::set<CsrNodeId> changedSet;
 
   changedSet.swap (
@@ -9687,6 +9882,8 @@ ReportPendingSelectedRouteChanges ()
             << "] routesProcess grouped selected-route changes"
             << " count="
             << destinations.size ()
+            << " infoChanged="
+            << (routingInfoChanged ? 1 : 0)
             << " time="
             << Simulator::Now ().GetSeconds ()
             << std::endl;
@@ -9707,7 +9904,9 @@ ReportPendingSelectedRouteChanges ()
       return;
     }
 
-  SendGroupedAutomaticRouteChanges (destinations);
+  SendGroupedAutomaticRouteChanges (
+    destinations,
+    routingInfoChanged);
 }
 
 std::vector<CsrNodeId>
@@ -9854,9 +10053,18 @@ CsrNetLayer::AppendGroupedRouteChangeRecord (
 std::vector<Ptr<Packet>>
 CsrNetLayer::BuildGroupedRouteChangePayloads (
   const std::vector<CsrNodeId> &destinations,
-  uint32_t routingSequence)
+  uint32_t routingSequence,
+  bool includeRoutingInfo)
 {
   CsrArlRoutingMessage::Builder builder;
+
+  if (includeRoutingInfo)
+    {
+      // routesProcess() places its optional source INFO before every changed
+      // destination in the same logical incremental byte stream.
+      builder.AddInfo (BuildLocalRoutingInfo ());
+    }
+
   for (CsrNodeId destination : destinations)
     {
       if (!AppendGroupedRouteChangeRecord (builder, destination))
@@ -9915,10 +10123,293 @@ CsrNetLayer::ClearProcessedRouteChangeCycle ()
 }
 
 void
-CsrNetLayer::SendGroupedAutomaticRouteChanges (
-  const std::vector<CsrNodeId> &destinations)
+CsrNetLayer::SendOwnedRoutingControl (
+  const std::vector<CsrNodeId> &destinations,
+  Ptr<Packet> payload)
 {
-  if (destinations.empty ())
+  if (m_hop == nullptr ||
+      payload == nullptr ||
+      destinations.empty ())
+    {
+      return;
+    }
+
+  Ptr<Packet> metadataPacket = payload->Copy ();
+  CsrHelloHeader metadata;
+  NS_ABORT_MSG_IF (
+    metadataPacket->RemoveHeader (metadata) == 0,
+    "owned routing control requires routing metadata");
+
+  OwnedRoutingControl owner;
+  owner.routingSequence = metadata.GetRoutingSequence ();
+  owner.operation = metadata.GetRoutingOperation ();
+  owner.routingSection = metadata.GetRoutingSection ();
+  owner.routingTotalSections = metadata.GetRoutingTotalSections ();
+  owner.inFlightDestinations = destinations;
+  owner.remainingDestinations = destinations;
+  owner.payload = payload->Copy ();
+  owner.awaitingHopCompletion = true;
+  owner.ready = false;
+
+  m_ownedRoutingControls.push_back (owner);
+
+  std::cout << "[NWK " << m_nodeId
+            << "] Retained grouped routing-control owner"
+            << " routingSequence=" << owner.routingSequence
+            << " operation=" << RoutingOperationName (owner.operation)
+            << " section=" << unsigned (owner.routingSection)
+            << "/" << unsigned (owner.routingTotalSections)
+            << " destinations=" << destinations.size ()
+            << " owners=" << m_ownedRoutingControls.size ()
+            << std::endl;
+
+  if (!m_automaticRoutingControlObserver.IsNull ())
+    {
+      m_automaticRoutingControlObserver (
+        destinations,
+        payload->Copy ());
+    }
+
+  m_hop->SendRoutingControl (
+    destinations,
+    payload->Copy ());
+}
+
+void
+CsrNetLayer::NoteOwnedRoutingControlSuccess (
+  CsrNodeId neighbor,
+  uint32_t routingSequence,
+  CsrRoutingOperation operation,
+  uint8_t routingSection,
+  uint8_t routingTotalSections,
+  bool lastOfInfo)
+{
+  for (auto it = m_ownedRoutingControls.begin ();
+       it != m_ownedRoutingControls.end ();
+       ++it)
+    {
+      OwnedRoutingControl &owner = *it;
+      if (!owner.awaitingHopCompletion ||
+          owner.routingSequence != routingSequence ||
+          owner.operation != operation ||
+          owner.routingSection != routingSection ||
+          owner.routingTotalSections != routingTotalSections ||
+          std::find (owner.inFlightDestinations.begin (),
+                     owner.inFlightDestinations.end (),
+                     neighbor) == owner.inFlightDestinations.end ())
+        {
+          continue;
+        }
+
+      auto remaining =
+        std::find (owner.remainingDestinations.begin (),
+                   owner.remainingDestinations.end (),
+                   neighbor);
+      bool removed = remaining != owner.remainingDestinations.end ();
+      if (removed)
+        {
+          owner.remainingDestinations.erase (remaining);
+        }
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Updated grouped routing-control residual"
+                << " ACKed=" << neighbor
+                << " removed=" << (removed ? 1 : 0)
+                << " lastOfInfo=" << (lastOfInfo ? 1 : 0)
+                << " remaining="
+                << owner.remainingDestinations.size ()
+                << std::endl;
+
+      if (lastOfInfo && owner.remainingDestinations.empty ())
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Released completed grouped routing-control owner"
+                    << " routingSequence=" << routingSequence
+                    << " section=" << unsigned (routingSection)
+                    << std::endl;
+          m_ownedRoutingControls.erase (it);
+        }
+      return;
+    }
+}
+
+void
+CsrNetLayer::NoteOwnedRoutingControlFailure (
+  const std::vector<CsrNodeId> &neighbors,
+  uint32_t routingSequence,
+  CsrRoutingOperation operation,
+  uint8_t routingSection,
+  uint8_t routingTotalSections,
+  bool lastOfInfo)
+{
+  if (!lastOfInfo)
+    {
+      return;
+    }
+
+  for (OwnedRoutingControl &owner : m_ownedRoutingControls)
+    {
+      if (!owner.awaitingHopCompletion ||
+          owner.routingSequence != routingSequence ||
+          owner.operation != operation ||
+          owner.routingSection != routingSection ||
+          owner.routingTotalSections != routingTotalSections ||
+          owner.inFlightDestinations != neighbors)
+        {
+          continue;
+        }
+
+      owner.awaitingHopCompletion = false;
+      owner.ready = true;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Grouped routing-control owner ready for residual retry"
+                << " routingSequence=" << routingSequence
+                << " section=" << unsigned (routingSection)
+                << " originalAttempt=" << neighbors.size ()
+                << " residual=" << owner.remainingDestinations.size ()
+                << std::endl;
+
+      // HOP invokes this callback before erasing its resend entry.  The
+      // legacy Sent_Info stream and routing semaphore put routesProcess() in
+      // a later same-time event, so never re-enter HOP synchronously here.
+      ScheduleOwnedRoutingControlRetry ();
+      return;
+    }
+}
+
+void
+CsrNetLayer::ScheduleOwnedRoutingControlRetry ()
+{
+  if (m_ownedRoutingControlRetryEvent.IsPending ())
+    {
+      return;
+    }
+
+  bool ready = std::any_of (
+    m_ownedRoutingControls.begin (),
+    m_ownedRoutingControls.end (),
+    [] (const OwnedRoutingControl &owner) {
+      return owner.ready && !owner.awaitingHopCompletion;
+    });
+  if (!ready)
+    {
+      return;
+    }
+
+  m_ownedRoutingControlRetryEvent =
+    Simulator::ScheduleNow (
+      &CsrNetLayer::ProcessOwnedRoutingControlRetries,
+      this);
+}
+
+bool
+CsrNetLayer::IsOwnedRoutingControlDestinationActive (
+  CsrNodeId destination) const
+{
+  auto neighbor = m_nwkNeighbors.find (destination);
+  return neighbor != m_nwkNeighbors.end () &&
+         neighbor->second.arlActive &&
+         !neighbor->second.stale &&
+         IsArlNeighborUsable (destination);
+}
+
+void
+CsrNetLayer::ProcessOwnedRoutingControlRetries ()
+{
+  for (auto it = m_ownedRoutingControls.begin ();
+       it != m_ownedRoutingControls.end ();)
+    {
+      OwnedRoutingControl &owner = *it;
+      if (!owner.ready || owner.awaitingHopCompletion)
+        {
+          ++it;
+          continue;
+        }
+
+      owner.remainingDestinations.erase (
+        std::remove_if (
+          owner.remainingDestinations.begin (),
+          owner.remainingDestinations.end (),
+          [this] (CsrNodeId destination) {
+            return !IsOwnedRoutingControlDestinationActive (destination);
+          }),
+        owner.remainingDestinations.end ());
+
+      if (owner.remainingDestinations.empty ())
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Released grouped routing-control owner"
+                    << " after inactive residual pruning"
+                    << " routingSequence=" << owner.routingSequence
+                    << " section=" << unsigned (owner.routingSection)
+                    << std::endl;
+          it = m_ownedRoutingControls.erase (it);
+          continue;
+        }
+
+      bool bufferFull = false;
+      if (!m_routingControlBufferFullCallback.IsNull ())
+        {
+          for (CsrNodeId destination : owner.remainingDestinations)
+            {
+              if (m_routingControlBufferFullCallback (
+                    destination,
+                    ARL_ROUTING_UPDATE_PACKET_TYPE))
+                {
+                  bufferFull = true;
+                  break;
+                }
+            }
+        }
+
+      if (bufferFull || m_hop == nullptr)
+        {
+          std::cout << "[NWK " << m_nodeId
+                    << "] Deferred entire grouped routing-control residual"
+                    << " routingSequence=" << owner.routingSequence
+                    << " section=" << unsigned (owner.routingSection)
+                    << " destinations="
+                    << owner.remainingDestinations.size ()
+                    << " bufferFull=" << (bufferFull ? 1 : 0)
+                    << std::endl;
+          ++it;
+          continue;
+        }
+
+      owner.inFlightDestinations = owner.remainingDestinations;
+      owner.awaitingHopCompletion = true;
+      owner.ready = false;
+
+      std::cout << "[NWK " << m_nodeId
+                << "] Retrying grouped routing-control residual"
+                << " routingSequence=" << owner.routingSequence
+                << " operation=" << RoutingOperationName (owner.operation)
+                << " section=" << unsigned (owner.routingSection)
+                << "/" << unsigned (owner.routingTotalSections)
+                << " destinations=" << owner.inFlightDestinations.size ()
+                << std::endl;
+
+      if (!m_automaticRoutingControlObserver.IsNull ())
+        {
+          m_automaticRoutingControlObserver (
+            owner.inFlightDestinations,
+            owner.payload->Copy ());
+        }
+
+      m_hop->SendRoutingControl (
+        owner.inFlightDestinations,
+        owner.payload->Copy ());
+      ++it;
+    }
+}
+
+void
+CsrNetLayer::SendGroupedAutomaticRouteChanges (
+  const std::vector<CsrNodeId> &destinations,
+  bool includeRoutingInfo)
+{
+  if (destinations.empty () && !includeRoutingInfo)
     {
       return;
     }
@@ -9933,6 +10424,7 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
       std::cout << "[NWK " << m_nodeId
                 << "] Consumed grouped route changes without recipients"
                 << " destinations=" << destinations.size ()
+                << " infoChanged=" << (includeRoutingInfo ? 1 : 0)
                 << std::endl;
       return;
     }
@@ -9954,7 +10446,8 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
   std::vector<Ptr<Packet>> payloads =
     BuildGroupedRouteChangePayloads (
       destinations,
-      routingSequence);
+      routingSequence,
+      includeRoutingInfo);
 
   if (payloads.empty ())
     {
@@ -9969,6 +10462,7 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
   std::cout << "[NWK " << m_nodeId
             << "] Sending source-exact grouped route changes"
             << " routingSequence=" << routingSequence
+            << " infoChanged=" << (includeRoutingInfo ? 1 : 0)
             << " destinations=" << destinations.size ()
             << " neighbors=" << neighbors.size ()
             << " groups=" << groups.size ()
@@ -9984,13 +10478,7 @@ CsrNetLayer::SendGroupedAutomaticRouteChanges (
            payload != payloads.rend ();
            ++payload)
         {
-          if (!m_automaticRoutingControlObserver.IsNull ())
-            {
-              m_automaticRoutingControlObserver (
-                *group,
-                (*payload)->Copy ());
-            }
-          m_hop->SendRoutingControl (
+          SendOwnedRoutingControl (
             *group,
             (*payload)->Copy ());
         }

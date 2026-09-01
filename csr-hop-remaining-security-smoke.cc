@@ -32,6 +32,9 @@ uint32_t g_livePairwiseDeliveries = 0;
 uint32_t g_liveNeighborcastDeliveries = 0;
 std::vector<std::vector<uint8_t>> g_livePayloads;
 
+std::vector<Time> g_ackWakeTimes;
+Ptr<Packet> g_capturedDack;
+
 void
 Require (bool condition, const char *message)
 {
@@ -51,6 +54,66 @@ CopyBytes (Ptr<Packet> packet)
       packet->CopyData (bytes.data (), bytes.size ());
     }
   return bytes;
+}
+
+std::vector<uint8_t>
+SerializeHeader (const CsrHeader &header)
+{
+  Ptr<Packet> packet = Create<Packet> ();
+  packet->AddHeader (header);
+  return CopyBytes (packet);
+}
+
+Ptr<Packet>
+BuildSecuredAckFrame (CsrHopSecurityState &sender,
+                      const CsrHeader &authenticatedHeader,
+                      uint8_t legacyPacketType = 0,
+                      bool tamperRecord = false,
+                      bool clearOuterAckFlag = false)
+{
+  std::vector<uint8_t> body = SerializeHeader (authenticatedHeader);
+  CsrProtectedPairwiseMessage secured =
+    sender.ProtectPairwiseMessage (
+      authenticatedHeader.GetDst (),
+      CsrPairwiseSecurityMode::Pairwise16,
+      legacyPacketType,
+      body);
+  if (tamperRecord)
+    {
+      secured.record.back () ^= 0x80;
+    }
+
+  Ptr<Packet> frame = Create<Packet> (secured.record.data (),
+                                      secured.record.size ());
+  CsrHeader outer = authenticatedHeader;
+  if (clearOuterAckFlag)
+    {
+      outer.SetIsAck (false);
+    }
+  outer.SetSecurityCount (sender.GetOwnSecurityCount ());
+  outer.SetLinkControl (8, 0.0, 0.0);
+  frame->AddHeader (outer);
+  return frame;
+}
+
+Ptr<Packet>
+BuildSecuredMalformedAckFrame (CsrHopSecurityState &sender,
+                               const CsrHeader &outerHeader)
+{
+  const std::array<uint8_t, 1> truncatedBody {0x01};
+  CsrProtectedPairwiseMessage secured =
+    sender.ProtectPairwiseMessage (
+      outerHeader.GetDst (),
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      truncatedBody);
+  Ptr<Packet> frame = Create<Packet> (secured.record.data (),
+                                      secured.record.size ());
+  CsrHeader outer = outerHeader;
+  outer.SetSecurityCount (sender.GetOwnSecurityCount ());
+  outer.SetLinkControl (8, 0.0, 0.0);
+  frame->AddHeader (outer);
+  return frame;
 }
 
 void
@@ -475,6 +538,235 @@ CheckAuthenticationBeforeAckAndDelivery ()
 }
 
 void
+NoteAckWake ()
+{
+  g_ackWakeTimes.push_back (Simulator::Now ());
+}
+
+void
+CheckAckDackSecurityPolicy ()
+{
+  Ptr<CsrNetDevice> localDevice =
+    CreateObject<CsrNetDevice> (DESTINATION);
+  Ptr<CsrHopLayer> localHop = CreateObject<CsrHopLayer> ();
+  localHop->SetMac (&localDevice->GetMac ());
+  ConfigureHop (localHop, DESTINATION, SOURCE);
+  localHop->SetNwkQueueWakeCallback (MakeCallback (&NoteAckWake));
+
+  CsrHopSecurityState ackSender;
+  ConfigureState (ackSender, SOURCE, DESTINATION);
+  CsrHeader ackHeader (SOURCE,
+                       DESTINATION,
+                       1,
+                       7,
+                       false,
+                       true);
+  ackHeader.SetType (CSR_PKT_ACK);
+  ackHeader.SetDestType (CSR_DEST_UNICAST);
+  ackHeader.SetSpeedKey (8);
+
+  g_ackWakeTimes.clear ();
+  localHop->SendData (SOURCE, 5, Create<Packet> (4), true);
+  Require (localHop->GetPendingDataCount () == 1 &&
+             localHop->GetResendQueueSize () == 1,
+           "ACK security test did not create one pending DATA record");
+
+  Ptr<Packet> plaintextAck = Create<Packet> ();
+  plaintextAck->AddHeader (ackHeader);
+  localHop->ReceiveFromMac (plaintextAck, 60.0, 40.0);
+  Require (localHop->GetPendingDataCount () == 1 &&
+             localHop->GetResendQueueSize () == 1 &&
+             g_ackWakeTimes.empty (),
+           "plaintext ACK changed custody or requested an NWK wake");
+
+  localHop->ReceiveFromMac (
+    BuildSecuredAckFrame (ackSender, ackHeader, 3),
+    60.0,
+    40.0);
+  Require (localHop->GetPendingDataCount () == 1 &&
+             localHop->GetResendQueueSize () == 1 &&
+             g_ackWakeTimes.empty (),
+           "wrong-packet-type ACK authenticated or requested a wake");
+
+  localHop->ReceiveFromMac (
+    BuildSecuredAckFrame (ackSender, ackHeader, 0, true),
+    60.0,
+    40.0);
+  Require (localHop->GetPendingDataCount () == 1 &&
+             localHop->GetResendQueueSize () == 1 &&
+             g_ackWakeTimes.empty (),
+           "tampered ACK changed custody or requested an NWK wake");
+
+  localHop->ReceiveFromMac (
+    BuildSecuredMalformedAckFrame (ackSender, ackHeader),
+    60.0,
+    40.0);
+  Require (localHop->GetPendingDataCount () == 1 &&
+             localHop->GetResendQueueSize () == 1 &&
+             g_ackWakeTimes.empty (),
+           "truncated authenticated ACK changed custody or requested a wake");
+
+  // The outer IsAck bit is transport metadata. The authenticated inner body
+  // remains authoritative, so a cleared outer bit cannot bypass verification
+  // or redirect the frame into the DATA path.
+  Ptr<Packet> validAck = BuildSecuredAckFrame (
+    ackSender,
+    ackHeader,
+    0,
+    false,
+    true);
+  localHop->ReceiveFromMac (validAck->Copy (), 60.0, 40.0);
+  Require (localHop->GetPendingDataCount () == 0 &&
+             localHop->GetResendQueueSize () == 0 &&
+             localDevice->GetMac ().GetDataQueuedFrameCount () == 0 &&
+             g_ackWakeTimes.empty (),
+           "valid Pairwise16 ACK did not complete DATA before delayed wake");
+
+  const Time tic = CsrOpnetTic ();
+  Simulator::Stop (tic + NanoSeconds (1));
+  Simulator::Run ();
+  Require (g_ackWakeTimes.size () == 1 &&
+             g_ackWakeTimes[0] == tic,
+           "authenticated ACK generic wake did not run one TIC later");
+
+  Time duplicateTime = Simulator::Now ();
+  localHop->ReceiveFromMac (validAck->Copy (), 60.0, 40.0);
+  Require (g_ackWakeTimes.size () == 1,
+           "authenticated duplicate ACK woke NWK synchronously");
+  Simulator::Stop (duplicateTime + tic + NanoSeconds (1));
+  Simulator::Run ();
+  Require (g_ackWakeTimes.size () == 2 &&
+             g_ackWakeTimes[1] == duplicateTime + tic,
+           "authenticated duplicate ACK lost its packet-level generic wake");
+
+  Simulator::Destroy ();
+}
+
+bool
+AlwaysDack (CsrNodeId, CsrNodeId)
+{
+  return true;
+}
+
+void
+CaptureDack (Ptr<Packet> frame, double, double)
+{
+  CsrHeader header;
+  if (g_capturedDack == nullptr &&
+      frame->PeekHeader (header) &&
+      header.IsDack ())
+    {
+      g_capturedDack = frame->Copy ();
+    }
+}
+
+void
+CheckLiveOutboundDackWrapper ()
+{
+  Ptr<CsrNetDevice> dackDevice =
+    CreateObject<CsrNetDevice> (DESTINATION);
+  Ptr<CsrNetDevice> captureDevice =
+    CreateObject<CsrNetDevice> (SOURCE);
+  dackDevice->AddPeer (captureDevice);
+
+  CsrPerModelFn noErrors = [] (int, double, uint32_t) { return 0.0; };
+  dackDevice->GetPhy ().SetPerModel (noErrors);
+  captureDevice->GetPhy ().SetPerModel (noErrors);
+  dackDevice->GetPhy ().SetLinkDistanceMeters (
+    DESTINATION,
+    SOURCE,
+    1.0);
+  captureDevice->GetPhy ().SetLinkDistanceMeters (
+    DESTINATION,
+    SOURCE,
+    1.0);
+  captureDevice->GetMac ().SetRxCallback (MakeCallback (&CaptureDack));
+
+  Ptr<CsrHopLayer> dackHop = CreateObject<CsrHopLayer> ();
+  dackHop->SetMac (&dackDevice->GetMac ());
+  ConfigureHop (dackHop, DESTINATION, SOURCE);
+  dackHop->SetShouldDackCallback (MakeCallback (&AlwaysDack));
+
+  CsrHopSecurityState dataSender;
+  ConfigureState (dataSender, SOURCE, DESTINATION);
+  Ptr<Packet> networkPayload = Create<Packet> (3);
+  CsrNetHeader networkHeader (SOURCE, DESTINATION, 5);
+  networkPayload->AddHeader (networkHeader);
+  std::vector<uint8_t> plaintext = CopyBytes (networkPayload);
+  CsrProtectedPairwiseMessage securedData =
+    dataSender.ProtectPairwiseMessage (
+      DESTINATION,
+      CsrPairwiseSecurityMode::Pairwise16,
+      3,
+      plaintext);
+
+  Ptr<Packet> dataFrame = Create<Packet> (securedData.record.data (),
+                                          securedData.record.size ());
+  CsrHeader dataHeader (SOURCE,
+                        DESTINATION,
+                        77,
+                        5,
+                        true,
+                        false);
+  dataHeader.SetType (CSR_PKT_DATA);
+  dataHeader.SetDestType (CSR_DEST_UNICAST);
+  dataHeader.SetSecurityCount (SECURITY_COUNT);
+  dataHeader.SetLinkControl (8, 0.0, 0.0);
+  dataFrame->AddHeader (dataHeader);
+
+  g_capturedDack = nullptr;
+  dackHop->ReceiveFromMac (dataFrame, 60.0, 40.0);
+  Require (dackDevice->GetMac ().GetAckQueuedFrameCount () == 1,
+           "live DACK producer did not enqueue one ACK-class frame");
+
+  Simulator::Stop (Seconds (4.0));
+  Simulator::Run ();
+  Require (g_capturedDack != nullptr,
+           "live DACK frame was not transmitted to the capture peer");
+  Require (CsrGetOpnetWireSize (g_capturedDack) == 30,
+           "Pairwise16 ACK/DACK did not model 25 + 5 bytes");
+
+  Ptr<Packet> securedRecord = g_capturedDack->Copy ();
+  CsrHeader outer;
+  securedRecord->RemoveHeader (outer);
+  Require (outer.IsAck () && outer.IsDack () &&
+             outer.GetType () == CSR_PKT_ACK &&
+             outer.HasSecurityCount (),
+           "MAC-visible DACK metadata did not retain the common AckMsg type");
+
+  std::vector<uint8_t> record = CopyBytes (securedRecord);
+  CsrHopSecurityState verifier;
+  ConfigureState (verifier, SOURCE, DESTINATION);
+  CsrReceivedPairwiseMessage received =
+    verifier.ReceivePairwiseMessage (
+      DESTINATION,
+      outer.GetSecurityCount (),
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      record);
+  Require (received.status == CsrHopSecurityReceiveStatus::Accepted,
+           "live DACK did not authenticate as Pairwise16 packet type 0");
+
+  Ptr<Packet> body = Create<Packet> (received.payload.data (),
+                                     received.payload.size ());
+  CsrHeader authenticated;
+  body->RemoveHeader (authenticated);
+  Require (authenticated.IsAck () && authenticated.IsDack () &&
+             authenticated.GetType () == CSR_PKT_DACK &&
+             authenticated.GetSrc () == DESTINATION &&
+             authenticated.GetDst () == SOURCE &&
+             authenticated.GetSeq () == 77 &&
+             authenticated.HasAckWindow () &&
+             authenticated.GetAckBitmap () == 0 &&
+             authenticated.GetDackBitmap () == 1 &&
+             !authenticated.HasSecurityCount () &&
+             !authenticated.HasLinkControl (),
+           "Pairwise16 did not authenticate the complete logical DACK body");
+
+  Simulator::Destroy ();
+}
+
+void
 NoteLivePairwise (Ptr<Packet> payload, CsrNodeId source)
 {
   Require (source == SOURCE,
@@ -562,7 +854,7 @@ CheckLiveSendPaths ()
   Simulator::Schedule (Seconds (1.5),
                        &SendLivePairwise32Encrypt,
                        sender);
-  Simulator::Stop (Seconds (4.0));
+  Simulator::Stop (Seconds (10.0));
   Simulator::Run ();
 
   Require (g_liveNeighborcastDeliveries == 1 &&
@@ -599,6 +891,8 @@ main ()
   InitializeKeys ();
   CheckGoldenPairwiseRecords ();
   CheckAuthenticationBeforeAckAndDelivery ();
+  CheckAckDackSecurityPolicy ();
+  CheckLiveOutboundDackWrapper ();
   CheckLiveSendPaths ();
   std::cout << "PASS: remaining OPNET HOP-security mode parity test"
             << std::endl;
