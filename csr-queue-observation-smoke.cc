@@ -694,6 +694,49 @@ BuildRelayDataFrame (CsrNodeId hopSource,
   return frame;
 }
 
+Ptr<Packet>
+BuildProtectedRelayDataFrame (CsrHopSecurityState &sender,
+                              CsrNodeId hopSource,
+                              CsrNodeId relay,
+                              uint16_t hopSequence,
+                              CsrNodeId nwkSource,
+                              CsrNodeId nwkDestination,
+                              uint8_t dscp,
+                              uint64_t appSequence)
+{
+  Ptr<Packet> plaintext =
+    BuildNetworkPayload (nwkSource, nwkDestination, dscp, appSequence);
+  std::vector<uint8_t> bytes (plaintext->GetSize ());
+  plaintext->CopyData (bytes.data (), bytes.size ());
+  CsrProtectedPairwiseMessage secured =
+    sender.ProtectPairwiseMessage (
+      relay,
+      CsrPairwiseSecurityMode::Pairwise16,
+      3,
+      bytes);
+
+  Ptr<Packet> frame = Create<Packet> (secured.record.data (),
+                                      secured.record.size ());
+  CsrDifferentialAppTag appTag;
+  if (plaintext->PeekPacketTag (appTag))
+    {
+      frame->AddPacketTag (appTag);
+    }
+
+  CsrHeader header (hopSource,
+                    relay,
+                    hopSequence,
+                    dscp,
+                    true,
+                    false);
+  header.SetType (CSR_PKT_DATA);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetSecurityCount (sender.GetOwnSecurityCount ());
+  header.SetLinkControl (8, 0.0, 0.0);
+  frame->AddHeader (header);
+  return frame;
+}
+
 void
 RunRelayFeedbackBoundary (uint32_t nsdpBefore,
                           const std::string &expectedReason,
@@ -840,6 +883,8 @@ TestRelayFeedbackUsesPreEnqueueNsdpCount ()
 
 uint32_t g_nwkDeliveryCount = 0;
 CsrNodeId g_expectedNwkSource = 0;
+uint64_t g_lineageAppSequence = 0;
+uint32_t g_lineageDeliveryCount = 0;
 
 void
 RecordNwkDelivery (Ptr<Packet>, CsrNodeId source)
@@ -847,6 +892,25 @@ RecordNwkDelivery (Ptr<Packet>, CsrNodeId source)
   Require (source == g_expectedNwkSource,
            "NWK observation scenario delivered the wrong source");
   g_nwkDeliveryCount++;
+}
+
+void
+RecordLineageDelivery (Ptr<Packet> payload, CsrNodeId source)
+{
+  CsrDifferentialAppTag appTag;
+  if (!payload->PeekPacketTag (appTag) ||
+      appTag.GetSequence () != g_lineageAppSequence)
+    {
+      return;
+    }
+
+  Require (source == g_expectedNwkSource,
+           "lost-DACK lineage delivered the wrong NWK source");
+  g_lineageDeliveryCount++;
+  if (g_lineageDeliveryCount == 2)
+    {
+      Simulator::Stop ();
+    }
 }
 
 void
@@ -1290,6 +1354,213 @@ TestForcedTwoHopPath ()
              relayEnqueue->eventIndex < relayForward->eventIndex &&
              relayForward->eventIndex < deliveries[0].eventIndex,
            "two-hop NWK lifecycle is not in path order");
+
+  Simulator::Destroy ();
+}
+
+void
+TestLostDackRetryLineage ()
+{
+  constexpr CsrNodeId sourceNode = 241;
+  constexpr CsrNodeId relayNode = 242;
+  constexpr CsrNodeId destinationNode = 243;
+  constexpr uint16_t ingressHopSequence = 91;
+  constexpr uint64_t appSequence = 7004;
+  constexpr uint32_t relayRouteCost = 9;
+  constexpr uint32_t dackThreshold = 16;
+  constexpr uint8_t dscp = 4;
+  const uint8_t routableCapability =
+    static_cast<uint8_t> (CsrNodeType::Routable);
+
+  TraceFile trace ("lost-dack-lineage");
+  Ptr<CsrNetDevice> relayDevice =
+    CreateObject<CsrNetDevice> (relayNode);
+  Ptr<CsrNetDevice> destinationDevice =
+    CreateObject<CsrNetDevice> (destinationNode);
+  Ptr<CsrHopLayer> relayHop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrHopLayer> destinationHop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> relayNwk = CreateObject<CsrNetLayer> ();
+  Ptr<CsrNetLayer> destinationNwk = CreateObject<CsrNetLayer> ();
+
+  relayDevice->AddPeer (destinationDevice);
+  destinationDevice->AddPeer (relayDevice);
+  ConfigureNoErrors (relayDevice);
+  ConfigureNoErrors (destinationDevice);
+  ConnectNwkStack (relayDevice, relayHop, relayNwk, relayNode);
+  ConnectNwkStack (destinationDevice,
+                   destinationHop,
+                   destinationNwk,
+                   destinationNode);
+  relayNwk->SetNodeType (CsrNodeType::Routable);
+  destinationNwk->SetNodeType (CsrNodeType::Routable);
+
+  // Seed the exact relay flow to the recovered NSDP DACK threshold while no
+  // route exists and before running any scheduled NWK queue check.  These
+  // tagless packets establish source-owned congestion state without entering
+  // the target application's trace lineage.
+  SetDifferentialAdmissionTraceEnabled (false);
+  for (uint32_t index = 0; index < dackThreshold; ++index)
+    {
+      Ptr<Packet> seed = Create<Packet> (8);
+      seed->AddHeader (CsrNetHeader (sourceNode, destinationNode, dscp));
+      relayNwk->ReceiveFromHop (seed, sourceNode);
+    }
+  Require (relayNwk->GetNsdpCount (sourceNode, destinationNode) ==
+             dackThreshold &&
+             relayNwk->GetNwkQueueSize () == dackThreshold,
+           "lost-DACK lineage did not seed the relay DACK threshold");
+
+  Require (relayNwk->AddOrUpdateRoute (
+             destinationNode,
+             destinationNode,
+             true,
+             1,
+             70.0,
+             relayRouteCost,
+             0,
+             destinationNode,
+             routableCapability,
+             {destinationNode}),
+           "lost-DACK lineage could not install its onward relay route");
+
+  g_expectedNwkSource = sourceNode;
+  g_lineageAppSequence = appSequence;
+  g_lineageDeliveryCount = 0;
+  destinationNwk->SetRxFromNetCallback (
+    MakeCallback (&RecordLineageDelivery));
+
+  CsrHopSecurityState ingressSender;
+  ingressSender.SetNodeId (sourceNode);
+  Ptr<Packet> ingress = BuildProtectedRelayDataFrame (
+    ingressSender,
+    sourceNode,
+    relayNode,
+    ingressHopSequence,
+    sourceNode,
+    destinationNode,
+    dscp,
+    appSequence);
+
+  StartTrace (trace);
+  // Model a lost first DACK by replaying the byte-identical protected HOP
+  // frame before the pending NWK wake can drain either accepted relay copy.
+  relayHop->ReceiveFromMac (ingress->Copy (), 70.0, 30.0);
+  relayHop->ReceiveFromMac (ingress->Copy (), 70.0, 30.0);
+  Require (relayNwk->GetNsdpCount (sourceNode, destinationNode) ==
+             dackThreshold + 2 &&
+             relayNwk->GetNwkQueueSize () == dackThreshold + 2,
+           "lost DACK retry did not create two relay NWK custody entries");
+
+  Simulator::Stop (Seconds (20));
+  Simulator::Run ();
+  Require (g_lineageDeliveryCount == 2,
+           "lost-DACK retry did not produce two destination APP deliveries");
+
+  CloseDifferentialTraceCsv ();
+  const std::vector<TraceRow> rows = ReadTrace (trace.Path ());
+  const std::string sourceText = CsrTraceInteger (sourceNode);
+  const std::string relayText = CsrTraceInteger (relayNode);
+  const std::string destinationText = CsrTraceInteger (destinationNode);
+  std::vector<TraceRow> feedback =
+    RowsForEventAndSequence (rows, "hop_feedback", appSequence);
+  feedback.erase (
+    std::remove_if (
+      feedback.begin (),
+      feedback.end (),
+      [&relayText] (const TraceRow &row) { return row.node != relayText; }),
+    feedback.end ());
+  const std::vector<TraceRow> enqueues =
+    RowsForEventAndSequence (rows, "nwk_enqueue", appSequence);
+  const std::vector<TraceRow> forwards =
+    RowsForEventAndSequence (rows, "nwk_forward", appSequence);
+  const std::vector<TraceRow> admissions =
+    RowsForEventAndSequence (rows, "hop_admission", appSequence);
+  const std::vector<TraceRow> deliveries =
+    RowsForEventAndSequence (rows, "nwk_delivery", appSequence);
+
+  Require (feedback.size () == 2 &&
+             enqueues.size () == 2 &&
+             forwards.size () == 2 &&
+             admissions.size () == 2 &&
+             deliveries.size () == 2,
+           "lost-DACK trace did not retain both complete relay lineages");
+
+  for (uint32_t index = 0; index < 2; ++index)
+    {
+      Require (feedback[index].node == relayText &&
+                 feedback[index].peer == sourceText &&
+                 feedback[index].source == sourceText &&
+                 feedback[index].destination == destinationText &&
+                 feedback[index].reason == "dack" &&
+                 feedback[index].success == "1",
+               "lost-DACK ingress feedback identity or decision changed");
+      RequireDetail (feedback[index],
+                     "hop_sequence",
+                     CsrTraceInteger (ingressHopSequence),
+                     "lost-DACK ingress feedback");
+      RequireDetail (feedback[index],
+                     "first_reception",
+                     "1",
+                     "lost-DACK ingress feedback");
+      RequireDetail (feedback[index],
+                     "nsdp_count_before",
+                     CsrTraceInteger (dackThreshold + index),
+                     "lost-DACK ingress feedback");
+      RequireDetail (feedback[index],
+                     "nsdp_count_after",
+                     CsrTraceInteger (dackThreshold + index + 1),
+                     "lost-DACK ingress feedback");
+
+      Require (enqueues[index].node == relayText &&
+                 enqueues[index].peer == sourceText &&
+                 enqueues[index].source == sourceText &&
+                 enqueues[index].destination == destinationText &&
+                 enqueues[index].reason == "relay" &&
+                 enqueues[index].success == "1" &&
+                 enqueues[index].eventIndex < feedback[index].eventIndex,
+               "lost-DACK relay enqueue did not precede matching feedback");
+
+      Require (admissions[index].node == relayText &&
+                 admissions[index].peer == destinationText &&
+                 admissions[index].source == sourceText &&
+                 admissions[index].destination == destinationText &&
+                 admissions[index].reason == "admitted" &&
+                 admissions[index].success == "1",
+               "lost-DACK onward HOP admission identity changed");
+
+      Require (forwards[index].node == relayText &&
+                 forwards[index].peer == sourceText &&
+                 forwards[index].source == sourceText &&
+                 forwards[index].destination == destinationText &&
+                 forwards[index].reason == "relay" &&
+                 forwards[index].nextHop == destinationText &&
+                 forwards[index].success == "1",
+               "lost-DACK onward NWK forwarding identity changed");
+
+      Require (deliveries[index].node == destinationText &&
+                 deliveries[index].peer == relayText &&
+                 deliveries[index].source == sourceText &&
+                 deliveries[index].destination == destinationText &&
+                 deliveries[index].reason == "delivered" &&
+                 deliveries[index].success == "1",
+               "lost-DACK destination delivery identity changed");
+      Require (enqueues[index].eventIndex < forwards[index].eventIndex &&
+                 forwards[index].eventIndex < admissions[index].eventIndex &&
+                 admissions[index].eventIndex < deliveries[index].eventIndex,
+               "lost-DACK per-copy lineage is not source ordered");
+    }
+
+  const std::map<std::string, std::string> firstAdmission =
+    ParseDetail (admissions[0]);
+  const std::map<std::string, std::string> secondAdmission =
+    ParseDetail (admissions[1]);
+  Require (firstAdmission.at ("hop_sequence") !=
+             secondAdmission.at ("hop_sequence"),
+           "lost-DACK relay copies reused one onward HOP sequence");
+  Require (feedback[1].eventIndex < admissions[0].eventIndex &&
+             admissions[0].eventIndex < deliveries[0].eventIndex &&
+             admissions[1].eventIndex < deliveries[1].eventIndex,
+           "lost-DACK lineage events are not source ordered");
 
   Simulator::Destroy ();
 }
@@ -2182,6 +2453,7 @@ main ()
       TestAckRemovalSampling ();
       TestDirectHeldUntilIndependentWakePath ();
       TestForcedTwoHopPath ();
+      TestLostDackRetryLineage ();
       TestAdmissionLedgerNoRouteAndSuccessfulAdmission ();
       TestApplicationNsdpAdmissionBoundary ();
       TestAdmissionLedgerNeighborAckRelease ();

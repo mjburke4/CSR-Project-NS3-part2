@@ -295,7 +295,10 @@ the recovered PB/OV result contains bucket aggregates only.
 
 The admission ledger is disabled by default and enabled explicitly with
 `--admissionTrace=1`. When enabled, the compact writer retains seven additional
-source-ordered events:
+source-ordered events. One narrow exception applies in ordinary aggregate-only
+runs: `hop_feedback` is retained without enabling the other six ledger events,
+because it is the minimum observation needed to distinguish a source-exact
+lost-DACK retry fork from an arbitrary duplicate delivery.
 
 | Event | Observation boundary |
 | --- | --- |
@@ -313,6 +316,23 @@ queue, NSDP, global pending/allowance, per-neighbor
 outstanding/threshold/allowance, resend, completion, and DACK-hold snapshots.
 They add no modeled bytes and do not alter route lookup, queue order, random
 draws, or event scheduling.
+
+The aggregate analyzer accepts an additional delivery for one application
+identity only when the trace contains a prior first-reception DACK and a later
+first-reception ACK or DACK with the same relay, ingress peer, incoming HOP
+sequence, NWK source/destination, and observation tag. Each feedback consumes
+one prior, unconsumed matching relay `nwk_enqueue`; unrelated statistic samples
+may occur between those rows, while conflicting same-identity enqueue or
+feedback rows invalidate the pairing. Both feedback rows show the source-exact
+NSDP-16 increment. An ACK closes that lineage. The original application send
+timestamp is reused for every such proven copy, matching legacy APP delay
+sampling. Repeated ACKs, changed lineage fields, malformed NSDP transitions,
+and duplicates without feedback remain strict failures.
+
+The packet-path and admission-ledger analyzers remain unchanged and keep
+duplicate delivery fatal. Relaxing either requires binding each proof to a
+complete ordered relay-to-destination suffix (and, for the ledger, distinct
+overlapping HOP legs); a packet-wide budget is not sufficient evidence.
 
 Run the imported scenario with the opt-in surface:
 
@@ -486,11 +506,16 @@ no-route ACK suppression.
 
 That retry can source-exactly create a second downstream delivery: legacy NWK
 has no DATA duplicate table, assigns each relay copy a fresh onward HOP
-sequence, and delivers every destination copy to APP. The current analyzers'
-single-delivery assumption is therefore a known verification discrepancy for
-the lost-DACK path. It remains fail-closed until a three-hop fixture can prove
-the ingress DACK/retry lineage; unqualified duplicate delivery must not be
-silently accepted.
+sequence, and delivers every destination copy to APP. A three-hop fixture now
+proves two byte-identical ingress receptions, two DACK decisions, two relay
+custody entries, distinct onward HOP sequences, and two destination APP
+callbacks. The aggregate analyzer accepts the extra delivery only with the
+complete enqueue/feedback proof described above. Packet-path and admission
+ledger analysis still keep duplicate delivery fatal until each extra copy can
+be bound to a complete downstream suffix and distinct overlapping HOP leg.
+Reaccepting a Pairwise16-authenticated retry from the DACK bitmap is inferred
+cross-source integration; the downstream lost-DACK delivery fork itself is
+source-exact.
 
 The ledger is ns-3 isolation evidence interpreted against recovered OPNET
 source. It is not an OPNET event comparison. No authoritative OPNET

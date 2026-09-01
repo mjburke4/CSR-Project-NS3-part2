@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import importlib.util
 import json
@@ -408,6 +409,8 @@ class AggregateWorkflowTests(unittest.TestCase):
                 {
                     "matched_count": 100,
                     "matched_by_method": {"exact_sequence": 100},
+                    "source_exact_dack_retry_duplicate_proof_count": 0,
+                    "source_exact_dack_retry_duplicate_delivery_count": 0,
                     "unmatched_delivery_count": 0,
                     "matched_size_compared_count": 100,
                     "matched_size_mismatch_count": 0,
@@ -826,7 +829,7 @@ class AggregateWorkflowTests(unittest.TestCase):
 
     def test_workflow_rejects_fifo_and_unmatched_delivery_provenance(self) -> None:
         cases = {
-            "fifo": "non-exact delay matching",
+            "fifo": "unsupported delay matching",
             "unmatched": "unmatched deliveries",
         }
         for mode, message in cases.items():
@@ -850,6 +853,183 @@ class AggregateWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(manifest["failure"]["stage"], "aggregate_ns3")
                 self.assertNotIn("compare", manifest["stages"])
+
+    def test_provenance_accepts_only_accounted_dack_retry_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace = root / "trace.csv"
+            aggregates = root / "aggregates.csv"
+            provenance_path = root / "provenance.json"
+            trace.write_text("trace evidence\n", encoding="utf-8")
+            aggregates.write_text("aggregate evidence\n", encoding="utf-8")
+
+            provenance = {
+                "schema": WORKFLOW.NS3_PROVENANCE_SCHEMA,
+                "source": "ns3",
+                "scenario": "fixture",
+                "input": {
+                    "path": str(trace.resolve()),
+                    "sha256": WORKFLOW.digest(trace),
+                    "size_bytes": trace.stat().st_size,
+                },
+                "output": {
+                    "sha256": WORKFLOW.digest(aggregates),
+                    "size_bytes": aggregates.stat().st_size,
+                },
+                "delay_matching": {
+                    "matched_count": 2,
+                    "unmatched_delivery_count": 0,
+                    "matched_by_method": {
+                        "exact_sequence": 1,
+                        "source_exact_dack_retry_duplicate": 1,
+                    },
+                },
+                "source_exact_dack_retry_duplicates": {
+                    "repeated_feedback_proof_count": 1,
+                    "matched_duplicate_delivery_count": 1,
+                    "unused_proof_count": 0,
+                    "lineages": [
+                        {
+                            "src": "0",
+                            "dst": "2",
+                            "sequence": "77",
+                            "relay": "1",
+                            "ingress_peer": "0",
+                            "hop_sequence": "9",
+                            "qualifying_feedback_count": 2,
+                            "dack_feedback_count": 1,
+                            "proven_extra_delivery_budget": 1,
+                            "source_ordered_pairs": [
+                                {
+                                    "enqueue_event_index": 2,
+                                    "feedback_event_index": 4,
+                                },
+                                {
+                                    "enqueue_event_index": 5,
+                                    "feedback_event_index": 7,
+                                },
+                            ],
+                        }
+                    ],
+                },
+                "window": {"in_window_event_counts": {"nwk_delivery": 2}},
+                "matched_packet_size_integrity": {
+                    "compared_count": 2,
+                    "mismatch_count": 0,
+                },
+            }
+            provenance_path.write_text(
+                json.dumps(provenance), encoding="utf-8"
+            )
+
+            result = WORKFLOW._load_and_validate_ns3_provenance(
+                provenance_path, trace, aggregates, "fixture"
+            )
+
+            self.assertEqual(
+                result["matched_by_method"],
+                {
+                    "exact_sequence": 1,
+                    "source_exact_dack_retry_duplicate": 1,
+                },
+            )
+            self.assertEqual(
+                result[
+                    "source_exact_dack_retry_duplicate_delivery_count"
+                ],
+                1,
+            )
+
+            valid_provenance = copy.deepcopy(provenance)
+            malformed_cases = {}
+
+            overlapping = copy.deepcopy(valid_provenance)
+            overlapping["source_exact_dack_retry_duplicates"]["lineages"][0][
+                "source_ordered_pairs"
+            ][1]["enqueue_event_index"] = 3
+            malformed_cases["overlapping-pairs"] = overlapping
+
+            impossible_budget = copy.deepcopy(valid_provenance)
+            impossible_lineage = impossible_budget[
+                "source_exact_dack_retry_duplicates"
+            ]["lineages"][0]
+            impossible_lineage["qualifying_feedback_count"] = 3
+            impossible_lineage["dack_feedback_count"] = 2
+            impossible_lineage["source_ordered_pairs"].append(
+                {"enqueue_event_index": 8, "feedback_event_index": 9}
+            )
+            malformed_cases["impossible-budget"] = impossible_budget
+
+            reused_index = copy.deepcopy(valid_provenance)
+            second_lineage = copy.deepcopy(
+                reused_index["source_exact_dack_retry_duplicates"]["lineages"][0]
+            )
+            second_lineage["sequence"] = "78"
+            reused_index["source_exact_dack_retry_duplicates"]["lineages"].append(
+                second_lineage
+            )
+            duplicate_evidence = reused_index[
+                "source_exact_dack_retry_duplicates"
+            ]
+            duplicate_evidence["repeated_feedback_proof_count"] = 2
+            duplicate_evidence["unused_proof_count"] = 1
+            malformed_cases["cross-lineage-reused-index"] = reused_index
+
+            for label, malformed in malformed_cases.items():
+                with self.subTest(label=label):
+                    provenance_path.write_text(
+                        json.dumps(malformed), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(
+                        WORKFLOW.WorkflowError,
+                        "lineage.*malformed",
+                    ):
+                        WORKFLOW._load_and_validate_ns3_provenance(
+                            provenance_path, trace, aggregates, "fixture"
+                        )
+
+            provenance = valid_provenance
+
+            provenance["source_exact_dack_retry_duplicates"]["lineages"] = []
+            provenance_path.write_text(
+                json.dumps(provenance), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "lineage budget is inconsistent"
+            ):
+                WORKFLOW._load_and_validate_ns3_provenance(
+                    provenance_path, trace, aggregates, "fixture"
+                )
+            provenance["source_exact_dack_retry_duplicates"]["lineages"] = [
+                {
+                    "src": "0",
+                    "dst": "2",
+                    "sequence": "77",
+                    "relay": "1",
+                    "ingress_peer": "0",
+                    "hop_sequence": "9",
+                    "qualifying_feedback_count": 2,
+                    "dack_feedback_count": 1,
+                    "proven_extra_delivery_budget": 1,
+                    "source_ordered_pairs": [
+                        {"enqueue_event_index": 2, "feedback_event_index": 4},
+                        {"enqueue_event_index": 5, "feedback_event_index": 7},
+                    ],
+                }
+            ]
+
+            provenance["source_exact_dack_retry_duplicates"][
+                "repeated_feedback_proof_count"
+            ] = 0
+            provenance_path.write_text(
+                json.dumps(provenance), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "duplicate evidence is inconsistent"
+            ):
+                WORKFLOW._load_and_validate_ns3_provenance(
+                    provenance_path, trace, aggregates, "fixture"
+                )
 
     def test_seed_and_duration_must_match_opnet_execution(self) -> None:
         cases = (

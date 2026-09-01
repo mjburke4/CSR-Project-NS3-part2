@@ -3142,7 +3142,9 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     return;
   }
 
-  const bool traceFeedback = IsDifferentialAdmissionTraceEnabled ();
+  const bool traceFeedback =
+    IsDifferentialAdmissionTraceEnabled () ||
+    IsDifferentialTraceAggregateOnly ();
   CsrNetHeader feedbackNetworkHeader;
   const bool feedbackNetworkMetadataValid =
     traceFeedback &&
@@ -3152,7 +3154,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
   const bool feedbackAppSequenceValid =
     traceFeedback && payload->PeekPacketTag (feedbackAppTag);
   const bool feedbackNsdpStateValid =
-    IsDifferentialAdmissionTraceEnabled () &&
+    traceFeedback &&
     feedbackNetworkMetadataValid &&
     !m_nsdpObservationCb.IsNull ();
   const uint32_t feedbackNsdpBefore = feedbackNsdpStateValid
@@ -3196,7 +3198,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
         ";nsdp_state_valid=" +
           std::string (feedbackNsdpStateValid ? "1" : "0") +
         ";nsdp_limit=16";
-      WriteDifferentialAdmissionTrace (feedbackEvent);
+      WriteDifferentialHopFeedbackTrace (feedbackEvent);
     };
 
   // Legacy proc_mac_pk() records the sequence before consulting the route

@@ -130,6 +130,13 @@ SetDifferentialTraceAggregateOnly (bool enabled)
   g_csrDifferentialAggregateOnly = enabled;
 }
 
+/** @return Whether the compact aggregate trace surface is enabled. */
+inline bool
+IsDifferentialTraceAggregateOnly ()
+{
+  return g_csrDifferentialAggregateOnly;
+}
+
 /** Enable the opt-in application/NWK/HOP admission ledger. */
 inline void
 SetDifferentialAdmissionTraceEnabled (bool enabled)
@@ -258,6 +265,7 @@ WriteDifferentialTrace (const CsrDifferentialTraceEvent &event)
       event.event != "nwk_enqueue" &&
       event.event != "nwk_forward" &&
       event.event != "nwk_delivery" &&
+      event.event != "hop_feedback" &&
       event.event != "route_change" &&
       event.event != "rx_drop" &&
       event.event != "statistic_sample" &&
@@ -353,6 +361,25 @@ WriteDifferentialAdmissionTrace (const CsrDifferentialTraceEvent &event)
   NS_ABORT_MSG_IF (
     !CsrIsDifferentialAdmissionTraceEvent (event.event),
     "unsupported CSR admission trace event: " << event.event);
+  WriteDifferentialTrace (event);
+}
+
+/**
+ * Write HOP receive feedback needed to prove source-exact DACK retry forks.
+ *
+ * The compact aggregate trace retains only this admission-state event.  It
+ * does not enable the full admission ledger, and the row is observation-only.
+ */
+inline void
+WriteDifferentialHopFeedbackTrace (const CsrDifferentialTraceEvent &event)
+{
+  if (!g_csrDifferentialAdmissionTraceEnabled &&
+      !g_csrDifferentialAggregateOnly)
+    {
+      return;
+    }
+  NS_ABORT_MSG_IF (event.event != "hop_feedback",
+                   "unsupported CSR HOP-feedback trace event: " << event.event);
   WriteDifferentialTrace (event);
 }
 
