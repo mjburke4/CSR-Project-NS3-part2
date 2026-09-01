@@ -978,10 +978,10 @@ def _handle_feedback(event: Event, state: AnalysisState) -> None:
                 [event],
             )
 
-    # A suppressed first reception can be followed by a duplicate ACK, and a
-    # lost DACK can likewise be followed by a duplicate ACK.  The last emitted
-    # ACK/DACK is therefore the only feedback reason that can be compared with
-    # the eventual sender-side completion.
+    # A suppressed first reception can be followed by an ACK-marked duplicate.
+    # A retry after a lost DACK is reaccepted and freshly reassessed, and can
+    # therefore also end in ACK.  The last emitted ACK/DACK is the only
+    # feedback reason that can be compared with eventual sender completion.
     if reason == "dack":
         state.feedback_dack_transitions[(count_before, count_after)] += 1
         if count_before < limit:

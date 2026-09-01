@@ -14,6 +14,10 @@ namespace
 {
 
 std::vector<Time> g_nwkWakeTimes;
+Ptr<Packet> g_capturedFeedback;
+bool g_shouldDack = false;
+uint32_t g_shouldDackCalls = 0;
+uint32_t g_dataDeliveries = 0;
 
 Ptr<Packet>
 ProtectFeedback (CsrHeader header)
@@ -64,6 +68,187 @@ MakeAck (uint16_t baseSeq, uint64_t ackBitmap, uint64_t dackBitmap)
   header.SetDackBitmap (dackBitmap);
 
   return ProtectFeedback (header);
+}
+
+Ptr<Packet>
+MakeProtectedData (CsrHopSecurityState &sender, uint16_t sequence)
+{
+  Ptr<Packet> payload = Create<Packet> (3);
+  CsrNetHeader networkHeader (2, 3, 5);
+  payload->AddHeader (networkHeader);
+
+  std::vector<uint8_t> plaintext (payload->GetSize ());
+  payload->CopyData (plaintext.data (), plaintext.size ());
+  CsrProtectedPairwiseMessage secured =
+    sender.ProtectPairwiseMessage (
+      1,
+      CsrPairwiseSecurityMode::Pairwise16,
+      3,
+      plaintext);
+  Ptr<Packet> frame = Create<Packet> (secured.record.data (),
+                                      secured.record.size ());
+
+  CsrHeader header (2, 1, sequence, 5, true, false);
+  header.SetType (CSR_PKT_DATA);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetSecurityCount (sender.GetOwnSecurityCount ());
+  frame->AddHeader (header);
+  return frame;
+}
+
+bool
+ShouldDack (CsrNodeId source, CsrNodeId destination)
+{
+  Require (source == 2 && destination == 3,
+           "DACK policy did not inspect the relayed NWK flow");
+  g_shouldDackCalls++;
+  return g_shouldDack;
+}
+
+bool
+RelayRouteAvailable (CsrNodeId destination)
+{
+  return destination == 3;
+}
+
+void
+NoteDataDelivery (Ptr<Packet>, CsrNodeId)
+{
+  g_dataDeliveries++;
+}
+
+void
+CaptureFeedback (Ptr<Packet> frame, double, double)
+{
+  CsrHeader header;
+  if (frame->PeekHeader (header) && header.IsAck ())
+    {
+      g_capturedFeedback = frame->Copy ();
+    }
+}
+
+CsrHeader
+AuthenticateCapturedFeedback ()
+{
+  Require (g_capturedFeedback != nullptr,
+           "cumulative feedback was not transmitted to the capture peer");
+
+  Ptr<Packet> securedRecord = g_capturedFeedback->Copy ();
+  CsrHeader outer;
+  Require (securedRecord->RemoveHeader (outer) != 0 &&
+             outer.HasSecurityCount (),
+           "captured feedback lacks its Pairwise16 transport wrapper");
+
+  std::vector<uint8_t> record (securedRecord->GetSize ());
+  securedRecord->CopyData (record.data (), record.size ());
+  CsrHopSecurityState verifier;
+  verifier.SetNodeId (2);
+  CsrReceivedPairwiseMessage received =
+    verifier.ReceivePairwiseMessage (
+      1,
+      outer.GetSecurityCount (),
+      CsrPairwiseSecurityMode::Pairwise16,
+      0,
+      record);
+  Require (received.status == CsrHopSecurityReceiveStatus::Accepted,
+           "captured feedback failed Pairwise16 authentication");
+
+  Ptr<Packet> body = Create<Packet> (received.payload.data (),
+                                     received.payload.size ());
+  CsrHeader authenticated;
+  Require (body->RemoveHeader (authenticated) != 0,
+           "authenticated feedback body lacks its CSR header");
+  return authenticated;
+}
+
+void
+CheckReceiverWindowProduction (bool retryAfterDack)
+{
+  Ptr<CsrNetDevice> producer = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrNetDevice> capture = CreateObject<CsrNetDevice> (2);
+  producer->AddPeer (capture);
+
+  CsrPerModelFn noErrors = [] (int, double, uint32_t) { return 0.0; };
+  producer->GetPhy ().SetPerModel (noErrors);
+  capture->GetPhy ().SetPerModel (noErrors);
+  producer->GetPhy ().SetLinkDistanceMeters (1, 2, 1.0);
+  capture->GetPhy ().SetLinkDistanceMeters (1, 2, 1.0);
+  capture->GetMac ().SetRxCallback (MakeCallback (&CaptureFeedback));
+
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  hop->SetNodeId (1);
+  hop->SetMac (&producer->GetMac ());
+  hop->SetRxFromHopCallback (MakeCallback (&NoteDataDelivery));
+  hop->SetRelayRouteAvailableCallback (
+    MakeCallback (&RelayRouteAvailable));
+
+  CsrHopSecurityState dataSender;
+  dataSender.SetNodeId (2);
+
+  g_capturedFeedback = nullptr;
+  g_shouldDackCalls = 0;
+  g_dataDeliveries = 0;
+  if (retryAfterDack)
+    {
+      hop->SetShouldDackCallback (MakeCallback (&ShouldDack));
+      Ptr<Packet> retransmitted = MakeProtectedData (dataSender, 77);
+      g_shouldDack = true;
+      hop->ReceiveFromMac (retransmitted->Copy (), 90.0, 10.0);
+      g_shouldDack = false;
+      hop->ReceiveFromMac (retransmitted->Copy (), 90.0, 10.0);
+      Require (g_shouldDackCalls == 2,
+               "DACKed retry was suppressed instead of reassessed");
+      Require (g_dataDeliveries == 2,
+               "DACKed authenticated retry was not re-enqueued to NWK");
+    }
+  else
+    {
+      hop->ReceiveFromMac (MakeProtectedData (dataSender, 77), 90.0, 10.0);
+      hop->ReceiveFromMac (MakeProtectedData (dataSender, 76), 90.0, 10.0);
+    }
+
+  Require (producer->GetMac ().GetAckQueuedFrameCount () == 1,
+           "cumulative feedback did not replace its queued predecessor");
+  Simulator::Stop (Seconds (4.0));
+  Simulator::Run ();
+
+  CsrHeader authenticated = AuthenticateCapturedFeedback ();
+  Require (authenticated.GetSeq () == 77,
+           "cumulative feedback base did not remain at receiver highest");
+  if (retryAfterDack)
+    {
+      Require (authenticated.GetAckBitmap () == 1 &&
+                 authenticated.GetDackBitmap () == 1,
+               "DACK-to-accepted retry did not transmit raw overlapping maps");
+    }
+  else
+    {
+      Require (authenticated.GetAckBitmap () == 3 &&
+                 authenticated.GetDackBitmap () == 0,
+               "out-of-order reception produced the wrong cumulative map");
+    }
+
+  Simulator::Destroy ();
+}
+
+void
+CheckAckWinsOverlap ()
+{
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  hop->SetNodeId (1);
+  hop->SetMac (&device->GetMac ());
+
+  hop->SendData (2, 5, Create<Packet> (8), true);
+  Require (hop->GetPendingDataCount () == 1,
+           "ACK-precedence setup did not create one pending DATA frame");
+  hop->ReceiveFromMac (MakeAck (1, 1, 1), 90.0, 10.0);
+  Require (hop->GetPendingDataCount () == 0 &&
+             hop->GetResendQueueSize () == 0 &&
+             device->GetMac ().GetDataQueuedFrameCount () == 0,
+           "overlapping cumulative bits did not complete through ACK first");
+
+  Simulator::Destroy ();
 }
 
 Ptr<Packet>
@@ -132,6 +317,10 @@ main ()
            "ACK bitmap did not round-trip");
   Require (decoded.GetDackBitmap () == 0x2ULL,
            "DACK bitmap did not round-trip");
+
+  CheckReceiverWindowProduction (false);
+  CheckReceiverWindowProduction (true);
+  CheckAckWinsOverlap ();
 
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
   Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();

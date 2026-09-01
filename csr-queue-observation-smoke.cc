@@ -697,7 +697,7 @@ BuildRelayDataFrame (CsrNodeId hopSource,
 void
 RunRelayFeedbackBoundary (uint32_t nsdpBefore,
                           const std::string &expectedReason,
-                          bool injectDuplicate,
+                          bool retryReaccepted,
                           CsrNodeId nodeBase)
 {
   TraceFile trace ("relay-feedback-" + std::to_string (nsdpBefore));
@@ -748,25 +748,24 @@ RunRelayFeedbackBoundary (uint32_t nsdpBefore,
                          appSequence),
     70.0,
     30.0);
-  if (injectDuplicate)
-    {
-      hop->ReceiveFromMac (
-        BuildRelayDataFrame (hopSource,
-                             relay,
-                             hopSequence,
-                             nwkSource,
-                             nwkDestination,
-                             dscp,
-                             appSequence),
-        70.0,
-        30.0);
-    }
+  hop->ReceiveFromMac (
+    BuildRelayDataFrame (hopSource,
+                         relay,
+                         hopSequence,
+                         nwkSource,
+                         nwkDestination,
+                         dscp,
+                         appSequence),
+    70.0,
+    30.0);
 
-  const uint32_t nsdpAfter = nsdpBefore + 1;
-  Require (nwk->GetNsdpCount (nwkSource, nwkDestination) == nsdpAfter,
-           "accepted relay DATA did not increment NSDP exactly once");
-  Require (nwk->GetNwkQueueSize () == nsdpAfter,
-           "accepted relay DATA did not enqueue exactly once");
+  const uint32_t nsdpAfterFirst = nsdpBefore + 1;
+  const uint32_t nsdpAfterAll =
+    nsdpAfterFirst + (retryReaccepted ? 1 : 0);
+  Require (nwk->GetNsdpCount (nwkSource, nwkDestination) == nsdpAfterAll,
+           "accepted relay DATA/retry did not increment NSDP exactly once each");
+  Require (nwk->GetNwkQueueSize () == nsdpAfterAll,
+           "accepted relay DATA/retry did not enqueue exactly once each");
 
   CloseDifferentialTraceCsv ();
   const std::vector<TraceRow> rows = ReadTrace (trace.Path ());
@@ -775,10 +774,10 @@ RunRelayFeedbackBoundary (uint32_t nsdpBefore,
   const std::vector<TraceRow> enqueues =
     RowsForEventAndSequence (rows, "nwk_enqueue", appSequence);
 
-  Require (feedback.size () == (injectDuplicate ? 2 : 1),
+  Require (feedback.size () == 2,
            "relay feedback boundary emitted the wrong feedback count");
-  Require (enqueues.size () == 1,
-           "relay feedback boundary enqueued a duplicate or lost first DATA");
+  Require (enqueues.size () == (retryReaccepted ? 2 : 1),
+           "relay feedback boundary lost an accepted DATA/retry enqueue");
   Require (feedback[0].reason == expectedReason && feedback[0].success == "1",
            "relay feedback boundary selected the wrong ACK/DACK reason");
   RequireDetail (feedback[0],
@@ -791,25 +790,42 @@ RunRelayFeedbackBoundary (uint32_t nsdpBefore,
                  "first relay feedback");
   RequireDetail (feedback[0],
                  "nsdp_count_after",
-                 CsrTraceInteger (nsdpAfter),
+                 CsrTraceInteger (nsdpAfterFirst),
                  "first relay feedback");
 
-  if (injectDuplicate)
+  if (retryReaccepted)
+    {
+      Require (feedback[1].reason == "dack" && feedback[1].success == "1",
+               "DACK-marked retry was not reassessed under congestion");
+      RequireDetail (feedback[1],
+                     "first_reception",
+                     "1",
+                     "DACK-marked retry feedback");
+      RequireDetail (feedback[1],
+                     "nsdp_count_before",
+                     CsrTraceInteger (nsdpAfterFirst),
+                     "DACK-marked retry feedback");
+      RequireDetail (feedback[1],
+                     "nsdp_count_after",
+                     CsrTraceInteger (nsdpAfterAll),
+                     "DACK-marked retry feedback");
+    }
+  else
     {
       Require (feedback[1].reason == "ack" && feedback[1].success == "1",
-               "duplicate relay DATA did not receive a plain ACK decision");
+               "ACK-marked duplicate did not receive a plain ACK");
       RequireDetail (feedback[1],
                      "first_reception",
                      "0",
-                     "duplicate relay feedback");
+                     "ACK-marked duplicate feedback");
       RequireDetail (feedback[1],
                      "nsdp_count_before",
-                     CsrTraceInteger (nsdpAfter),
-                     "duplicate relay feedback");
+                     CsrTraceInteger (nsdpAfterFirst),
+                     "ACK-marked duplicate feedback");
       RequireDetail (feedback[1],
                      "nsdp_count_after",
-                     CsrTraceInteger (nsdpAfter),
-                     "duplicate relay feedback");
+                     CsrTraceInteger (nsdpAfterFirst),
+                     "ACK-marked duplicate feedback");
     }
 
   Simulator::Destroy ();

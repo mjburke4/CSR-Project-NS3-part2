@@ -99,8 +99,10 @@ count is absent.
   previous key, or a derivable future key in the same 16-key epoch. Failed
   authentication does not advance replay or committed key state.
 - Pairwise DATA authentication occurs before pairwise or HOP replay state,
-  delivery, or ACK generation. An authenticated retransmission is ACKed again
-  without a second delivery; failed authentication cannot poison either replay
+  delivery, or ACK generation. An ACK-marked authenticated retransmission is
+  ACKed again without a second delivery. A DACK-marked authenticated retry is
+  re-enqueued and reassessed for fresh ACK/DACK selection, matching the legacy
+  ACK-only duplicate test. Failed authentication cannot poison either replay
   window.
 - ACK/DACK authenticates the complete logical ACK body before MAC cancellation,
   resend/custody mutation, or the packet-level delayed NWK wake. The mutable
@@ -176,7 +178,13 @@ Pairwise16 is connected to ordinary DATA, the common ACK/DACK packet type, and
 packet-type-9 NeighborCheck; Pairwise32Encrypt has an explicit one-hop DATA
 path; and Group32Encrypt is connected to AppNeighborcast. The ACK/DACK
 Pairwise16 policy is source-exact; the ns-3 logical-body byte mapping remains
-unverified without a production golden protected record. For NeighborCheck,
+unverified without a production golden protected record. Reassessing a
+Pairwise16 authenticated duplicate when its HOP sequence is DACK-marked is an
+inferred cross-source integration: `br_hop.pr.c` proves the HOP retry rule, but
+the archived OPNET executable has no production security dispatcher proving
+how an authenticated duplicate reaches that rule. The outer HOP sequence is
+not authenticated, so relabeling between two simultaneously DACK-marked
+sequences remains an unresolved production-security binding uncertainty. For NeighborCheck,
 the packet type, Pairwise16 mode, reliable-unicast ownership, retry record, and
 five-byte security overhead are source-exact. The byte-for-byte mapping of the
 current ns-3 `CsrHelloHeader` compatibility body to the production

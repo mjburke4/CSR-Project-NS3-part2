@@ -81,6 +81,40 @@ wrapper:
 - Reliable Group16 routing control adds five security bytes plus actual ARL
   section bytes; the compatibility `CsrHelloHeader` storage is excluded.
 
+### Archived OPNET versus production ACK security
+
+The 30- and 46-byte Pairwise16 ACK sizes combine two independently
+authoritative sources.  The supplied `br_Ack.pk.m`, `br_hop.pr.c`, and
+`br_mac.pr.c` establish the 25-byte exact and 41-byte cumulative OPNET
+envelopes.  Production `packetTypes.c` maps the common `AckMsg` type to
+Pairwise16, which adds five bytes.
+
+The hash-bound campus-multihop executable
+`adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af`
+does not contain `packetTypes.c`, `hopSecLayer.c`, a `packetDecode` symbol, or
+a project security-library dependency.  Its compiled `send_ack()` directly
+creates `br_Ack`, passes it through `br_Mac`, and MAC uses the resulting packet
+size for concatenation and OTA duration.  The archived OPNET run therefore
+supports 25/41-byte ACK accounting, while 30/46-byte accounting is
+source-exact production-security policy layered onto that OPNET envelope.
+Historical aggregate comparisons must retain this source-version boundary;
+they cannot use a 46-byte ns-3 result as packet-level proof that the archived
+OPNET executable transmitted a 46-byte ACK.  Both authoritative sizes exceed
+the 8-kbit/s strict concatenation boundary beside a 222-byte DATA frame:
+`41 + 222` and `46 + 222` are both greater than 256.  The earlier 30-byte
+cumulative approximation (`30 + 222 = 252`) incorrectly admitted that DATA
+segment, so its apparently closer aggregate result was a compensating error.
+
+The source boundary also applies to protected DATA retries. The legacy HOP
+source directly proves that a DACK-marked sequence is not a duplicate and is
+re-enqueued for a fresh decision. The production packet-type table proves the
+Pairwise16 mode, but the recovered material does not include a production
+dispatcher showing how an authenticated security replay is returned to HOP.
+ns-3's authenticated-duplicate-to-DACK-retry bridge is therefore inferred
+legacy integration, not source-exact dispatcher behavior. Because Pairwise16
+does not authenticate the outer HOP sequence, cross-relabeling between two
+simultaneously DACK-marked sequences remains unresolved.
+
 ## Known source-version discrepancy
 
 The supplied `br_Hop.pk.m` declares an eight-bit `Sequence_Number`.  The

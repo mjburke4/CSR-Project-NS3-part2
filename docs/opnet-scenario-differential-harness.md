@@ -480,8 +480,17 @@ Recovered `br_hop.pr.c` obtains the NSDP entry, sends the relay packet to the
 separate NWK process, and tests the still-pre-enqueue count: 15 selects ACK
 and 16 selects DACK. ns-3 now makes that decision before its synchronous NWK
 delivery callback. Explicit smoke fixtures cover pre-15/post-16 ACK,
-pre-16/post-17 DACK, duplicate plain-ACK/no-second-enqueue behavior, and
-first-reception no-route ACK suppression.
+pre-16/post-17 DACK, ACK-marked duplicate plain-ACK/no-second-enqueue
+behavior, DACK-marked retry re-enqueue/reassessment, and first-reception
+no-route ACK suppression.
+
+That retry can source-exactly create a second downstream delivery: legacy NWK
+has no DATA duplicate table, assigns each relay copy a fresh onward HOP
+sequence, and delivers every destination copy to APP. The current analyzers'
+single-delivery assumption is therefore a known verification discrepancy for
+the lost-DACK path. It remains fail-closed until a three-hop fixture can prove
+the ingress DACK/retry lineage; unqualified duplicate delivery must not be
+silently accepted.
 
 The ledger is ns-3 isolation evidence interpreted against recovered OPNET
 source. It is not an OPNET event comparison. No authoritative OPNET

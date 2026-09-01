@@ -438,7 +438,9 @@ It contains 138 DACK decisions whose relay NSDP changes from 15 before enqueue
 to 16 afterward. The recovered `br_hop.pr.c` and the campus archive's embedded
 `br_hop.pr.m` both obtain the NSDP entry before sending to the NWK process and
 then test that pre-event count. ns-3 now preserves that ordering: pre-count 15
-ACKs, pre-count 16 DACKs, and duplicates do not enqueue again.
+ACKs and pre-count 16 DACKs.  ACK-marked duplicates do not enqueue again;
+DACK-marked retries remain eligible for a fresh NWK enqueue and ACK/DACK
+decision because the legacy duplicate test consults only the ACK register.
 
 These counts are ns-3 source-ordered isolation evidence combined with a direct
 comparison to recovered OPNET source. They are not an OPNET event-trace
