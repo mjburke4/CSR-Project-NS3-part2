@@ -152,6 +152,11 @@ count is absent.
   rejection; authenticated ACK/DACK state and wake ordering; a live 46-byte
   cumulative Pairwise16 DACK; exact-once AppNeighborcast; and live over-air
   sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
+- `csr-hop-neighbor-check-security-smoke.cc` checks the source-exact
+  packet-type-9 Pairwise16 NeighborCheck wrapper policy, authentication before
+  ACK/delivery, all five operational subtypes, authenticated duplicate re-ACK
+  with exact-once delivery, an exact 30-byte protected ACK, byte-identical
+  protected retries, and preserved success/final-failure metadata.
 - `csr-nwk-residual-routing-retry-smoke.cc` checks that NWK retains the exact
   grouped plaintext owner while HOP retries the original multicast, removes
   one destination per ACK, defers final-NACK recovery to a later same-time
@@ -161,21 +166,25 @@ count is absent.
   INFO/UPDATE/DELETE bytes, INFO-only final-value coalescing, 10+1 neighbor
   grouping, no-recipient consumption without replay or sequence advancement,
   and exact 694-/83-byte body slicing for a 777-byte logical stream.
-- The complete build and regression pass: 35 focused smoke targets,
-  `csr-mac-demo-split`, and the imported-scenario runner (37/37).
+- The complete build and regression pass: 36 focused smoke targets,
+  `csr-mac-demo-split`, and the imported-scenario runner (38/38).
 
 ## Deliberate boundary
 
 All enabled HOP-security transforms now have portable provider coverage.
-Pairwise16 is connected to ordinary DATA and the common ACK/DACK packet type,
-Pairwise32Encrypt has an explicit one-hop DATA path, and Group32Encrypt is
-connected to AppNeighborcast. The ACK/DACK Pairwise16 policy is source-exact;
-the ns-3 logical-body byte mapping remains unverified without a production
-golden protected record. Exact security wrapping for remaining control
-messages (including NeighborCheck), the distinct network-security modes, and
-operational key-store behavior remain outside this step and require
-packet-type-table or differential-trace confirmation before they can be
-claimed as equivalent.
+Pairwise16 is connected to ordinary DATA, the common ACK/DACK packet type, and
+packet-type-9 NeighborCheck; Pairwise32Encrypt has an explicit one-hop DATA
+path; and Group32Encrypt is connected to AppNeighborcast. The ACK/DACK
+Pairwise16 policy is source-exact; the ns-3 logical-body byte mapping remains
+unverified without a production golden protected record. For NeighborCheck,
+the packet type, Pairwise16 mode, reliable-unicast ownership, retry record, and
+five-byte security overhead are source-exact. The byte-for-byte mapping of the
+current ns-3 `CsrHelloHeader` compatibility body to the production
+NeighborCheck body is unresolved. Its bounds check is an intentional defensive
+extension that runs only after HOP authentication. Exact wrapping for other
+remaining control messages, the distinct network-security modes, and
+operational key-store behavior still require packet-type-table or
+differential-trace confirmation before they can be claimed as equivalent.
 
 This route-admission increment covers the inactive-peer selection boundary and
 source-owned destination recomputation after normal or looped UPDATEs,

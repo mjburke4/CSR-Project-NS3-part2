@@ -77,6 +77,12 @@ OPNET multidestination routing ACK parity test:
 3. Run: ./ns3 run csr-hop-multidest-routing-smoke
 4. Expected: PASS: OPNET multidestination routing ACK parity test
 
+Source-exact Pairwise16 NeighborCheck wrapper test:
+1. Copy csr-hop-neighbor-check-security-smoke.cc to ns-3-dev/scratch/
+2. Build: ./ns3 build csr-hop-neighbor-check-security-smoke
+3. Run: ./ns3 run csr-hop-neighbor-check-security-smoke
+4. Expected: PASS: source-exact Pairwise16 NeighborCheck wrapper test
+
 OPNET NWK-owned residual routing retry parity test:
 1. Copy csr-nwk-residual-routing-retry-smoke.cc to ns-3-dev/scratch/
 2. Build: ./ns3 build csr-nwk-residual-routing-retry-smoke

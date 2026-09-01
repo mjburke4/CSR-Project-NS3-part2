@@ -635,9 +635,9 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Current regression baseline
 
-All 37 CSR executable targets build on this audit revision. The 35 focused
+All 38 CSR executable targets build on this audit revision. The 36 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (37/37). All 143 focused Python tests pass; the suite additionally
+workflow pass (38/38). All 143 focused Python tests pass; the suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end

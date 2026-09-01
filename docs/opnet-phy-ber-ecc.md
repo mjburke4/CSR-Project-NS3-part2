@@ -267,8 +267,8 @@ claiming an unrecovered TMM equation.
 - safe one-frame progress when no high-rate concatenation limit is available;
 - reserved compact-code non-operational and non-encodable classification.
 
-The full regression currently contains 31 focused CSR programs plus the demo;
-the imported-scenario runner is the thirty-third executable target.
+The full regression currently contains 36 focused CSR programs plus the demo;
+the imported-scenario runner is the thirty-eighth executable target.
 
 ## Remaining PHY boundary
 
