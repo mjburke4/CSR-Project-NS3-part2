@@ -147,16 +147,17 @@ no-DSCP profile.
 The run row's `mac_profile` records the exact `get_slot()` family selected by
 `--mac-profile`. It is bound to compiled-code evidence, not inferred from the
 scenario name, node count, or topology: the same `*.nt.m` can be run with a
-different compiled executable. The four accepted profile names are:
+different compiled executable. The five accepted profile names are:
 
 | MAC profile | Evidence binding | Slot-selection behavior |
 | --- | --- | --- |
 | `current-fine-free-slot` | Supplied newer `br_mac.pr.c`; no recovered executable SHA binding | Fine active-node range; draw a one-based free-slot ordinal, mark neighbor `rtslot_counter` values reserved, and walk the reservation table. With no reservations the support is `1..R`; reservations can shift the physical slot above `R`. |
+| `hist-2014-coarse-inclusive-no-avoid` | `08c3647956a9dd31c03c9a2c7bac2cf00b62216968e08ee539b91bc327bafbf5` (`CSR_Validation-1_Node` and `2_Nodes_Latency`) | Coarse range from process-local `active_nodes`; draw uniformly in `0..R` inclusive, without reservation avoidance or probing. |
 | `hist-2014-zero-based-rebuild-list` | `d9ebf7626e641ee68ccc9b58b1bb4b28fc0906111762e4456a0e8c7a0bd8b055` (`blue_radio_campus-2_nodes`) | Coarse range; rebuild an ordered `0..R-1` list and choose one list index uniformly. |
 | `hist-2015-fine-one-based-table-no-avoid` | `dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0` (`blue_radio_campus-hidden_nodes_symmetrical`) | Fine range; index an ordered 255-entry table with a uniform integer in `1..R`, without reservation avoidance. |
 | `hist-2014-next-tslot-modulo-probe` | `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` (`blue_radio_campus-multihop`) | Coarse range; draw in `0..R`, compare directly with each neighbor's `next_tslot`, and probe after a collision. |
 
-For the two coarse profiles, the disassembled signed comparisons give
+For the three coarse profiles, the disassembled signed comparisons give
 `R=31` for `N<=4`, `R=63` for `5<=N<=8`, `R=127` for `9<=N<=12`, and
 `R=255` for `N>=13`; the unreachable-for-normal-input negative-node edge also
 falls in the first branch. The fine mapping is exact:
@@ -165,9 +166,25 @@ falls in the first branch. The fine mapping is exact:
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Range `R` | 15 | 18 | 21 | 25 | 31 | 37 | 44 | 52 | 63 | 75 | 89 | 106 | 127 | 151 | 180 | 214 | 255 |
 
-The three historical algorithms preserve their executable-specific endpoints
+The four historical algorithms preserve their executable-specific endpoints
 and defects:
 
+- The operational coarse-inclusive executable has ELF Build ID
+  `cbc38b846deb800c1df8d99c0f5628a68c3b24ee`. Its DWARF binds
+  `get_slot@0x1e39f` to `/home/klee/op_models/blue_radio/br_mac.pr.c` lines
+  1330--1350. All five production call sites pass process-state
+  `active_nodes`, refreshed from the NWK interface immediately before the
+  call; they do not substitute `max_reported_active_nodes`. The function
+  returns `floor(uniform(R+1))`, giving exact support `0..R`, and reads no
+  neighbor, reservation, or probing state. The focused ns-3 regression uses
+  seed 1, automatic stream 0, and runs 5,
+  47, and 899 to exercise occupied returns 0, 31, and 255 respectively. These
+  are deterministic ns-3 branch/endpoint vectors, not a claim that Modeler
+  and ns-3 share an RNG sequence. This profile is classified as source-exact
+  behavior for the SHA-bound executable; it remains an explicit selection and
+  is not the importer or runner default. Other archived operational builds
+  implement different `get_slot()` families, so the date and scenario era
+  alone are not sufficient evidence to select it.
 - The zero-based executable creates exactly `R` entries with slot fields
   `0..R-1`, draws `floor(uniform(R))`, and consults no reservation state. Slot
   zero is selectable and `R` is not, despite the executable also recording

@@ -44,6 +44,8 @@ constexpr const char *LEGACY_SEND_ONLY_PROFILE =
 constexpr const char *LEGACY_SEND_TO_FROM_PROFILE =
   "legacy-send-to-from-no-dscp";
 constexpr const char *CURRENT_MAC_PROFILE = "current-fine-free-slot";
+constexpr const char *HIST_COARSE_INCLUSIVE_NO_AVOID_MAC_PROFILE =
+  "hist-2014-coarse-inclusive-no-avoid";
 constexpr const char *HIST_ZERO_BASED_MAC_PROFILE =
   "hist-2014-zero-based-rebuild-list";
 constexpr const char *HIST_FINE_NO_AVOID_MAC_PROFILE =
@@ -404,6 +406,7 @@ LoadScenario (const std::string &path)
   NS_ABORT_MSG_IF (
     scenario.macProfile != "unspecified" &&
       scenario.macProfile != CURRENT_MAC_PROFILE &&
+      scenario.macProfile != HIST_COARSE_INCLUSIVE_NO_AVOID_MAC_PROFILE &&
       scenario.macProfile != HIST_ZERO_BASED_MAC_PROFILE &&
       scenario.macProfile != HIST_FINE_NO_AVOID_MAC_PROFILE &&
       scenario.macProfile != HIST_MODULO_PROBE_MAC_PROFILE,
@@ -483,6 +486,11 @@ ParseMacProfile (const std::string &profile)
     {
       return CsrMacCore::SlotSelectionProfile::
         HIST_2014_ZERO_BASED_REBUILD_LIST;
+    }
+  if (profile == HIST_COARSE_INCLUSIVE_NO_AVOID_MAC_PROFILE)
+    {
+      return CsrMacCore::SlotSelectionProfile::
+        HIST_2014_COARSE_INCLUSIVE_NO_AVOID;
     }
   if (profile == HIST_FINE_NO_AVOID_MAC_PROFILE)
     {

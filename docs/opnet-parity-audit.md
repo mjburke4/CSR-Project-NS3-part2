@@ -386,11 +386,12 @@ separate send-only profile with an explicit fixed-DSCP approximation.
 The canonical run row also carries an executable-backed `mac_profile`.
 Selection is hash-bound and explicit; it is never inferred from a topology,
 scenario name, or node count because a network model can be paired with a
-different compiled executable. All four supported profiles are recorded here:
+different compiled executable. All five supported profiles are recorded here:
 
 | MAC profile | Source or executable binding | Exact selection family |
 | --- | --- | --- |
 | `current-fine-free-slot` | Supplied newer `br_mac.pr.c`; no recovered executable SHA binding | Fine range, one-based free-slot ordinal, with neighbor `rtslot_counter` reservations. |
+| `hist-2014-coarse-inclusive-no-avoid` | `08c3647956a9dd31c03c9a2c7bac2cf00b62216968e08ee539b91bc327bafbf5` (`CSR_Validation-1_Node` and `2_Nodes_Latency`) | Coarse range from local `active_nodes`, uniform support `0..R` inclusive, no reservation avoidance or probing. |
 | `hist-2014-zero-based-rebuild-list` | `d9ebf7626e641ee68ccc9b58b1bb4b28fc0906111762e4456a0e8c7a0bd8b055` | Coarse range, uniform ordered-list support `0..R-1`, no reservation avoidance. |
 | `hist-2015-fine-one-based-table-no-avoid` | `dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0` | Fine range, ordered-table support `1..R` for `R<=254`, no reservation avoidance. |
 | `hist-2014-next-tslot-modulo-probe` | `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` | Coarse range, initial support `0..R`, then direct neighbor-`next_tslot` modulo probing. |
@@ -400,7 +401,17 @@ The coarse mapping is `N<=4 -> R=31`, `5..8 -> 63`, `9..12 -> 127`, and
 `15,18,21,25,31,37,44,52,63,75,89,106,127,151,180,214,255`, with other
 values selecting 255. The zero-based executable rebuilds entries `0..R-1`
 and draws `floor(uniform(R))`; its separate `max_tslot=R+1` assignment does
-not extend that support. The fine-table executable builds indexes `0..254`
+not extend that support. The new operational executable
+(`CSR_Validation-2_Nodes_Latency`, Build ID
+`cbc38b846deb800c1df8d99c0f5628a68c3b24ee`) instead draws
+`floor(uniform(R+1))`; its five production call sites pass local
+`active_nodes` directly and the function reads no reservation state. This is
+source-exact for that SHA-bound executable and is intentionally not a default.
+Other archived operational builds conflict, so this profile must not be
+selected from the era label alone. The exact 2014 source text is unavailable;
+this classification rests on the authoritative executable disassembly and its
+DWARF source mapping. The fine-table executable builds indexes
+`0..254`
 and dereferences `floor(uniform(R))+1`. All five of its call sites pass
 `rn_range`; the archived binary initializes it to zero, never assigns it
 again, and the selected network/environment files do not configure it, so the

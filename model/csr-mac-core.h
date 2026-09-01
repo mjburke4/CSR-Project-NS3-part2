@@ -35,6 +35,7 @@ class CsrMacCore
   enum class SlotSelectionProfile
   {
     NS3_CURRENT_FINE_FREE_SLOT,
+    HIST_2014_COARSE_INCLUSIVE_NO_AVOID,
     HIST_2014_ZERO_BASED_REBUILD_LIST,
     HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
     HIST_2014_NEXT_TSLOT_MODULO_PROBE
@@ -311,6 +312,8 @@ class CsrMacCore
   GetOpnetSlotRange (uint32_t activeNodesForSlotting) const
   {
     if (m_slotSelectionProfile ==
+          SlotSelectionProfile::HIST_2014_COARSE_INCLUSIVE_NO_AVOID ||
+        m_slotSelectionProfile ==
           SlotSelectionProfile::HIST_2014_ZERO_BASED_REBUILD_LIST ||
         m_slotSelectionProfile ==
           SlotSelectionProfile::HIST_2014_NEXT_TSLOT_MODULO_PROBE)
@@ -580,6 +583,8 @@ class CsrMacCore
   CsrNodeId GetNodeId () const { return m_nodeId; }
 
 private:
+  friend struct CsrMacSlotParitySmokeAccess;
+
   struct NeighborInfo
   {
     double lastHeardSec { -1.0 };
@@ -770,8 +775,42 @@ private:
   int
   PickTxSlot (CsrNodeId dest)
   {
-    uint32_t activeForSlotting = GetReportedActiveNodesForSlotting ();
+    // The recovered operational get_slot() call sites pass the process-local
+    // active_nodes value directly.  Other profiles retain their existing
+    // max(local active_nodes, reported active nodes) input.
+    uint32_t activeForSlotting =
+      m_slotSelectionProfile ==
+          SlotSelectionProfile::HIST_2014_COARSE_INCLUSIVE_NO_AVOID
+        ? m_activeNodesForPostTx
+        : GetReportedActiveNodesForSlotting ();
     int slotRange = GetOpnetSlotRange (activeForSlotting);
+
+    if (m_slotSelectionProfile ==
+        SlotSelectionProfile::HIST_2014_COARSE_INCLUSIVE_NO_AVOID)
+      {
+        if (m_forcedReservationSlot > 0)
+          {
+            std::cout << "[MAC " << m_nodeId
+                      << "] controlled differential reservation slot="
+                      << m_forcedReservationSlot
+                      << std::endl;
+            return m_forcedReservationSlot;
+          }
+
+        // Operational executable 08c364... get_slot@0x1e39f (DWARF source
+        // br_mac.pr.c:1330-1350): floor(uniform(R + 1)) selects 0..R
+        // inclusive.  The function does not inspect reservation or neighbor
+        // state and performs no collision probing.
+        Ptr<UniformRandomVariable> rng =
+          CreateObject<UniformRandomVariable> ();
+        int chosenSlot = rng->GetInteger (0, slotRange);
+        std::cout << "[MAC " << m_nodeId
+                  << "] PickTxSlot chose " << chosenSlot
+                  << " using historical coarse inclusive range [0,"
+                  << slotRange << "] without reservation avoidance"
+                  << std::endl;
+        return chosenSlot;
+      }
 
     // The historical profiles disagree on zero-/one-based support and whether
     // slot_range itself is selectable.  The current ordinal-scan profile uses

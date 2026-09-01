@@ -552,7 +552,7 @@ class ScenarioImporterTests(unittest.TestCase):
                     str(source),
                     str(output),
                     "--mac-profile",
-                    IMPORTER.MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+                    IMPORTER.MAC_PROFILE_HIST_2014_COARSE_INCLUSIVE_NO_AVOID,
                 ]
             )
             IMPORTER.import_scenario(arguments)
@@ -560,7 +560,7 @@ class ScenarioImporterTests(unittest.TestCase):
                 run_row = next(csv.DictReader(stream))
             self.assertEqual(
                 run_row["mac_profile"],
-                IMPORTER.MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+                IMPORTER.MAC_PROFILE_HIST_2014_COARSE_INCLUSIVE_NO_AVOID,
             )
 
         with contextlib.redirect_stderr(io.StringIO()):

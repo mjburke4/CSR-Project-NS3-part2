@@ -5,9 +5,19 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 using namespace ns3;
+
+struct CsrMacSlotParitySmokeAccess
+{
+  static int
+  PickTxSlot (CsrMacCore &mac, CsrNodeId destination)
+  {
+    return mac.PickTxSlot (destination);
+  }
+};
 
 namespace
 {
@@ -68,6 +78,30 @@ CheckSlotSelectionProfileRanges (Ptr<CsrNetDevice> device)
            "historical rebuild-list coarse slot-range map is wrong");
 
   mac.SetSlotSelectionProfile (
+    Profile::HIST_2014_COARSE_INCLUSIVE_NO_AVOID);
+  struct RangeVector
+  {
+    uint32_t activeNodes;
+    int expectedRange;
+  };
+  const RangeVector rangeVectors[] = {
+    {0, 31},
+    {4, 31},
+    {5, 63},
+    {8, 63},
+    {9, 127},
+    {12, 127},
+    {13, 255},
+    {std::numeric_limits<uint32_t>::max (), 255},
+  };
+  for (const RangeVector &vector : rangeVectors)
+    {
+      Require (mac.GetOpnetSlotRange (vector.activeNodes) ==
+                 vector.expectedRange,
+               "recovered coarse-inclusive slot-range map is wrong");
+    }
+
+  mac.SetSlotSelectionProfile (
     Profile::HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID);
   Require (mac.GetOpnetSlotRange (0) == 15 &&
              mac.GetOpnetSlotRange (5) == 37 &&
@@ -83,6 +117,53 @@ CheckSlotSelectionProfileRanges (Ptr<CsrNetDevice> device)
            "historical modulo-probe coarse slot-range map is wrong");
 
   mac.SetSlotSelectionProfile (Profile::NS3_CURRENT_FINE_FREE_SLOT);
+}
+
+void
+CheckCoarseInclusiveNoAvoidDraw (uint64_t run,
+                                 uint32_t localActiveNodes,
+                                 uint32_t reportedActiveNodes,
+                                 int occupiedSlot,
+                                 int expectedRange,
+                                 int expectedSlot)
+{
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (run);
+  RngSeedManager::ResetNextStreamIndex ();
+
+  CsrMacCore mac;
+  mac.SetNodeId (1);
+  mac.SetSlotSelectionProfile (
+    CsrMacCore::SlotSelectionProfile::
+      HIST_2014_COARSE_INCLUSIVE_NO_AVOID);
+  mac.SetActiveNodesForPostTx (localActiveNodes);
+  mac.NoteReportedActiveNodes (reportedActiveNodes);
+  mac.NoteNeighborReservedSlot (9, occupiedSlot);
+
+  Require (mac.GetNeighborReservationCounter (9) == occupiedSlot,
+           "coarse-inclusive no-avoid fixture did not occupy the draw");
+  Require (mac.GetOpnetSlotRange (localActiveNodes) == expectedRange,
+           "coarse-inclusive no-avoid fixture selected the wrong range");
+  Require (CsrMacSlotParitySmokeAccess::PickTxSlot (mac, 2) == expectedSlot,
+           "recovered coarse-inclusive draw or no-avoid behavior changed");
+
+  Simulator::Destroy ();
+}
+
+void
+CheckCoarseInclusiveNoAvoidVectors ()
+{
+  // Recovered get_slot@0x1e39f uses only local active_nodes, draws 0..R
+  // inclusive, and returns occupied slots without reservation avoidance.
+  // These ns-3 run numbers pin the selection branch and its endpoints; they
+  // do not claim that OPNET and ns-3 generate the same random sequence.
+  CheckCoarseInclusiveNoAvoidDraw (5, 4, 13, 0, 31, 0);
+  CheckCoarseInclusiveNoAvoidDraw (47, 4, 13, 31, 31, 31);
+  CheckCoarseInclusiveNoAvoidDraw (899, 13, 1, 255, 255, 255);
+
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (1);
+  RngSeedManager::ResetNextStreamIndex ();
 }
 
 void
@@ -177,6 +258,7 @@ main ()
 {
   Time::SetResolution (Time::NS);
 
+  CheckCoarseInclusiveNoAvoidVectors ();
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
   CheckSlotSelectionProfileRanges (device);
   device->GetMac ().SetActiveNodesForPostTx (1);
