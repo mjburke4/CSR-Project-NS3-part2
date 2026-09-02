@@ -18,6 +18,11 @@ Ptr<Packet> g_capturedFeedback;
 bool g_shouldDack = false;
 uint32_t g_shouldDackCalls = 0;
 uint32_t g_dataDeliveries = 0;
+Ptr<CsrNetDevice> g_relayDeliveryDevice;
+std::vector<uint32_t> g_ackQueueAtRelayDeliveries;
+Ptr<CsrNetDevice> g_localDeliveryDevice;
+uint32_t g_ackQueueAtLocalDelivery = 0;
+uint32_t g_localDackPolicyCalls = 0;
 
 Ptr<Packet>
 ProtectFeedback (CsrHeader header)
@@ -71,10 +76,12 @@ MakeAck (uint16_t baseSeq, uint64_t ackBitmap, uint64_t dackBitmap)
 }
 
 Ptr<Packet>
-MakeProtectedData (CsrHopSecurityState &sender, uint16_t sequence)
+MakeProtectedData (CsrHopSecurityState &sender,
+                   uint16_t sequence,
+                   CsrNodeId networkDestination = 3)
 {
   Ptr<Packet> payload = Create<Packet> (3);
-  CsrNetHeader networkHeader (2, 3, 5);
+  CsrNetHeader networkHeader (2, networkDestination, 5);
   payload->AddHeader (networkHeader);
 
   std::vector<uint8_t> plaintext (payload->GetSize ());
@@ -106,6 +113,15 @@ ShouldDack (CsrNodeId source, CsrNodeId destination)
 }
 
 bool
+ForceLocalDack (CsrNodeId source, CsrNodeId destination)
+{
+  Require (source == 2 && destination == 1,
+           "local DACK-policy probe inspected the wrong NWK flow");
+  g_localDackPolicyCalls++;
+  return true;
+}
+
+bool
 RelayRouteAvailable (CsrNodeId destination)
 {
   return destination == 3;
@@ -115,6 +131,25 @@ void
 NoteDataDelivery (Ptr<Packet>, CsrNodeId)
 {
   g_dataDeliveries++;
+  if (g_relayDeliveryDevice != nullptr)
+    {
+      g_ackQueueAtRelayDeliveries.push_back (
+        g_relayDeliveryDevice->GetMac ().GetAckQueuedFrameCount ());
+    }
+}
+
+void
+NoteLocalDataDelivery (Ptr<Packet> payload, CsrNodeId source)
+{
+  Require (g_localDeliveryDevice != nullptr,
+           "local delivery ordering test has no receiver device");
+  CsrNetHeader networkHeader;
+  Require (source == 2 && payload->PeekHeader (networkHeader) &&
+             networkHeader.GetDst () == 1,
+           "local delivery ordering callback received the wrong flow");
+  g_dataDeliveries++;
+  g_ackQueueAtLocalDelivery =
+    g_localDeliveryDevice->GetMac ().GetAckQueuedFrameCount ();
 }
 
 void
@@ -188,6 +223,8 @@ CheckReceiverWindowProduction (bool retryAfterDack)
   g_capturedFeedback = nullptr;
   g_shouldDackCalls = 0;
   g_dataDeliveries = 0;
+  g_relayDeliveryDevice = producer;
+  g_ackQueueAtRelayDeliveries.clear ();
   if (retryAfterDack)
     {
       hop->SetShouldDackCallback (MakeCallback (&ShouldDack));
@@ -207,8 +244,12 @@ CheckReceiverWindowProduction (bool retryAfterDack)
       hop->ReceiveFromMac (MakeProtectedData (dataSender, 76), 90.0, 10.0);
     }
 
+  Require (!g_ackQueueAtRelayDeliveries.empty () &&
+             g_ackQueueAtRelayDeliveries.front () == 0,
+           "relay NWK callback did not run before ACK/DACK MAC admission");
   Require (producer->GetMac ().GetAckQueuedFrameCount () == 1,
-           "cumulative feedback did not replace its queued predecessor");
+           "relay DATA did not leave one cumulative feedback entry queued");
+  g_relayDeliveryDevice = nullptr;
   Simulator::Stop (Seconds (4.0));
   Simulator::Run ();
 
@@ -227,6 +268,59 @@ CheckReceiverWindowProduction (bool retryAfterDack)
                  authenticated.GetDackBitmap () == 0,
                "out-of-order reception produced the wrong cumulative map");
     }
+
+  Simulator::Destroy ();
+}
+
+void
+CheckLocalDeliveryQueuesFeedbackFirst ()
+{
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrNetDevice> capture = CreateObject<CsrNetDevice> (2);
+  device->AddPeer (capture);
+
+  CsrPerModelFn noErrors = [] (int, double, uint32_t) { return 0.0; };
+  device->GetPhy ().SetPerModel (noErrors);
+  capture->GetPhy ().SetPerModel (noErrors);
+  device->GetPhy ().SetLinkDistanceMeters (1, 2, 1.0);
+  capture->GetPhy ().SetLinkDistanceMeters (1, 2, 1.0);
+  capture->GetMac ().SetRxCallback (MakeCallback (&CaptureFeedback));
+
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  hop->SetNodeId (1);
+  hop->SetMac (&device->GetMac ());
+  hop->SetRxFromHopCallback (MakeCallback (&NoteLocalDataDelivery));
+  hop->SetShouldDackCallback (MakeCallback (&ForceLocalDack));
+
+  CsrHopSecurityState sender;
+  sender.SetNodeId (2);
+  g_capturedFeedback = nullptr;
+  g_localDeliveryDevice = device;
+  g_dataDeliveries = 0;
+  g_ackQueueAtLocalDelivery = 0;
+  g_localDackPolicyCalls = 0;
+
+  hop->ReceiveFromMac (MakeProtectedData (sender, 91, 1), 90.0, 10.0);
+
+  Require (g_dataDeliveries == 1,
+           "locally addressed DATA was not delivered to NWK");
+  Require (g_localDackPolicyCalls == 0,
+           "local DATA incorrectly consulted the relay-only DACK policy");
+  Require (g_ackQueueAtLocalDelivery == 1,
+           "local NWK callback ran before its ACK reached the MAC queue");
+  Require (device->GetMac ().GetAckQueuedFrameCount () == 1,
+           "local DATA did not leave one cumulative ACK queued");
+
+  g_localDeliveryDevice = nullptr;
+  Simulator::Stop (Seconds (4.0));
+  Simulator::Run ();
+
+  CsrHeader authenticated = AuthenticateCapturedFeedback ();
+  Require (authenticated.GetType () == CSR_PKT_ACK &&
+             !authenticated.IsDack () &&
+             authenticated.GetAckBitmap () == 1 &&
+             authenticated.GetDackBitmap () == 0,
+           "local DATA did not transmit an ordinary cumulative ACK");
 
   Simulator::Destroy ();
 }
@@ -320,6 +414,7 @@ main ()
 
   CheckReceiverWindowProduction (false);
   CheckReceiverWindowProduction (true);
+  CheckLocalDeliveryQueuesFeedbackFirst ();
   CheckAckWinsOverlap ();
 
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);

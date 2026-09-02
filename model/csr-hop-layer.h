@@ -3225,13 +3225,20 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
         }
     }
 
-  // proc_mac_pk() looks up the NSDP entry before sending the packet to NWK.
+  CsrNetHeader networkHeader;
+  const bool localNetworkDelivery =
+    payload->PeekHeader (networkHeader) &&
+    networkHeader.GetDst () == m_nodeId;
+
+  // proc_mac_pk() looks up the NSDP entry before sending a relay packet to NWK.
   // The later NWK stream interrupt increments relay NSDP, so ACK/DACK uses
   // the pre-enqueue count.  ACK-marked duplicates skip this decision and get
   // a plain ACK; a DACK-marked retry remains a first reception for this pass
-  // and is re-enqueued/reassessed.
+  // and is re-enqueued/reassessed.  Locally delivered DATA bypasses this
+  // lookup and always receives an ordinary ACK in the recovered source.
   bool sendDack = false;
-  if (ackable && firstReception && !m_shouldDackCb.IsNull ())
+  if (ackable && firstReception && !localNetworkDelivery &&
+      !m_shouldDackCb.IsNull ())
   {
       // payload still has CsrNetHeader at this point
     Ptr<Packet> tmp = payload->Copy ();
@@ -3242,17 +3249,28 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     }
   }
 
-  // Deliver up on first reception after preserving the source decision order.
-  if (firstReception && !m_rxFromHopCb.IsNull ())
-  {
-     m_rxFromHopCb (payload, src);
-     if (feedbackNsdpStateValid)
-       {
-         feedbackNsdpAfter =
-           m_nsdpObservationCb (feedbackNetworkHeader.GetSrc (),
-                                feedbackNetworkHeader.GetDst ());
-       }
-  }
+  auto deliverToNwk = [&] () {
+    if (firstReception && !m_rxFromHopCb.IsNull ())
+      {
+        m_rxFromHopCb (payload, src);
+        if (feedbackNsdpStateValid)
+          {
+            feedbackNsdpAfter =
+              m_nsdpObservationCb (feedbackNetworkHeader.GetSrc (),
+                                   feedbackNetworkHeader.GetDst ());
+          }
+      }
+  };
+
+  // The operational br_hop local-delivery path calls send_ack() before its
+  // HOP_TO_NWK stream send.  Its relay path intentionally does the reverse:
+  // enqueue to NWK first, then choose ACK/DACK from the pre-enqueue NSDP
+  // snapshot.  Preserve both source orderings instead of applying one order
+  // to every locally addressed HOP frame.
+  if (!localNetworkDelivery)
+    {
+      deliverToNwk ();
+    }
 
   if (ackable)
   {
@@ -3279,6 +3297,15 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
 
     Ptr<Packet> ackPkt = ProtectAckFrame (ackHdr);
     m_mac->EnqueueTxFrame (ackPkt, src, /*dscp*/ 7, /*ackable*/ false);
+  }
+
+  if (localNetworkDelivery)
+    {
+      deliverToNwk ();
+    }
+
+  if (ackable)
+  {
     writeFeedback (sendDack ? "dack" : "ack", true);
   }
 }
