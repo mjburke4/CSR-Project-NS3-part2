@@ -1,6 +1,6 @@
 # OPNET aggregate comparison
 
-Updated: 2026-09-01
+Updated: 2026-09-02
 
 ## Purpose and evidence boundary
 
@@ -71,7 +71,12 @@ statistic link must end exactly at the decoded zero terminator.
 
 The file contains 18 canonical bucket aggregates with 100 12-second buckets
 and six per-node `All values` records. Only the aggregates are emitted to the
-canonical CSV. Each excluded record must independently have the exact
+canonical CSV. By default the richer JSON reports only validated metadata for
+the nonaggregate records. `--include-all-values` additionally retains their
+interior `{record_index, time_s, value}` pairs in JSON; it never adds them to
+the aggregate CSV. Equal timestamps and encoded order are preserved, while the
+structural first/last boundary entries are not reported as events. Each record
+must independently have the exact
 `All values` metadata, marker 0x81, encoding/cookie/reserved fields, two-array
 extent, boundary sentinels, and a finite nondecreasing time axis from 0 to
 1,200 seconds. The paired probe definition provides 18 exact aggregate
@@ -89,7 +94,16 @@ Every supported complete 0x82 record in the recovered corpus declares exactly
 100 buckets, encodes count 101, starts at time zero, and has a positive
 execution duration; those are enforced before allocating bucket state. The
 latency result's largest 0x81 record encodes 11,019 entries, which is also the
-strict upper bound for this bounded decoder.
+strict per-record upper bound for this bounded decoder. Opt-in retention is
+additionally bounded before allocation by the recovered six-record total of
+31,758 interior events.
+
+These pairs are per-statistic Modeler write records, not packet traces. They
+contain no packet or tree identifier. Duplicate timestamps are legitimate, and
+an index is meaningful only within one statistic's encoded record. A
+source-derived state transition may be bounded by one series' write time, but
+row-by-row correlation between MAC, HOP, and NWK series is unsafe without an
+independent identity or uniquely proven boundary.
 
 The paired-probe scan is likewise source-bounded before retaining labels:
 15,123 bytes, 27 declared probes, 489 printable tagged strings, and 32 bytes

@@ -171,12 +171,23 @@ def synthetic_nested_ov(
     global_filter: str = "none",
     nested_filter: str = "none",
     nested_event_count: int = 1,
+    nested_event_values: tuple[float, ...] | None = None,
+    nested_event_times: tuple[float, ...] | None = None,
     duplicate_nested_statistic: bool = False,
     declared_metadata_unit_count: int | None = None,
     nested_scope: str = "MAC",
     nested_statistic_name: str = "Tx Queuing Delay (sec)",
 ) -> bytes:
     """Build the minimal exact network -> node nested latency layout."""
+    if nested_event_values is None:
+        nested_event_values = (0.25,) * nested_event_count
+    if nested_event_times is None:
+        nested_event_times = (12.0,) * nested_event_count
+    if (
+        len(nested_event_values) != nested_event_count
+        or len(nested_event_times) != nested_event_count
+    ):
+        raise ValueError("synthetic nested event arrays must match event count")
     body = bytearray()
     body += u32(0) + string("Mar 18 2013") + string("08:40:20.000")
     scalars = [
@@ -262,10 +273,10 @@ def synthetic_nested_ov(
             + EXTRACTOR.RECOVERED_VECTOR_RESERVED
             + u32(encoded_count)
             + f64(EXTRACTOR.MISSING_SENTINEL)
-            + f64(0.25) * nested_event_count
+            + b"".join(f64(value) for value in nested_event_values)
             + f64(EXTRACTOR.ALL_VALUES_END_SENTINEL)
             + f64(0.0)
-            + f64(12.0) * nested_event_count
+            + b"".join(f64(time_s) for time_s in nested_event_times)
             + f64(1200.0)
         )
         if nested_marker != 0x81:
@@ -463,7 +474,25 @@ class OvExtractorTests(unittest.TestCase):
         self.assertEqual(excluded[0]["data_record"]["marker"], "0x81")
         self.assertEqual(excluded[0]["data_record"]["encoded_count"], 3)
         self.assertEqual(excluded[0]["data_record"]["event_value_count"], 1)
+        self.assertEqual(
+            excluded[0]["data_record"]["event_semantics"],
+            "per_statistic_write_record_not_packet_trace",
+        )
         self.assertFalse(excluded[0]["data_record"]["numeric_contents_emitted"])
+        self.assertEqual(excluded[0]["unit"], "s")
+        self.assertNotIn("events", excluded[0])
+        self.assertEqual(
+            manifest["vector_completeness"][
+                "validated_nonaggregate_event_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            manifest["vector_completeness"][
+                "emitted_nonaggregate_event_count"
+            ],
+            0,
+        )
         self.assertEqual(
             excluded[0]["probe_definition_match"]["status"], "exact"
         )
@@ -472,6 +501,169 @@ class OvExtractorTests(unittest.TestCase):
         self.assertTrue(
             all(row["statistic"] == "Sink.End-to-End Delay (seconds)" for row in rows)
         )
+
+    def test_nested_all_values_opt_in_emits_validated_pairs_in_order(
+        self,
+    ) -> None:
+        data = synthetic_nested_ov(
+            nested_event_count=3,
+            nested_event_values=(0.25, 0.5, 0.75),
+            nested_event_times=(12.0, 12.0, 13.0),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture-DES-1.ov"
+            path.write_bytes(data)
+            manifest = EXTRACTOR.extract_ov(
+                path,
+                include_all_values=True,
+            )
+
+        excluded = manifest["excluded_nonaggregate_vectors"][0]
+        self.assertTrue(excluded["data_record"]["numeric_contents_emitted"])
+        self.assertEqual(
+            excluded["data_record"]["event_semantics"],
+            "per_statistic_write_record_not_packet_trace",
+        )
+        self.assertEqual(
+            excluded["events"],
+            [
+                {"record_index": 0, "time_s": 12.0, "value": 0.25},
+                {"record_index": 1, "time_s": 12.0, "value": 0.5},
+                {"record_index": 2, "time_s": 13.0, "value": 0.75},
+            ],
+        )
+        self.assertEqual(
+            manifest["vector_completeness"][
+                "emitted_nonaggregate_event_count"
+            ],
+            3,
+        )
+        self.assertEqual(len(EXTRACTOR.aggregate_rows(manifest)), 100)
+
+    def test_nested_all_values_opt_in_preserves_empty_record(self) -> None:
+        data = synthetic_nested_ov(nested_event_count=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture-DES-1.ov"
+            path.write_bytes(data)
+            manifest = EXTRACTOR.extract_ov(
+                path,
+                include_all_values=True,
+            )
+
+        excluded = manifest["excluded_nonaggregate_vectors"][0]
+        self.assertTrue(excluded["data_record"]["numeric_contents_emitted"])
+        self.assertEqual(excluded["events"], [])
+        self.assertEqual(
+            manifest["vector_completeness"][
+                "emitted_nonaggregate_event_count"
+            ],
+            0,
+        )
+
+    def test_all_values_emission_total_is_bounded_before_allocation(
+        self,
+    ) -> None:
+        vectors = [
+            EXTRACTOR.ExcludedNonAggregateVector(
+                hierarchy=("Campus Network", f"node_{index}"),
+                scope="MAC",
+                name="Tx Queuing Delay (sec)",
+                description_id=14,
+                description="fixture",
+                data_offset=0,
+                metadata_details_flags=0x245,
+                data_record={
+                    "encoded_count": 11_019,
+                    "event_value_count": 11_017,
+                },
+            )
+            for index in range(3)
+        ]
+        tracemalloc.start()
+        try:
+            with self.assertRaisesRegex(
+                EXTRACTOR.OvFormatError,
+                "event count 33051 exceeds the source-observed total .*31758",
+            ):
+                EXTRACTOR._emit_excluded_nonaggregate_events(
+                    b"",
+                    Path("fixture.ov"),
+                    vectors,
+                )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1_000_000)
+        self.assertTrue(all(vector.events == [] for vector in vectors))
+
+    def test_cli_include_all_values_changes_json_only(self) -> None:
+        data = synthetic_nested_ov()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ov_path = root / "fixture-DES-1.ov"
+            json_path = root / "fixture.json"
+            csv_path = root / "fixture.csv"
+            default_csv_path = root / "fixture-default.csv"
+            ov_path.write_bytes(data)
+            default_return_code = EXTRACTOR.main(
+                [
+                    str(ov_path),
+                    "--csv",
+                    str(default_csv_path),
+                ]
+            )
+            return_code = EXTRACTOR.main(
+                [
+                    str(ov_path),
+                    "--include-all-values",
+                    "--json",
+                    str(json_path),
+                    "--csv",
+                    str(csv_path),
+                ]
+            )
+            manifest = json.loads(json_path.read_text(encoding="utf-8"))
+            rows = list(
+                csv.DictReader(
+                    io.StringIO(csv_path.read_text(encoding="utf-8"))
+                )
+            )
+            csv_unchanged = (
+                csv_path.read_bytes() == default_csv_path.read_bytes()
+            )
+
+        self.assertEqual(default_return_code, 0)
+        self.assertEqual(return_code, 0)
+        self.assertEqual(
+            manifest["excluded_nonaggregate_vectors"][0]["events"],
+            [{"record_index": 0, "time_s": 12.0, "value": 0.25}],
+        )
+        self.assertTrue(csv_unchanged)
+        self.assertEqual(len(rows), 100)
+        self.assertTrue(
+            all(row["statistic"] == "Sink.End-to-End Delay (seconds)" for row in rows)
+        )
+
+    def test_cli_include_all_values_rejects_csv_only_output(self) -> None:
+        data = synthetic_nested_ov()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ov_path = root / "fixture-DES-1.ov"
+            csv_path = root / "fixture.csv"
+            ov_path.write_bytes(data)
+            return_code, stderr = self.run_main(
+                [
+                    str(ov_path),
+                    "--include-all-values",
+                    "--csv",
+                    str(csv_path),
+                ]
+            )
+            csv_exists = csv_path.exists()
+
+        self.assertEqual(return_code, 2)
+        self.assertIn("requires --json", stderr)
+        self.assertFalse(csv_exists)
 
     def test_nested_latency_layout_rejects_unknown_statistic_flags(self) -> None:
         self.assert_ov_rejected(
