@@ -1,6 +1,6 @@
 # OPNET scenario importer and differential harness
 
-Updated: 2026-09-01
+Updated: 2026-09-02
 
 ## Purpose
 
@@ -62,19 +62,22 @@ does not promote it per node. The runner therefore applies that source-backed
 node-model default. TMM terrain runs are rejected explicitly rather than
 silently falling back to the non-terrain propagation model.
 
-The recovered historical results include 10 complete Modeler `*.ov` databases:
-109 vectors and 10,900 time buckets in total. The conservative extractor
-validates vector offsets and extents, cross-checks identities and aggregation
-types against the paired `*.pb.m` definitions, and preserves Modeler's
-`2e+100` no-sample sentinel as a missing value. Two additional partial
-fragments contain zero-length vector records and are correctly rejected by
-strict extraction instead of being padded or guessed.
+The recovered historical results include 11 complete Modeler `*.ov` databases:
+127 aggregate vectors and 12,700 time buckets in total. The conservative
+extractor validates vector offsets and extents, cross-checks identities and
+aggregation types against the paired `*.pb.m` definitions, and preserves
+Modeler's `2e+100` no-sample sentinel as a missing value. Two additional
+partial fragments contain zero-length vector records and are correctly
+rejected by strict extraction instead of being padded or guessed.
 
-An `*.ov` database contains bucketed aggregates, not a chronological protocol
-event stream. It can support historical traffic, delay, size, and drop
-comparisons, but it cannot expose packet-level MAC reservation ordering or
-same-time collision decisions. An instrumented OPNET event export in CSV form
-is still required for event-by-event certification.
+The nested latency database additionally contains six per-statistic
+`All values` records with 31,758 interior time/value writes. Opt-in JSON can
+retain those writes, but they contain no packet or tree identifier. Bucketed
+aggregates and `All values` statistic writes can support historical traffic,
+delay, size, and drop comparisons; neither is a chronological packet-event
+stream that can expose packet-level MAC reservation ordering or same-time
+collision decisions. An instrumented OPNET event export in CSV form is still
+required for event-by-event certification.
 
 ## Canonical scenario schema
 
