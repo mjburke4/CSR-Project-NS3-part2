@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-09-01
+Updated: 2026-09-02
 
 ## Scope and confidence limits
 
@@ -96,7 +96,12 @@ completion.
   record; AES-CTR uses the legacy source/destination/count/key/sequence IV.
 - Source-exact Pairwise16 policy for the common ACK/DACK packet type 0. The
   ns-3 logical ACK body authenticates before cancellation, custody mutation,
-  or the delayed NWK wake. Pairwise16 exact control ACKs model 30 bytes;
+  or the delayed NWK wake. For an ordinary DATA positive ACK, exact and
+  cumulative feedback release HOP pending/per-neighbor capacity, decrement
+  NWK NSDP, remove resend custody, and only then cancel the queued MAC copy
+  after HOP yields; the generic NWK wake remains one `TIC` later. This ordering
+  is deliberately not generalized to reliable-control completion. Pairwise16
+  exact control ACKs model 30 bytes;
   cumulative DATA ACK/DACK feedback models 46 bytes because both
   source-defined 64-bit receive registers are present. Exact production
   protected-body byte mapping remains unverified without a legacy golden
@@ -308,6 +313,13 @@ delivery events.
 | Long preamble supports duty-cycled discovery; short preamble must arrive during an awake window | Periodic wake phase, Idle/Search transitions, and preamble-survival check | Long preamble bridges a 500-ms sleep interval; short preamble records one miss. |
 | Preamble/header fields transmit at S0 and payload/FCS at the selected rate | Source-derived OTA duration using exact OPNET envelope bytes | Existing sent-time, queue, integration, and slot tests use the new airtime checkpoints. |
 
+One pre-existing receive-duty approximation remains outside the source-exact
+boundary. `CsrNetDevice::DeliverTrackedSignal()` calls
+`ForceAwakeFor(0.35)` whenever a decoded aggregate contains an ACKable segment
+addressed to the local node, before HOP authentication runs. No matching fixed
+350-ms receive hold has been recovered from the OPNET source, so a malformed
+or authentication-rejected addressed DATA frame can extend ns-3's awake state.
+
 The recovered discovery schedule is independent of radio completion.
 `routesDiscoveryInitLocal()` uses a 5,000-ms interval with repeat count three:
 the node broadcasts at relative `+0`, `+5`, and `+10` seconds, then the fourth
@@ -451,12 +463,17 @@ every source-ordered attempt and its live application/NWK/HOP state; ordinary
 aggregate runs retain the compact surface.
 
 Historical result databases are now available and executable evidence. The
-read-only extractor decoded 10 complete Modeler `*.ov` files containing 109
-vectors and 10,900 buckets, with exact paired-`*.pb.m` identity checks. Two
+read-only extractor decoded 11 complete Modeler `*.ov` files containing 127
+vectors and 12,700 buckets, with exact paired-`*.pb.m` identity checks. Two
 partial fragments with zero-length vectors are rejected in strict mode rather
 than treated as results. The aggregate workflow runs an imported scenario,
 derives source-equivalent ns-3 buckets, compares exact statistic/unit/
 aggregation identities, and records all commands, hashes, and statuses.
+The nested latency result also contains six per-statistic `All values` records
+with 31,758 interior time/value writes. Opt-in JSON retains those pairs without
+adding them to aggregate CSV. They have no packet or tree identifier and are
+therefore statistic writes, not packet events or a safe basis for row-by-row
+MAC/HOP/NWK correlation.
 
 Full core-statistic two-node, symmetrical hidden-node, and multihop
 comparisons align all 800 selected points in each case without missing or
@@ -649,13 +666,13 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 All 38 CSR executable targets build on this audit revision. The 36 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (38/38). All 143 focused Python tests pass; the suite additionally
+workflow pass (38/38). All 190 focused Python tests pass; the suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
 aggregate workflow. The importer decodes all 12 recovered campus network
 models and paired DES environments, while strict vector extraction accepts all
-10 complete historical results and rejects both partial fragments. The event
+11 complete historical results and rejects both partial fragments. The event
 end-to-end fixture produces six ordered events on each side with zero missing,
 extra, replaced, field-mismatch, or coverage-gap results. The packet-envelope
 test covers all eleven fixed formats, golden bytes, inherited payload order,
@@ -691,10 +708,12 @@ Track at `301.827634`, and HOP/NSDP release at `301.843384`.  A second packet
 held behind the initial one-packet HOP window proves that the HOP-owned remote
 NWK wake runs exactly one `TIC` later.  The transmitted cumulative ACK must
 retain the production 46-byte Pairwise16 envelope; the archived executable's
-bare 41-byte ACK instead completes at `301.843084`.  The controlled test is
-ns-3 timing evidence; the archived run's effective slot 13 is established
-separately by its hash-bound MAC-Tx and HOP-resend All-values write records,
-not inferred from this regression.
+bare 41-byte ACK instead completes 300 microseconds earlier at `301.843084`.
+The controlled chain is ns-3 timing evidence. The archived run's effective
+slot 13 is established separately by hash-bound, per-statistic MAC-Tx and
+HOP-resend `All values` write timestamps; because those records carry no
+packet identity, they do not turn this regression into an OPNET packet-event
+trace.
 The MAC-sent-time test now pins retry and final-expiry scans one `TIC` beyond
 their nominal actual-send boundaries, verifies the final queue wake one
 additional `TIC` later, and covers the missing-entry fallback plus
@@ -707,17 +726,25 @@ cumulative-update suppression, unchanged full-queue rejection, and
 one-plus-four resend-limit removal. It now also exercises the real compact
 aggregate writer, direct DATA held until route availability, a forced two-hop
 path, and exact NWK queue-size and residence-delay samples at each forwarding
-node. It also proves the relay feedback boundary: pre-15/post-16 selects ACK,
+node. It also proves the receiver feedback fork: final/local DATA admits an
+ordinary ACK to MAC before NWK delivery and does not consult the relay DACK
+policy, while relay DATA enqueues into NWK before ACK/DACK feedback and retains
+the pre-enqueue NSDP snapshot for that choice. On the relay path,
+pre-15/post-16 selects ACK,
 pre-16/post-17 selects DACK, an ACK-marked duplicate ACKs without another
 enqueue, a DACK-marked retry is re-enqueued and reassessed, and a first
 no-route reception remains ACK-suppressed. Legacy NWK performs no duplicate
 suppression after that retry and can deliver both relay copies under fresh
 onward HOP sequences. The strict packet-path analyzer currently treats that
-source-exact lost-DACK quirk as a duplicate-delivery failure; a three-hop
-lineage fixture and narrowly scoped analyzer classification remain open. For
-all other paths, the analyzer validates delivered and in-flight event
-grammars, route context, next-hop continuity, loops, and the end-to-end
-residence/transit decomposition.
+source-exact lost-DACK quirk as a duplicate-delivery failure. A three-hop
+lineage fixture now proves two byte-identical ingress receptions, two DACKs,
+two relay custody entries, distinct onward HOP sequences, and two destination
+deliveries; the aggregate analyzer accepts the extra delivery only with its
+complete enqueue/feedback proof. Binding each extra copy to a complete
+downstream suffix and distinct overlapping HOP leg in the strict packet-path
+analyzer remains open. For all other paths, that analyzer validates delivered
+and in-flight event grammars, route context, next-hop continuity, loops, and
+the end-to-end residence/transit decomposition.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and
 same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table
