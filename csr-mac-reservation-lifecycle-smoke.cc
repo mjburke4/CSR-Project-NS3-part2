@@ -2,6 +2,7 @@
 #include "ns3/csr-common.h"
 #include "ns3/csr-hop-layer.h"
 #include "ns3/csr-net-device.h"
+#include "ns3/csr-nwk-layer.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -9,6 +10,24 @@
 #include <vector>
 
 using namespace ns3;
+
+struct CsrMacSlotParitySmokeAccess
+{
+  static void
+  LoadLiveReservation (CsrMacCore &mac, int32_t slot)
+  {
+    mac.m_scheduledTxSlot = slot;
+    mac.m_txCountdownCounter = slot;
+  }
+
+  static uint32_t
+  GetFirstDataWireBytes (const CsrMacCore &mac)
+  {
+    return mac.m_queue.empty ()
+             ? 0
+             : CsrGetOpnetWireSize (mac.m_queue.front ().frame);
+  }
+};
 
 namespace
 {
@@ -37,8 +56,25 @@ Ptr<CsrNetDevice> g_zeroDevice;
 Ptr<CsrNetDevice> g_trackDevice;
 Ptr<CsrNetDevice> g_idleZeroDevice;
 Ptr<CsrNetDevice> g_packingRetryDevice;
+Ptr<CsrNetDevice> g_noSignalDevice;
 int32_t g_trackAdvertisedSlot = -1;
 int64_t g_trackExpectedTxNs = -1;
+Time g_noSignalTxTime = Time::Min ();
+
+Ptr<CsrNetDevice> g_chainSourceDevice;
+Ptr<CsrNetDevice> g_chainReceiverDevice;
+Ptr<CsrHopLayer> g_chainSourceHop;
+Ptr<CsrHopLayer> g_chainReceiverHop;
+Ptr<CsrNetLayer> g_chainSourceNwk;
+Ptr<CsrNetLayer> g_chainReceiverNwk;
+Time g_chainDataTxTime = Time::Min ();
+Time g_chainDataDeliveryTime = Time::Min ();
+Time g_chainAckTxTime = Time::Min ();
+Time g_chainAckCompletionTime = Time::Min ();
+uint32_t g_chainAckWireBytes = 0;
+uint32_t g_chainDeliveries = 0;
+bool g_chainAckHasPairwiseTransport = false;
+bool g_chainAckHasWindow = false;
 
 void
 Require (bool condition, const char* message)
@@ -46,6 +82,19 @@ Require (bool condition, const char* message)
   if (!condition)
     {
       std::cerr << "FAIL: " << message << std::endl;
+      std::exit (1);
+    }
+}
+
+void
+RequireTime (Time actual, Time expected, const char* message)
+{
+  if (actual != expected)
+    {
+      std::cerr << "FAIL: " << message
+                << " actual_ns=" << actual.GetNanoSeconds ()
+                << " expected_ns=" << expected.GetNanoSeconds ()
+                << std::endl;
       std::exit (1);
     }
 }
@@ -752,6 +801,531 @@ TestPackingRetryRespectsMacState ()
   g_packingRetryDevice = nullptr;
 }
 
+void
+CheckOpnetWakeEnteredSearch ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::SEARCH,
+           "OPNET periodic WAKE did not enter Search");
+}
+
+void
+CheckNoSignalSearchReturnedIdle ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "no-signal Search did not return to Idle after 8.9 ms");
+}
+
+void ControlLongQuietReservationSlot ();
+
+void
+EnqueueAfterLongQuiet ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "receiver was not Idle after the long no-signal interval");
+  g_noSignalDevice->GetMac ().SetReservationSlotOverrideForDifferentialRun (
+    13);
+  g_noSignalDevice->GetMac ().EnqueueTxFrame (
+    BuildDataFrame (1), 2, 5, true);
+  // Schedule after EnqueueTxFrame() creates Idle's 300.001-s RTS event. Equal-
+  // time event ordering therefore runs prep_tx first, then this test callback.
+  Simulator::Schedule (MilliSeconds (1),
+                       &ControlLongQuietReservationSlot);
+}
+
+void
+CheckLongQuietQueueWaitsForRts ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "long-quiet enqueue bypassed the Idle RTS gate");
+  Require (g_noSignalDevice->GetMac ().GetQueuedFrameCount () == 1,
+           "long-quiet frame was not retained while Idle");
+  Require (g_noSignalDevice->GetMac ().GetTransmittedFrameCount () == 0,
+           "long-quiet frame transmitted before prep_tx");
+}
+
+void
+ControlLongQuietReservationSlot ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::SEARCH,
+           "Idle RTS did not return the long-quiet receiver to Search");
+  Require (g_noSignalDevice->GetMac ().IsTxPreparationActive (),
+           "Idle RTS did not activate prep_tx for the long-quiet frame");
+  Require (g_noSignalDevice->GetMac ().GetLocalReservationCounter () == 13,
+           "controlled long-quiet prep_tx did not select slot 13");
+
+  // The public differential override controls the RNG result but deliberately
+  // aligns multi-sender fixtures to a common epoch. Restore the production
+  // single-node relative clock at the same prep_tx instant, retaining slot 13
+  // and the independently scheduled 300-ms holdoff.
+  g_noSignalDevice->GetMac ().SetReservationSlotOverrideForDifferentialRun (
+    -1);
+  g_noSignalDevice->GetMac ().StopSlotTick ();
+  g_noSignalDevice->GetMac ().StartSlotTick (MilliSeconds (13));
+}
+
+void
+CheckLongQuietHoldoff ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::SEARCH,
+           "long-quiet prep_tx left Search before transmission");
+  Require (g_noSignalDevice->GetMac ().IsTxPreparationActive (),
+           "long-quiet prep_tx was cleared during holdoff");
+  Require (g_noSignalDevice->GetMac ().GetLocalReservationCounter () == 13,
+           "slot counter advanced before the restarted holdoff expired");
+  Require (g_noSignalDevice->GetMac ().GetTransmittedFrameCount () == 0,
+           "long-quiet frame bypassed the restarted 300-ms holdoff");
+}
+
+void
+RecordNoSignalTransitionTransmission (CsrNodeId destination,
+                                      uint16_t sequence,
+                                      Time sentTime)
+{
+  Require (destination == 2 && sequence == 1,
+           "long-quiet controlled-slot transmission changed identity");
+  Require (sentTime == Seconds (300.482),
+           "slot 13 did not transmit at the source-exact 300.482-s time");
+  Require (g_noSignalDevice->GetMac ().GetLastTxOpportunitySlot () == 13,
+           "long-quiet transmission did not consume controlled slot 13");
+  g_noSignalTxTime = sentTime;
+  Simulator::Stop (NanoSeconds (1));
+}
+
+void
+TestNoSignalSearchReturnsIdleAndRestartsHoldoff ()
+{
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (9);
+  g_noSignalTxTime = Time::Min ();
+
+  g_noSignalDevice = CreateObject<CsrNetDevice> (1);
+  g_noSignalDevice->GetMac ().SetTxSentCallback (
+    MakeCallback (&RecordNoSignalTransitionTransmission));
+  g_noSignalDevice->EnableOpnetAlignedDutyCycling (true);
+
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "OPNET-aligned no-signal test did not begin in Idle");
+
+  // br_mac's first unconditional WAKE is at 0.988 s. Search with no signal
+  // lasts DSP_RX_BOOTTIME + NO_SIG_SRH_TIME = 8.9 ms, then dsp_off() returns
+  // to Idle. One nanosecond separates boundary checks from event-ID ordering.
+  Simulator::Schedule (Seconds (0.988),
+                       &CheckOpnetWakeEnteredSearch);
+  Simulator::Schedule (Seconds (0.9969) + NanoSeconds (1),
+                       &CheckNoSignalSearchReturnedIdle);
+
+  // The old fmod-based boundary check first demonstrably loses its one-shot
+  // SLEEP on the recovered cycle-six boundary at 5.9369 s.
+  Simulator::Schedule (Seconds (5.928) + NanoSeconds (1),
+                       &CheckOpnetWakeEnteredSearch);
+  Simulator::Schedule (Seconds (5.9369) + NanoSeconds (1),
+                       &CheckNoSignalSearchReturnedIdle);
+
+  // The recovered latency run admits its first DATA at 300 s.  Once the
+  // no-signal transition is preserved, that arrival finds Idle. The global
+  // Idle RTS is at 300.001 s; prep_tx restarts the holdoff to 300.301 s. With
+  // controlled slot 13, the first post-holdoff countdown reaches -1 at the
+  // source-observed 300.482-s transmission instant.
+  Simulator::Schedule (Seconds (300.0), &EnqueueAfterLongQuiet);
+  Simulator::Schedule (Seconds (300.0005),
+                       &CheckLongQuietQueueWaitsForRts);
+  Simulator::Schedule (Seconds (300.301) - NanoSeconds (1),
+                       &CheckLongQuietHoldoff);
+  Simulator::Stop (Seconds (300.6));
+  Simulator::Run ();
+
+  Require (g_noSignalTxTime == Seconds (300.482),
+           "long-quiet controlled-slot transmission was not observed");
+
+  Simulator::Destroy ();
+  g_noSignalDevice = nullptr;
+}
+
+void
+ConnectControlledChainStack (Ptr<CsrNetDevice> device,
+                             Ptr<CsrHopLayer> hop,
+                             Ptr<CsrNetLayer> nwk,
+                             CsrNodeId nodeId)
+{
+  hop->SetNodeId (nodeId);
+  hop->SetMac (&device->GetMac ());
+  nwk->SetNodeId (nodeId);
+  nwk->SetArlNeighborAdmissionEnabled (false);
+  nwk->SetHop (hop);
+  nwk->ConfigureLinkControl (8, 128, -36.0, 33.0, 6.0);
+  device->GetMac ().SetRxCallback (
+    MakeCallback (&CsrHopLayer::ReceiveFromMac, hop));
+}
+
+void
+RecordControlledDataTransmission (CsrNodeId destination,
+                                  uint16_t sequence,
+                                  Time sentTime)
+{
+  Require (destination == 1 && sequence == 1,
+           "controlled chain changed the first DATA identity");
+  Require (g_chainDataTxTime == Time::Min (),
+           "controlled chain transmitted another DATA before ACK release");
+  g_chainDataTxTime = sentTime;
+  g_chainSourceHop->NotifyMacFrameSent (destination, sequence, sentTime);
+}
+
+void
+ReceiveControlledAck (Ptr<Packet> frame,
+                      double pathlossDb,
+                      double snrDb)
+{
+  CsrHeader header;
+  Require (frame->PeekHeader (header) && header.IsAck (),
+           "controlled source received a non-ACK frame");
+  Require (g_chainAckCompletionTime == Time::Min (),
+           "controlled source received a second ACK before the test stopped");
+
+  g_chainAckCompletionTime = Simulator::Now ();
+  g_chainAckWireBytes = CsrGetOpnetWireSize (frame);
+  g_chainAckHasPairwiseTransport =
+    header.HasSecurityCount () && !header.HasGroupSecurity ();
+  g_chainAckHasWindow = header.HasAckWindow ();
+  g_chainSourceHop->ReceiveFromMac (frame, pathlossDb, snrDb);
+}
+
+void
+ControlReceiverAckReservation ()
+{
+  Require (g_chainReceiverDevice->GetMacState () ==
+             CsrMacCore::State::SEARCH,
+           "DATA completion did not return the receiver to Search");
+  Require (g_chainReceiverDevice->GetMac ().GetAckQueuedFrameCount () == 1,
+           "DATA delivery did not enqueue one cumulative ACK");
+  Require (g_chainReceiverDevice->GetMac ().IsTxPreparationActive (),
+           "Track-to-Search did not activate ACK preparation");
+
+  // Test-only control of the selected reservation leaves the receiver's
+  // live 13-ms clock untouched.  The public differential override cannot be
+  // used here because it intentionally realigns controlled senders to a
+  // 100-ms epoch, which would erase the Search/Track-frozen source phase.
+  CsrMacSlotParitySmokeAccess::LoadLiveReservation (
+    g_chainReceiverDevice->GetMac (), 13);
+}
+
+void
+RecordControlledDataDelivery (Ptr<Packet>, CsrNodeId source)
+{
+  Require (source == 2,
+           "controlled receiver delivered DATA from the wrong NWK source");
+  Require (g_chainDeliveries == 0,
+           "controlled receiver delivered the first DATA more than once");
+  g_chainDeliveries++;
+  g_chainDataDeliveryTime = Simulator::Now ();
+
+  // Run after the receive event unwinds so both ACK enqueue and the device's
+  // Track-to-Search transition are complete.  The test intentionally does
+  // not depend on whether HOP's local ACK construction precedes or follows
+  // its NWK delivery callback.
+  Simulator::ScheduleNow (&ControlReceiverAckReservation);
+}
+
+void
+PollControlledAckTransmission ()
+{
+  if (g_chainReceiverDevice->GetMac ().GetTransmittedFrameCount () == 0)
+    {
+      Simulator::Schedule (NanoSeconds (1),
+                           &PollControlledAckTransmission);
+      return;
+    }
+
+  Require (g_chainAckTxTime == Time::Min (),
+           "controlled chain observed the ACK transmission twice");
+  g_chainAckTxTime = Simulator::Now ();
+}
+
+void
+SeedControlledSourceNeighbor ()
+{
+  // The operational latency scenario has completed discovery before its
+  // 300-s application start.  Seed only that already-established HOP link
+  // observation; use a frame addressed elsewhere so this creates no control,
+  // reliability, NWK, or MAC traffic in the regression.
+  CsrHeader observation (1, 3, 0, 0, false, false);
+  observation.SetType (CSR_PKT_DATA);
+  observation.SetDestType (CSR_DEST_UNICAST);
+  observation.SetLinkControl (128, 33.0, -109.0);
+  Ptr<Packet> frame = Create<Packet> ();
+  frame->AddHeader (observation);
+  g_chainSourceHop->ReceiveFromMac (frame, 120.0, 30.0);
+}
+
+void
+TestControlledFirstDataAckReleaseChain ()
+{
+  constexpr CsrNodeId sourceNode = 2;
+  constexpr CsrNodeId receiverNode = 1;
+  constexpr uint32_t configuredPacketBytes = 600;
+  const Time dataTxAt = Seconds (300.482);
+  const Time receiverWakeAt = Seconds (301.340);
+  const Time receiverTrackAt = Seconds (301.346630);
+  const Time dataDeliveryAt = Seconds (301.531404);
+  const Time ackTxAt = Seconds (301.821);
+  const Time sourceTrackAt = Seconds (301.827634);
+  const Time ackCompletionAt = Seconds (301.843384);
+  const Time nwkWakeAt = ackCompletionAt + CsrOpnetTic ();
+
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (10);
+  RngSeedManager::ResetNextStreamIndex ();
+
+  g_chainDataTxTime = Time::Min ();
+  g_chainDataDeliveryTime = Time::Min ();
+  g_chainAckTxTime = Time::Min ();
+  g_chainAckCompletionTime = Time::Min ();
+  g_chainAckWireBytes = 0;
+  g_chainDeliveries = 0;
+  g_chainAckHasPairwiseTransport = false;
+  g_chainAckHasWindow = false;
+
+  g_chainSourceDevice = CreateObject<CsrNetDevice> (sourceNode);
+  g_chainReceiverDevice = CreateObject<CsrNetDevice> (receiverNode);
+  g_chainSourceDevice->AddPeer (g_chainReceiverDevice);
+  g_chainReceiverDevice->AddPeer (g_chainSourceDevice);
+
+  CsrPhyProfile profile;
+  profile.txPowerDbm = 33.0;
+  profile.txBaseFrequencyHz = 400.0e6;
+  profile.rxBaseFrequencyHz = 400.0e6;
+  profile.txBwHz = 1.0e6;
+  profile.rxBwHz = 1.0e6;
+  profile.txHeightMeters = 1.05;
+  profile.rxHeightMeters = 1.05;
+  profile.eccThreshold = 0.1;
+  profile.propagationModel = CsrPropagationModel::OPNET_THREE_PATH;
+  g_chainSourceDevice->GetPhy ().SetProfile (profile);
+  g_chainReceiverDevice->GetPhy ().SetProfile (profile);
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  g_chainSourceDevice->GetPhy ().SetPerModel (noErrors);
+  g_chainReceiverDevice->GetPhy ().SetPerModel (noErrors);
+  g_chainSourceDevice->GetPhy ().SetLinkDistanceMeters (
+    sourceNode, receiverNode, 1200.0);
+  g_chainReceiverDevice->GetPhy ().SetLinkDistanceMeters (
+    sourceNode, receiverNode, 1200.0);
+
+  g_chainSourceHop = CreateObject<CsrHopLayer> ();
+  g_chainReceiverHop = CreateObject<CsrHopLayer> ();
+  g_chainSourceNwk = CreateObject<CsrNetLayer> ();
+  g_chainReceiverNwk = CreateObject<CsrNetLayer> ();
+  ConnectControlledChainStack (g_chainSourceDevice,
+                               g_chainSourceHop,
+                               g_chainSourceNwk,
+                               sourceNode);
+  ConnectControlledChainStack (g_chainReceiverDevice,
+                               g_chainReceiverHop,
+                               g_chainReceiverNwk,
+                               receiverNode);
+  g_chainSourceNwk->SetNodeType (CsrNodeType::Routable);
+  g_chainReceiverNwk->SetNodeType (CsrNodeType::Gateway);
+  g_chainSourceNwk->AddStaticRouteWithPathloss (
+    receiverNode,
+    receiverNode,
+    120.0,
+    true,
+    static_cast<uint8_t> (CsrNodeType::Gateway));
+  g_chainReceiverNwk->SetRxFromNetCallback (
+    MakeCallback (&RecordControlledDataDelivery));
+
+  SeedControlledSourceNeighbor ();
+
+  // Preserve the production HOP sent indication while recording exact MAC
+  // transmission times.  Overwriting this callback without forwarding would
+  // silently disable resend-expiration ownership in the path under test.
+  g_chainSourceDevice->GetMac ().SetTxSentCallback (
+    MakeCallback (&RecordControlledDataTransmission));
+  g_chainSourceDevice->GetMac ().SetRxCallback (
+    MakeCallback (&ReceiveControlledAck));
+
+  g_chainSourceDevice->EnableOpnetAlignedDutyCycling (true);
+  g_chainReceiverDevice->EnableOpnetAlignedDutyCycling (true);
+
+  // Source slot 13 is retained across the no-signal Idle cycles.  Idle RTS at
+  // 300.001 s restarts the holdoff and relative clock; the first eligible
+  // countdown therefore transmits at 300.482 s without epoch realignment.
+  CsrMacSlotParitySmokeAccess::LoadLiveReservation (
+    g_chainSourceDevice->GetMac (), 13);
+
+  Simulator::Schedule (Seconds (300.0), [] () {
+    const uint32_t networkBytes = configuredPacketBytes - 8;
+    const uint32_t networkHeaderBytes =
+      CsrNetHeader ().GetSerializedSize ();
+    Require (networkBytes > networkHeaderBytes,
+             "controlled packet is too small for its NWK header");
+    const uint32_t payloadBytes = networkBytes - networkHeaderBytes;
+
+    // The second packet is an observation load only: the source-exact initial
+    // HOP window holds it in NWK until the first ACK releases capacity.  It
+    // makes the remote NWK wake at completion + TIC directly observable.
+    g_chainSourceNwk->Send (receiverNode,
+                            0,
+                            Create<Packet> (payloadBytes),
+                            true);
+    g_chainSourceNwk->Send (receiverNode,
+                            0,
+                            Create<Packet> (payloadBytes),
+                            true);
+  });
+
+  Simulator::Schedule (dataTxAt - NanoSeconds (1), [] () {
+    Require (g_chainSourceDevice->GetMac ().GetTransmittedFrameCount () == 0,
+             "controlled DATA transmitted before slot 13");
+    Require (CsrMacSlotParitySmokeAccess::GetFirstDataWireBytes (
+               g_chainSourceDevice->GetMac ()) == 622,
+             "controlled DATA did not retain its 622-byte Pairwise16 wire size");
+  });
+  Simulator::Schedule (dataTxAt + NanoSeconds (1), [] () {
+    Require (g_chainSourceDevice->GetMac ().GetTransmittedFrameCount () == 1 &&
+               g_chainSourceDevice->GetMac ().GetLastTxOpportunitySlot () == 13,
+             "controlled DATA did not consume slot 13");
+  });
+  Simulator::Schedule (receiverWakeAt - NanoSeconds (1), [] () {
+    Require (g_chainReceiverDevice->GetMacState () == CsrMacCore::State::IDLE,
+             "receiver left Idle before its OPNET periodic wake");
+  });
+  Simulator::Schedule (receiverWakeAt + NanoSeconds (1), [] () {
+    Require (g_chainReceiverDevice->GetMacState () == CsrMacCore::State::SEARCH,
+             "receiver did not enter Search at its OPNET periodic wake");
+  });
+  Simulator::Schedule (receiverTrackAt - NanoSeconds (1), [] () {
+    Require (g_chainReceiverDevice->GetMacState () == CsrMacCore::State::SEARCH,
+             "receiver entered Track before SYNC2TRACK_MIN");
+  });
+  Simulator::Schedule (receiverTrackAt + NanoSeconds (1), [] () {
+    Require (g_chainReceiverDevice->GetMacState () == CsrMacCore::State::TRACK,
+             "receiver did not enter Track after 6.63 ms");
+  });
+  Simulator::Schedule (ackTxAt - NanoSeconds (1), [] () {
+    Require (g_chainReceiverDevice->GetMac ().GetTransmittedFrameCount () == 0,
+             "controlled ACK transmitted before slot 13");
+  });
+  Simulator::Schedule (ackTxAt - NanoSeconds (1),
+                       &PollControlledAckTransmission);
+  Simulator::Schedule (ackTxAt + NanoSeconds (1), [] () {
+    Require (g_chainReceiverDevice->GetMac ().GetTransmittedFrameCount () == 1 &&
+               g_chainReceiverDevice->GetMac ().GetLastTxOpportunitySlot () == 13,
+             "controlled ACK did not consume receiver slot 13");
+  });
+  Simulator::Schedule (sourceTrackAt - NanoSeconds (1), [] () {
+    Require (g_chainSourceDevice->GetMacState () == CsrMacCore::State::SEARCH,
+             "source entered ACK Track before short-preamble acquisition");
+  });
+  Simulator::Schedule (sourceTrackAt + NanoSeconds (1), [] () {
+    Require (g_chainSourceDevice->GetMacState () == CsrMacCore::State::TRACK,
+             "source did not acquire the short-preamble ACK");
+  });
+  Simulator::Schedule (ackCompletionAt - NanoSeconds (1), [] () {
+    Require (g_chainSourceNwk->GetNsdpCount (sourceNode, receiverNode) == 2 &&
+               g_chainSourceHop->GetPendingDataCount () == 1 &&
+               g_chainSourceHop->GetOutstandingDataCount (receiverNode) == 1,
+             "HOP/NWK capacity released before ACK completion");
+  });
+  Simulator::Schedule (ackCompletionAt + NanoSeconds (1), [] () {
+    Require (g_chainSourceNwk->GetNsdpCount (sourceNode, receiverNode) == 1,
+             "ACK did not release exactly one NWK NSDP entry");
+    Require (g_chainSourceNwk->GetNwkQueueSize () == 1,
+             "NWK queue ran synchronously with ACK capacity release");
+    Require (g_chainSourceHop->GetPendingDataCount () == 0 &&
+               g_chainSourceHop->GetOutstandingDataCount (receiverNode) == 0 &&
+               g_chainSourceHop->GetResendQueueSize () == 0,
+             "ACK did not release HOP custody and capacity together");
+  });
+  Simulator::Schedule (nwkWakeAt - NanoSeconds (1), [] () {
+    Require (g_chainSourceNwk->GetNwkQueueSize () == 1 &&
+               g_chainSourceHop->GetPendingDataCount () == 0,
+             "held DATA advanced before the HOP-owned NWK wake");
+  });
+  Simulator::Schedule (nwkWakeAt + NanoSeconds (1), [] () {
+    Require (g_chainSourceNwk->GetNwkQueueSize () == 0,
+             "HOP-owned NWK wake did not run one TIC after ACK release");
+    Require (g_chainSourceHop->GetPendingDataCount () == 1 &&
+               g_chainSourceHop->GetOutstandingDataCount (receiverNode) == 1,
+             "NWK wake did not admit the held second DATA into HOP");
+  });
+
+  Simulator::Stop (nwkWakeAt + NanoSeconds (2));
+  Simulator::Run ();
+
+  RequireTime (g_chainDataTxTime,
+               dataTxAt,
+               "controlled DATA TX timestamp changed from 300.482 s");
+  Require (g_chainDeliveries == 1,
+           "controlled Pairwise16 DATA was not delivered exactly once");
+  RequireTime (g_chainDataDeliveryTime,
+               dataDeliveryAt,
+               "controlled Pairwise16 DATA delivery timestamp changed");
+  RequireTime (g_chainAckTxTime,
+               ackTxAt,
+               "controlled slot-13 ACK TX timestamp changed");
+  RequireTime (g_chainAckCompletionTime,
+               ackCompletionAt,
+               "Pairwise16 ACK completion timestamp changed");
+  Require (g_chainAckWireBytes == 46 &&
+             g_chainAckHasPairwiseTransport &&
+             g_chainAckHasWindow,
+           "ACK did not retain its 46-byte Pairwise16 cumulative wrapper");
+
+  Simulator::Destroy ();
+  g_chainSourceDevice = nullptr;
+  g_chainReceiverDevice = nullptr;
+  g_chainSourceHop = nullptr;
+  g_chainReceiverHop = nullptr;
+  g_chainSourceNwk = nullptr;
+  g_chainReceiverNwk = nullptr;
+}
+
+void
+TestNoSignalSleepCancelsStaleAcquisition ()
+{
+  Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (2);
+  sender->AddPeer (receiver);
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  sender->GetPhy ().SetPerModel (noErrors);
+  receiver->GetPhy ().SetPerModel (noErrors);
+  receiver->EnableOpnetAlignedDutyCycling (true);
+
+  // Start a long preamble six milliseconds into the first Search window. Its
+  // 6.63-ms RX_SIG_FOUND acquisition is due at 1.00063 s, after the already-
+  // scheduled no-signal SLEEP at 0.9969 s. Source dsp_off() cancels that old
+  // acquisition. Re-entering Search at 1.000 s must not resurrect it.
+  Simulator::Schedule (Seconds (0.994), [sender] () {
+    sender->SendToPeer (BuildDataFrame (1),
+                        2,
+                        128,
+                        0.0,
+                        PREAMBLE_LONG,
+                        3,
+                        false);
+  });
+  Simulator::Schedule (Seconds (0.9969) + NanoSeconds (1), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+             "pending acquisition prevented the no-signal SLEEP transition");
+  });
+  Simulator::Schedule (Seconds (1.000), [receiver] () {
+    receiver->ForceAwakeFor (0.1);
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "stale-acquisition fixture did not re-enter Search");
+  });
+  Simulator::Schedule (Seconds (1.001), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "RX_SIG_FOUND survived dsp_off and entered Track after re-wake");
+  });
+
+  Simulator::Stop (Seconds (1.002));
+  Simulator::Run ();
+  Simulator::Destroy ();
+}
+
 } // namespace
 
 int
@@ -767,6 +1341,9 @@ main ()
   TestTrackReturnActivatesImmediately ();
   TestIdleZeroRedrawsAtRts ();
   TestPackingRetryRespectsMacState ();
+  TestNoSignalSearchReturnsIdleAndRestartsHoldoff ();
+  TestControlledFirstDataAckReleaseChain ();
+  TestNoSignalSleepCancelsStaleAcquisition ();
 
   std::cout << "PASS: OPNET MAC reservation lifecycle test" << std::endl;
   return 0;

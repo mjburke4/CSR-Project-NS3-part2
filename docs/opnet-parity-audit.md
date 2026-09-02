@@ -682,6 +682,19 @@ RTS TSLOT, the shared local/neighbor phase, `prep_tx` holdoff restart,
 first-contact reservation ordering, persistent advertisement/reuse,
 expiry/redraw ordering,
 SYNC/Track activation, real HOP retry reuse, and delayed-packing state gates.
+It also contains a controlled end-to-end first-DATA chain for the recovered
+two-node latency geometry.  With both live reservation counters set to slot
+13 without realigning either 13-ms timer, it requires DATA TX at `300.482000`,
+the gateway's periodic Search wake at `301.340000`, Track acquisition at
+`301.346630`, DATA delivery at `301.531404`, ACK TX at `301.821000`, source
+Track at `301.827634`, and HOP/NSDP release at `301.843384`.  A second packet
+held behind the initial one-packet HOP window proves that the HOP-owned remote
+NWK wake runs exactly one `TIC` later.  The transmitted cumulative ACK must
+retain the production 46-byte Pairwise16 envelope; the archived executable's
+bare 41-byte ACK instead completes at `301.843084`.  The controlled test is
+ns-3 timing evidence; the archived run's effective slot 13 is established
+separately by its hash-bound MAC-Tx and HOP-resend All-values write records,
+not inferred from this regression.
 The MAC-sent-time test now pins retry and final-expiry scans one `TIC` beyond
 their nominal actual-send boundaries, verifies the final queue wake one
 additional `TIC` later, and covers the missing-entry fallback plus
