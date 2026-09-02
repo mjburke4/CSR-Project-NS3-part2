@@ -215,8 +215,22 @@ class AnalysisState:
     deliveries: Counter[PacketKey] = field(default_factory=Counter)
     legs: list[Leg] = field(default_factory=list)
     leg_counts: Counter[PacketKey] = field(default_factory=Counter)
-    active_leg: dict[tuple[PacketKey, int], Leg] = field(default_factory=dict)
+    pending_nwk_leg: dict[tuple[PacketKey, int], list[Leg]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
     active_hop_leg: dict[tuple[int, int, int], list[Leg]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    active_packet_hop_leg: dict[
+        tuple[PacketKey, int, int, int], list[Leg]
+    ] = field(default_factory=lambda: defaultdict(list))
+    active_packet_leg: dict[tuple[PacketKey, int], list[Leg]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    dack_hold_packet_hop_leg: dict[
+        tuple[PacketKey, int, int, int], list[Leg]
+    ] = field(default_factory=lambda: defaultdict(list))
+    dack_hold_packet_leg: dict[tuple[PacketKey, int], list[Leg]] = field(
         default_factory=lambda: defaultdict(list)
     )
     known_hop_leg: dict[
@@ -678,10 +692,7 @@ def _handle_nwk(event: Event, state: AnalysisState) -> None:
         leg.nwk_admission_time_s = event.time_s
         leg.holds.update(state.held.pop((packet, node), Counter()))
         state.legs.append(leg)
-        active_key = (packet, node)
-        if active_key in state.active_leg:
-            _issue(state.global_issues, "overlapping_hop_leg", "packet has two active legs at one node", [event])
-        state.active_leg[active_key] = leg
+        state.pending_nwk_leg[(packet, node)].append(leg)
     else:
         if queue_after != queue_before:
             _issue(state.global_issues, "blocked_nwk_mutated_queue", "blocked NWK decision changed queue size", [event])
@@ -726,15 +737,118 @@ def _handle_nwk(event: Event, state: AnalysisState) -> None:
     state.nwk_by_node[node][decision] += 1
 
 
-def _find_leg(event: Event, state: AnalysisState) -> Leg:
+def _find_pending_nwk_leg(event: Event, state: AnalysisState) -> Leg:
     packet = _require_packet(event)
     node = _require_node(event)
-    leg = state.active_leg.get((packet, node))
-    if leg is None:
+    candidates = state.pending_nwk_leg.get((packet, node), [])
+    exact = [
+        leg
+        for leg in candidates
+        if leg.next_hop == event.next_hop
+        and leg.nwk_admission_time_s == event.time_s
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise AdmissionAnalysisError(
+            f"row {event.input_row}: {event.name} has ambiguous matching NWK legs"
+        )
+    if not candidates:
         raise AdmissionAnalysisError(
             f"row {event.input_row}: {event.name} has no matching NWK leg"
         )
-    return leg
+
+    resolutions: list[Leg] = []
+    for partial in (
+        [leg for leg in candidates if leg.next_hop == event.next_hop],
+        [leg for leg in candidates if leg.nwk_admission_time_s == event.time_s],
+    ):
+        if len(partial) == 1 and not any(
+            candidate is partial[0] for candidate in resolutions
+        ):
+            resolutions.append(partial[0])
+    if len(resolutions) == 1:
+        return resolutions[0]
+    if len(resolutions) > 1 or len(candidates) != 1:
+        raise AdmissionAnalysisError(
+            f"row {event.input_row}: {event.name} has ambiguous matching NWK legs"
+        )
+    return candidates[0]
+
+
+def _remove_pending_nwk_leg(leg: Leg, state: AnalysisState) -> None:
+    key = (leg.packet, leg.node)
+    candidates = state.pending_nwk_leg.get(key)
+    if candidates is None:
+        return
+    state.pending_nwk_leg[key] = [
+        candidate for candidate in candidates if candidate is not leg
+    ]
+    if not state.pending_nwk_leg[key]:
+        del state.pending_nwk_leg[key]
+
+
+def _resolve_hop_leg(
+    event: Event,
+    hop_sequence: int,
+    exact: list[Leg],
+    candidates: list[Leg],
+    lifecycle: str,
+) -> Leg:
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise AdmissionAnalysisError(
+            f"row {event.input_row}: {event.name} has ambiguous matching "
+            f"{lifecycle} legs"
+        )
+    if not candidates:
+        raise AdmissionAnalysisError(
+            f"row {event.input_row}: {event.name} has no matching {lifecycle} leg"
+        )
+    resolutions: list[Leg] = []
+    for partial in (
+        [leg for leg in candidates if leg.hop_sequence == hop_sequence],
+        [leg for leg in candidates if leg.next_hop == event.next_hop],
+        [leg for leg in candidates if leg.next_hop == event.peer],
+    ):
+        if len(partial) == 1 and not any(
+            candidate is partial[0] for candidate in resolutions
+        ):
+            resolutions.append(partial[0])
+    if len(resolutions) == 1:
+        return resolutions[0]
+    if len(resolutions) > 1 or len(candidates) != 1:
+        raise AdmissionAnalysisError(
+            f"row {event.input_row}: {event.name} has ambiguous matching "
+            f"{lifecycle} legs"
+        )
+    return candidates[0]
+
+
+def _find_transition_hop_leg(
+    event: Event, state: AnalysisState, hop_sequence: int
+) -> Leg:
+    packet = _require_packet(event)
+    node = _require_node(event)
+    if event.next_hop is None:
+        raise AdmissionAnalysisError(
+            f"row {event.input_row}: {event.name} requires next_hop"
+        )
+    key = (packet, node, event.next_hop, hop_sequence)
+    return _resolve_hop_leg(
+        event,
+        hop_sequence,
+        (
+            state.active_packet_hop_leg.get(key, [])
+            + state.dack_hold_packet_hop_leg.get(key, [])
+        ),
+        (
+            state.active_packet_leg.get((packet, node), [])
+            + state.dack_hold_packet_leg.get((packet, node), [])
+        ),
+        "active or DACK-hold HOP",
+    )
 
 
 def _hop_index_key(leg: Leg) -> tuple[int, int, int] | None:
@@ -746,8 +860,20 @@ def _hop_index_key(leg: Leg) -> tuple[int, int, int] | None:
 def _index_hop_leg(leg: Leg, state: AnalysisState) -> None:
     key = _hop_index_key(leg)
     if key is not None:
+        packet_key = (leg.packet, key[0], key[1], key[2])
+        if (
+            state.active_packet_hop_leg.get(packet_key)
+            or state.dack_hold_packet_hop_leg.get(packet_key)
+        ):
+            raise AdmissionAnalysisError(
+                "active or held HOP identity is ambiguous for "
+                f"packet={leg.packet}, node={leg.node}, "
+                f"next_hop={leg.next_hop}, hop_sequence={leg.hop_sequence}"
+            )
         state.active_hop_leg[key].append(leg)
-        state.known_hop_leg[(leg.packet, key[0], key[1], key[2])].append(leg)
+        state.active_packet_hop_leg[packet_key].append(leg)
+        state.active_packet_leg[(leg.packet, leg.node)].append(leg)
+        state.known_hop_leg[packet_key].append(leg)
 
 
 def _unindex_hop_leg(leg: Leg, state: AnalysisState) -> None:
@@ -755,11 +881,65 @@ def _unindex_hop_leg(leg: Leg, state: AnalysisState) -> None:
     if key is None:
         return
     candidates = state.active_hop_leg.get(key)
-    if candidates is None:
+    if candidates is not None:
+        state.active_hop_leg[key] = [
+            candidate for candidate in candidates if candidate is not leg
+        ]
+        if not state.active_hop_leg[key]:
+            del state.active_hop_leg[key]
+    packet_key = (leg.packet, key[0], key[1], key[2])
+    packet_candidates = state.active_packet_hop_leg.get(packet_key)
+    if packet_candidates is not None:
+        state.active_packet_hop_leg[packet_key] = [
+            candidate for candidate in packet_candidates if candidate is not leg
+        ]
+        if not state.active_packet_hop_leg[packet_key]:
+            del state.active_packet_hop_leg[packet_key]
+    active_key = (leg.packet, leg.node)
+    active_candidates = state.active_packet_leg.get(active_key)
+    if active_candidates is not None:
+        state.active_packet_leg[active_key] = [
+            candidate for candidate in active_candidates if candidate is not leg
+        ]
+        if not state.active_packet_leg[active_key]:
+            del state.active_packet_leg[active_key]
+
+
+def _index_dack_hold_leg(leg: Leg, state: AnalysisState) -> None:
+    key = _hop_index_key(leg)
+    if key is None:
         return
-    state.active_hop_leg[key] = [candidate for candidate in candidates if candidate is not leg]
-    if not state.active_hop_leg[key]:
-        del state.active_hop_leg[key]
+    packet_key = (leg.packet, key[0], key[1], key[2])
+    if state.dack_hold_packet_hop_leg.get(packet_key):
+        raise AdmissionAnalysisError(
+            "DACK-hold HOP identity is ambiguous for "
+            f"packet={leg.packet}, node={leg.node}, "
+            f"next_hop={leg.next_hop}, hop_sequence={leg.hop_sequence}"
+        )
+    state.dack_hold_packet_hop_leg[packet_key].append(leg)
+    state.dack_hold_packet_leg[(leg.packet, leg.node)].append(leg)
+
+
+def _unindex_dack_hold_leg(leg: Leg, state: AnalysisState) -> None:
+    key = _hop_index_key(leg)
+    if key is None:
+        return
+    packet_key = (leg.packet, key[0], key[1], key[2])
+    packet_candidates = state.dack_hold_packet_hop_leg.get(packet_key)
+    if packet_candidates is not None:
+        state.dack_hold_packet_hop_leg[packet_key] = [
+            candidate for candidate in packet_candidates if candidate is not leg
+        ]
+        if not state.dack_hold_packet_hop_leg[packet_key]:
+            del state.dack_hold_packet_hop_leg[packet_key]
+    active_key = (leg.packet, leg.node)
+    active_candidates = state.dack_hold_packet_leg.get(active_key)
+    if active_candidates is not None:
+        state.dack_hold_packet_leg[active_key] = [
+            candidate for candidate in active_candidates if candidate is not leg
+        ]
+        if not state.dack_hold_packet_leg[active_key]:
+            del state.dack_hold_packet_leg[active_key]
 
 
 def _handle_hop_admission(event: Event, state: AnalysisState) -> None:
@@ -768,9 +948,9 @@ def _handle_hop_admission(event: Event, state: AnalysisState) -> None:
             f"row {event.input_row}: unsupported hop_admission reason {event.reason!r}"
         )
     peer, next_hop = _require_directed_leg(event)
-    leg = _find_leg(event, state)
     detail = event.detail
     hop_sequence = _detail_int(detail, "hop_sequence", event)
+    leg = _find_pending_nwk_leg(event, state)
     if hop_sequence > 0xFFFF:
         raise AdmissionAnalysisError(
             f"row {event.input_row}: hop_sequence exceeds 16 bits"
@@ -819,6 +999,7 @@ def _handle_hop_admission(event: Event, state: AnalysisState) -> None:
     leg.hop_admission_time_s = event.time_s
     leg.hop_sequence = hop_sequence
     leg.resend_overflow = overflow
+    _remove_pending_nwk_leg(leg, state)
     _index_hop_leg(leg, state)
     _record_maximum(state, "hop_pending", pending_after)
     _record_maximum(state, "hop_outstanding", outstanding_after)
@@ -851,21 +1032,24 @@ def _match_feedback_leg(
         return None
 
     if event.packet is not None:
-        candidate = state.active_leg.get((event.packet, event.peer))
-        if (
-            candidate is not None
-            and candidate.next_hop == event.node
-            and candidate.hop_sequence == hop_sequence
-        ):
-            return candidate
+        candidates = state.active_packet_hop_leg.get(
+            (event.packet, event.peer, event.node, hop_sequence), []
+        )
+        if len(candidates) == 1:
+            return candidates[0]
         prior_legs = state.known_hop_leg.get(
             (event.packet, event.peer, event.node, hop_sequence), []
         )
-        if any(
-            leg.completion_reason == "no_ack"
-            and leg.completion_time_s is not None
-            and leg.completion_time_s <= event.time_s
-            for leg in prior_legs
+        latest = max(
+            prior_legs,
+            key=lambda leg: leg.first_event_index,
+            default=None,
+        )
+        if (
+            latest is not None
+            and latest.completion_reason == "no_ack"
+            and latest.completion_time_s is not None
+            and latest.completion_time_s <= event.time_s
         ):
             _note_uncorrelated_feedback(event, state)
             state.late_feedback_after_no_ack_count += 1
@@ -1030,8 +1214,18 @@ def _handle_nsdp_release(event: Event, state: AnalysisState) -> None:
 
 def _handle_completion(event: Event, state: AnalysisState) -> None:
     peer, next_hop = _require_directed_leg(event)
-    leg = _find_leg(event, state)
     reason = _normalize(event.reason, COMPLETION_REASONS, event)
+    detail = event.detail
+    hop_sequence = _detail_int(detail, "hop_sequence", event)
+    leg = _find_transition_hop_leg(event, state, hop_sequence)
+    duplicate_completion = leg.completion_time_s is not None
+    if duplicate_completion:
+        _issue(
+            leg.issues,
+            "duplicate_hop_completion",
+            "leg has multiple HOP completions",
+            [event],
+        )
     release = state.pending_nsdp_release
     if release is None:
         _issue(
@@ -1059,10 +1253,9 @@ def _handle_completion(event: Event, state: AnalysisState) -> None:
                 "flow-level NSDP release is not immediately followed by completion",
                 [release, event],
             )
-        leg.nsdp_release_time_s = release.time_s
+        if not duplicate_completion:
+            leg.nsdp_release_time_s = release.time_s
         state.pending_nsdp_release = None
-    detail = event.detail
-    hop_sequence = _detail_int(detail, "hop_sequence", event)
     resend_count = _detail_int(detail, "resend_count", event)
     pending_before = _detail_int(detail, "pending_before", event)
     pending_after = _detail_int(detail, "pending_after", event)
@@ -1075,14 +1268,14 @@ def _handle_completion(event: Event, state: AnalysisState) -> None:
     resend_after = _detail_int(detail, "resend_queue_after", event)
     nsdp_released = _detail_bool(detail, "nsdp_released", event)
     capacity_released = _detail_bool(detail, "capacity_released", event)
+    if duplicate_completion:
+        return
     if peer != leg.next_hop:
         _issue(leg.issues, "completion_peer_mismatch", "completion peer differs from the admitted next hop", [event])
     if next_hop != leg.next_hop:
         _issue(leg.issues, "completion_next_hop_mismatch", "completion next hop differs from admission", [event])
     if hop_sequence != leg.hop_sequence:
         _issue(leg.issues, "completion_sequence_mismatch", "completion HOP sequence differs from admission", [event])
-    if leg.completion_time_s is not None:
-        _issue(leg.issues, "duplicate_hop_completion", "leg has multiple HOP completions", [event])
     if resend_after != resend_before - 1 or resend_before < 1:
         _issue(leg.issues, "bad_resend_queue_completion", "completion must remove one resend entry", [event])
     if not nsdp_released:
@@ -1159,9 +1352,9 @@ def _handle_completion(event: Event, state: AnalysisState) -> None:
     state.completion_counts[reason] += 1
     _record_maximum(state, "hop_pending", pending_before)
     _record_maximum(state, "hop_outstanding", outstanding_before)
-    if reason != "dack":
-        _unindex_hop_leg(leg, state)
-        state.active_leg.pop((leg.packet, leg.node), None)
+    _unindex_hop_leg(leg, state)
+    if reason == "dack":
+        _index_dack_hold_leg(leg, state)
 
 
 def _handle_capacity_release(event: Event, state: AnalysisState) -> None:
@@ -1170,9 +1363,9 @@ def _handle_capacity_release(event: Event, state: AnalysisState) -> None:
             f"row {event.input_row}: unsupported hop_capacity_release reason"
         )
     peer, next_hop = _require_directed_leg(event)
-    leg = _find_leg(event, state)
     detail = event.detail
     hop_sequence = _detail_int(detail, "hop_sequence", event)
+    leg = _find_transition_hop_leg(event, state, hop_sequence)
     resend_count = _detail_int(detail, "resend_count", event)
     pending_before = _detail_int(detail, "pending_before", event)
     pending_after = _detail_int(detail, "pending_after", event)
@@ -1292,7 +1485,7 @@ def _handle_capacity_release(event: Event, state: AnalysisState) -> None:
     leg.dack_effective_timer_offset_seconds = effective_offset
     leg.capacity_release_event = event
     _unindex_hop_leg(leg, state)
-    state.active_leg.pop((leg.packet, leg.node), None)
+    _unindex_dack_hold_leg(leg, state)
 
 
 def _validate_dack_timer_triggers(state: AnalysisState) -> None:

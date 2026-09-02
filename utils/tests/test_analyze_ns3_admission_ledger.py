@@ -339,6 +339,8 @@ class AnalyzeAdmissionLedgerTests(unittest.TestCase):
             self.assertEqual(report["hop"]["completions_by_reason"], {"ack": 1})
             self.assertEqual(analyzer._leg_status(legs[0]), "complete")
             self.assertEqual(legs[0].nsdp_release_time_s, 0.2)
+        with self.subTest(lifecycle="overlapping ACK legs"):
+            self._check_overlapping_ack_legs_use_full_hop_identity()
 
     def test_valid_dack_lifecycle_releases_capacity_at_expiry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -355,6 +357,309 @@ class AnalyzeAdmissionLedgerTests(unittest.TestCase):
                 legs[0].capacity_release_time_s,
                 20.2 + analyzer.OPNET_TIC_SECONDS,
             )
+        with self.subTest(lifecycle="overlapping DACK holds"):
+            self._check_overlapping_dack_holds_release_by_full_hop_identity()
+
+    def _check_overlapping_ack_legs_use_full_hop_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            rows = prefix_rows() + [
+                packet_row(
+                    4,
+                    0.05,
+                    "nwk_admission",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="admitted",
+                    detail=(
+                        "queue_before=1;queue_after=0;nsdp_count=2;nsdp_limit=16;"
+                        "pending=1;pending_limit=16;global_spad=16;outstanding=1;"
+                        "threshold=1;neighbor_spad=1;route_known=1"
+                    ),
+                ),
+                packet_row(
+                    5,
+                    0.05,
+                    "hop_admission",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="admitted",
+                    detail=(
+                        "hop_sequence=8;pending_before=1;pending_after=2;"
+                        "pending_limit=16;global_spad_before=16;"
+                        "global_spad_after=15;outstanding_before=1;"
+                        "outstanding_after=2;threshold=1;"
+                        "neighbor_spad_before=1;neighbor_spad_after=0;"
+                        "resend_queue_before=1;resend_queue_after=2;"
+                        "resend_tracked=1;resend_overflow=0"
+                    ),
+                ),
+                packet_row(
+                    6,
+                    0.1,
+                    "hop_feedback",
+                    node=1,
+                    peer=0,
+                    reason="ack",
+                    detail=(
+                        "hop_sequence=7;first_reception=1;ackable=1;"
+                        "nsdp_count_before=0;nsdp_count_after=1;"
+                        "nsdp_state_valid=1;nsdp_limit=16"
+                    ),
+                ),
+                packet_row(
+                    7,
+                    0.11,
+                    "hop_feedback",
+                    node=1,
+                    peer=0,
+                    reason="ack",
+                    detail=(
+                        "hop_sequence=8;first_reception=1;ackable=1;"
+                        "nsdp_count_before=1;nsdp_count_after=2;"
+                        "nsdp_state_valid=1;nsdp_limit=16"
+                    ),
+                ),
+                row(
+                    8,
+                    0.2,
+                    "nwk_nsdp_release",
+                    src=0,
+                    dst=2,
+                    node=0,
+                    reason="hop_feedback",
+                    detail=(
+                        "count_before=2;count_after=1;nsdp_limit=16;nwk_queue=0"
+                    ),
+                ),
+                packet_row(
+                    9,
+                    0.2,
+                    "hop_completion",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="ack",
+                    detail=(
+                        "hop_sequence=7;resend_count=0;pending_before=2;"
+                        "pending_after=1;pending_limit=16;outstanding_before=2;"
+                        "outstanding_after=1;threshold_before=1;threshold_after=1;"
+                        "resend_queue_before=2;resend_queue_after=1;"
+                        "nsdp_released=1;capacity_released=1"
+                    ),
+                ),
+                row(
+                    10,
+                    0.3,
+                    "nwk_nsdp_release",
+                    src=0,
+                    dst=2,
+                    node=0,
+                    reason="hop_feedback",
+                    detail=(
+                        "count_before=1;count_after=0;nsdp_limit=16;nwk_queue=0"
+                    ),
+                ),
+                packet_row(
+                    11,
+                    0.3,
+                    "hop_completion",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="ack",
+                    detail=(
+                        "hop_sequence=8;resend_count=0;pending_before=1;"
+                        "pending_after=0;pending_limit=16;outstanding_before=1;"
+                        "outstanding_after=0;threshold_before=1;threshold_after=1;"
+                        "resend_queue_before=1;resend_queue_after=0;"
+                        "nsdp_released=1;capacity_released=1"
+                    ),
+                ),
+            ]
+            write_trace(trace, rows)
+
+            legs, report = analyzer.analyze(trace)
+
+            self.assertTrue(report["pass"])
+            self.assertEqual(report["hop"]["completions_by_reason"], {"ack": 2})
+            self.assertEqual([leg.hop_sequence for leg in legs], [7, 8])
+            self.assertEqual([leg.completion_time_s for leg in legs], [0.2, 0.3])
+            self.assertTrue(all(not leg.issues for leg in legs))
+
+    def _check_overlapping_dack_holds_release_by_full_hop_identity(self) -> None:
+        tic = analyzer.OPNET_TIC_SECONDS
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            rows = prefix_rows() + [
+                packet_row(
+                    4,
+                    0.05,
+                    "nwk_admission",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="admitted",
+                    detail=(
+                        "queue_before=1;queue_after=0;nsdp_count=2;nsdp_limit=16;"
+                        "pending=1;pending_limit=16;global_spad=16;outstanding=1;"
+                        "threshold=1;neighbor_spad=1;route_known=1"
+                    ),
+                ),
+                packet_row(
+                    5,
+                    0.05,
+                    "hop_admission",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="admitted",
+                    detail=(
+                        "hop_sequence=8;pending_before=1;pending_after=2;"
+                        "pending_limit=16;global_spad_before=16;"
+                        "global_spad_after=15;outstanding_before=1;"
+                        "outstanding_after=2;threshold=1;"
+                        "neighbor_spad_before=1;neighbor_spad_after=0;"
+                        "resend_queue_before=1;resend_queue_after=2;"
+                        "resend_tracked=1;resend_overflow=0"
+                    ),
+                ),
+                packet_row(
+                    6,
+                    0.1,
+                    "hop_feedback",
+                    node=1,
+                    peer=0,
+                    reason="dack",
+                    detail=(
+                        "hop_sequence=7;first_reception=1;ackable=1;"
+                        "nsdp_count_before=16;nsdp_count_after=17;"
+                        "nsdp_state_valid=1;nsdp_limit=16"
+                    ),
+                ),
+                packet_row(
+                    7,
+                    0.11,
+                    "hop_feedback",
+                    node=1,
+                    peer=0,
+                    reason="dack",
+                    detail=(
+                        "hop_sequence=8;first_reception=1;ackable=1;"
+                        "nsdp_count_before=16;nsdp_count_after=17;"
+                        "nsdp_state_valid=1;nsdp_limit=16"
+                    ),
+                ),
+                row(
+                    8,
+                    0.2,
+                    "nwk_nsdp_release",
+                    src=0,
+                    dst=2,
+                    node=0,
+                    reason="hop_feedback",
+                    detail=(
+                        "count_before=2;count_after=1;nsdp_limit=16;nwk_queue=0"
+                    ),
+                ),
+                packet_row(
+                    9,
+                    0.2,
+                    "hop_completion",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="dack",
+                    detail=(
+                        "hop_sequence=7;resend_count=2;pending_before=2;"
+                        "pending_after=2;pending_limit=16;outstanding_before=2;"
+                        "outstanding_after=2;threshold_before=1;threshold_after=1;"
+                        "resend_queue_before=2;resend_queue_after=1;"
+                        "dack_hold_seconds=40;"
+                        f"dack_scheduled_timer_offset_seconds={tic};"
+                        "nsdp_released=1;capacity_released=0"
+                    ),
+                ),
+                row(
+                    10,
+                    0.3,
+                    "nwk_nsdp_release",
+                    src=0,
+                    dst=2,
+                    node=0,
+                    reason="hop_feedback",
+                    detail=(
+                        "count_before=1;count_after=0;nsdp_limit=16;nwk_queue=0"
+                    ),
+                ),
+                packet_row(
+                    11,
+                    0.3,
+                    "hop_completion",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="dack",
+                    detail=(
+                        "hop_sequence=8;resend_count=0;pending_before=2;"
+                        "pending_after=2;pending_limit=16;outstanding_before=2;"
+                        "outstanding_after=2;threshold_before=1;threshold_after=1;"
+                        "resend_queue_before=1;resend_queue_after=0;"
+                        "dack_hold_seconds=20;"
+                        f"dack_scheduled_timer_offset_seconds={tic};"
+                        "nsdp_released=1;capacity_released=0"
+                    ),
+                ),
+                packet_row(
+                    12,
+                    20.3 + tic,
+                    "hop_capacity_release",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="dack_expiry",
+                    detail=(
+                        "hop_sequence=8;resend_count=0;pending_before=2;"
+                        "pending_after=1;pending_limit=16;outstanding_before=2;"
+                        "outstanding_after=1;threshold_before=1;threshold_after=1;"
+                        "dack_hold_seconds=20;"
+                        f"dack_scheduled_timer_offset_seconds={tic};"
+                        f"dack_effective_timer_offset_seconds={tic};"
+                        "nsdp_released=0;capacity_released=1"
+                    ),
+                ),
+                packet_row(
+                    13,
+                    40.2 + tic,
+                    "hop_capacity_release",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="dack_expiry",
+                    detail=(
+                        "hop_sequence=7;resend_count=2;pending_before=1;"
+                        "pending_after=0;pending_limit=16;outstanding_before=1;"
+                        "outstanding_after=0;threshold_before=1;threshold_after=1;"
+                        "dack_hold_seconds=40;"
+                        f"dack_scheduled_timer_offset_seconds={tic};"
+                        f"dack_effective_timer_offset_seconds={tic};"
+                        "nsdp_released=0;capacity_released=1"
+                    ),
+                ),
+            ]
+            write_trace(trace, rows)
+
+            legs, report = analyzer.analyze(trace)
+
+            self.assertTrue(report["pass"])
+            self.assertEqual(report["hop"]["completions_by_reason"], {"dack": 2})
+            self.assertEqual(report["hop"]["capacity_releases"], 2)
+            self.assertEqual([leg.hop_sequence for leg in legs], [7, 8])
+            self.assertAlmostEqual(legs[0].capacity_release_time_s, 40.2 + tic)
+            self.assertAlmostEqual(legs[1].capacity_release_time_s, 20.3 + tic)
+            self.assertTrue(all(not leg.issues for leg in legs))
 
     def test_dack_expiry_at_nominal_hold_is_a_strict_finding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -604,7 +909,8 @@ class AnalyzeAdmissionLedgerTests(unittest.TestCase):
 
     def test_late_packet_identified_feedback_is_nonfatal_metric(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            trace = Path(temporary) / "trace.csv"
+            root = Path(temporary)
+            trace = root / "trace.csv"
             rows = no_ack_rows()
             rows.append(
                 packet_row(
@@ -631,6 +937,83 @@ class AnalyzeAdmissionLedgerTests(unittest.TestCase):
             self.assertEqual(report["hop"]["uncorrelated_tagless_feedback"], 0)
             self.assertEqual(report["hop"]["late_feedback_after_no_ack"], 1)
             self.assertEqual(report["integrity"]["global_issue_count"], 0)
+
+            dack_trace = root / "late-after-dack.csv"
+            dack = dack_rows()
+            dack.insert(
+                7,
+                packet_row(
+                    7,
+                    1.0,
+                    "hop_feedback",
+                    node=1,
+                    peer=0,
+                    reason="ack",
+                    detail=(
+                        "hop_sequence=7;first_reception=0;ackable=1;"
+                        "nsdp_count_before=0;nsdp_count_after=0;"
+                        "nsdp_state_valid=0;nsdp_limit=16"
+                    ),
+                ),
+            )
+            dack[8]["event_index"] = "8"
+            write_trace(dack_trace, dack)
+
+            dack_legs, dack_report = analyzer.analyze(dack_trace)
+
+            self.assertTrue(dack_report["pass"])
+            self.assertEqual(dack_report["hop"]["uncorrelated_feedback"], 1)
+            self.assertEqual(dack_legs[0].feedback_reason, "dack")
+            self.assertEqual(dack_legs[0].feedback_time_s, 0.1)
+            self.assertEqual(dack_legs[0].completion_reason, "dack")
+            self.assertFalse(dack_legs[0].feedback_completion_mismatch)
+
+            reuse_trace = root / "late-after-reused-identity.csv"
+            reuse = no_ack_rows()
+            templates = dack_rows()
+            times = (6.0, 6.0, 6.1, 6.2, 6.2)
+            for index, (template, time_s) in enumerate(
+                zip(templates[2:7], times), start=6
+            ):
+                reused_row = dict(template)
+                reused_row.update(event_index=str(index), time_s=str(time_s))
+                reuse.append(reused_row)
+            reuse.append(
+                packet_row(
+                    11,
+                    7.0,
+                    "hop_feedback",
+                    node=1,
+                    peer=0,
+                    reason="ack",
+                    detail=(
+                        "hop_sequence=7;first_reception=1;ackable=1;"
+                        "nsdp_count_before=0;nsdp_count_after=1;"
+                        "nsdp_state_valid=1;nsdp_limit=16"
+                    ),
+                )
+            )
+            capacity = dict(templates[7])
+            capacity.update(
+                event_index="12",
+                time_s=str(26.2 + analyzer.OPNET_TIC_SECONDS),
+            )
+            reuse.append(capacity)
+            write_trace(reuse_trace, reuse)
+
+            reuse_legs, reuse_report = analyzer.analyze(reuse_trace)
+
+            self.assertFalse(reuse_report["pass"])
+            self.assertEqual(reuse_report["hop"]["late_feedback_after_no_ack"], 0)
+            self.assertIn(
+                "uncorrelated_first_reception_feedback",
+                {
+                    issue["code"]
+                    for issue in reuse_report["integrity"]["global_issues"]
+                },
+            )
+            self.assertEqual(reuse_legs[1].feedback_reason, "dack")
+            self.assertEqual(reuse_legs[1].completion_reason, "dack")
 
     def test_unknown_first_reception_feedback_is_strict_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -672,6 +1055,75 @@ class AnalyzeAdmissionLedgerTests(unittest.TestCase):
                         "requires directed-leg peer and next_hop",
                     ):
                         analyzer.analyze(trace)
+
+            with self.subTest(event="duplicate active full identity"):
+                trace = root / "duplicate-active-identity.csv"
+                rows = prefix_rows()
+                second_nwk = packet_row(
+                    4,
+                    0.05,
+                    "nwk_admission",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="admitted",
+                    detail=(
+                        NWK_DETAIL.replace("pending=0;", "pending=1;")
+                        .replace("global_spad=17", "global_spad=16")
+                        .replace("outstanding=0;", "outstanding=1;")
+                        .replace("threshold=0;", "threshold=1;")
+                    ),
+                )
+                second_hop = packet_row(
+                    5,
+                    0.05,
+                    "hop_admission",
+                    node=0,
+                    peer=1,
+                    next_hop=1,
+                    reason="admitted",
+                    detail=(
+                        HOP_DETAIL.replace(
+                            "pending_before=0;pending_after=1",
+                            "pending_before=1;pending_after=2",
+                        )
+                        .replace(
+                            "global_spad_before=17;global_spad_after=16",
+                            "global_spad_before=16;global_spad_after=15",
+                        )
+                        .replace(
+                            "outstanding_before=0;outstanding_after=1",
+                            "outstanding_before=1;outstanding_after=2",
+                        )
+                        .replace("threshold=0;", "threshold=1;")
+                        .replace(
+                            "resend_queue_before=0;resend_queue_after=1",
+                            "resend_queue_before=1;resend_queue_after=2",
+                        )
+                    ),
+                )
+                rows.extend((second_nwk, second_hop))
+                write_trace(trace, rows)
+                with self.assertRaisesRegex(
+                    analyzer.AdmissionAnalysisError,
+                    "active or held HOP identity is ambiguous",
+                ):
+                    analyzer.analyze(trace)
+
+            with self.subTest(event="duplicate DACK-held full identity"):
+                trace = root / "duplicate-held-identity.csv"
+                rows = dack_rows()[:-1]
+                held_nwk = dict(second_nwk)
+                held_nwk.update(event_index="7", time_s="0.3")
+                held_hop = dict(second_hop)
+                held_hop.update(event_index="8", time_s="0.3")
+                rows.extend((held_nwk, held_hop))
+                write_trace(trace, rows)
+                with self.assertRaisesRegex(
+                    analyzer.AdmissionAnalysisError,
+                    "active or held HOP identity is ambiguous",
+                ):
+                    analyzer.analyze(trace)
 
     def test_missing_window_feedback_is_nonfatal_metric(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -874,36 +1326,109 @@ class AnalyzeAdmissionLedgerTests(unittest.TestCase):
     def test_strict_cli_writes_failure_evidence_and_exits_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            trace = root / "trace.csv"
-            summary = root / "summary.json"
-            legs_csv = root / "legs.csv"
+
             rows = ack_rows()
             rows[3]["detail"] = HOP_DETAIL.replace(
                 "global_spad_after=16", "global_spad_after=15"
             )
-            write_trace(trace, rows)
+            cases = [("hop-state", rows, "bad_hop_global_spad")]
 
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT),
-                    str(trace),
-                    "--summary-json",
-                    str(summary),
-                    "--legs-csv",
-                    str(legs_csv),
-                    "--strict",
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
+            rows = ack_rows()
+            rows[3]["time_s"] = "0.01"
+            cases.append(
+                ("hop-time", rows, "hop_admission_time_mismatch")
             )
 
-            self.assertEqual(result.returncode, 1)
-            self.assertTrue(summary.is_file())
-            self.assertTrue(legs_csv.is_file())
-            self.assertFalse(json.loads(summary.read_text(encoding="utf-8"))["pass"])
+            rows = ack_rows()
+            rows[3]["next_hop"] = "2"
+            cases.append(("hop-next-hop", rows, "hop_next_hop_mismatch"))
+
+            rows = ack_rows()
+            rows[6]["next_hop"] = "2"
+            cases.append(
+                ("completion-next-hop", rows, "completion_next_hop_mismatch")
+            )
+
+            rows = ack_rows()
+            rows[6]["detail"] = rows[6]["detail"].replace(
+                "hop_sequence=7", "hop_sequence=8"
+            )
+            cases.append(
+                ("completion-sequence", rows, "completion_sequence_mismatch")
+            )
+
+            rows = dack_rows()
+            rows[7]["next_hop"] = "2"
+            cases.append(
+                ("capacity-next-hop", rows, "capacity_next_hop_mismatch")
+            )
+
+            rows = dack_rows()
+            rows[7]["detail"] = rows[7]["detail"].replace(
+                "hop_sequence=7", "hop_sequence=8"
+            )
+            cases.append(
+                ("capacity-sequence", rows, "capacity_sequence_mismatch")
+            )
+
+            rows = dack_rows()
+            duplicate_release = dict(rows[5])
+            duplicate_release.update(event_index="7", time_s="0.3")
+            duplicate_completion = dict(rows[6])
+            duplicate_completion.update(event_index="8", time_s="0.3")
+            rows[7]["event_index"] = "9"
+            rows[7:7] = [duplicate_release, duplicate_completion]
+            cases.append(
+                ("duplicate-dack-completion", rows, "duplicate_hop_completion")
+            )
+
+            rows = prefix_rows()
+            early_capacity = dict(dack_rows()[7])
+            early_capacity.update(event_index="4", time_s="0.1")
+            rows.append(early_capacity)
+            cases.append(
+                ("capacity-before-completion", rows, "capacity_release_without_dack")
+            )
+
+            for name, case_rows, expected_issue in cases:
+                with self.subTest(case=name):
+                    trace = root / f"{name}-trace.csv"
+                    summary = root / f"{name}-summary.json"
+                    legs_csv = root / f"{name}-legs.csv"
+                    write_trace(trace, case_rows)
+
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(SCRIPT),
+                            str(trace),
+                            "--summary-json",
+                            str(summary),
+                            "--legs-csv",
+                            str(legs_csv),
+                            "--strict",
+                        ],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 1)
+                    self.assertTrue(summary.is_file())
+                    self.assertTrue(legs_csv.is_file())
+                    report = json.loads(summary.read_text(encoding="utf-8"))
+                    self.assertFalse(report["pass"])
+                    with legs_csv.open(
+                        "r", encoding="utf-8", newline=""
+                    ) as stream:
+                        leg_rows = list(csv.DictReader(stream))
+                    issue_codes = {
+                        issue["code"]
+                        for leg_row in leg_rows
+                        for issue in json.loads(leg_row["issues_json"])
+                    }
+                    self.assertIn(expected_issue, issue_codes)
 
 
 if __name__ == "__main__":
