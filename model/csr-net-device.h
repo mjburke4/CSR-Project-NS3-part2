@@ -845,12 +845,40 @@ CsrNetDevice::RefreshDutyState ()
 void
 CsrNetDevice::SleepReceiver ()
 {
-  if (m_mac.GetState () == CsrMacCore::State::TRACK ||
-      m_mac.GetState () == CsrMacCore::State::TX)
+  CsrMacCore::State state = m_mac.GetState ();
+  if (state == CsrMacCore::State::TRACK ||
+      state == CsrMacCore::State::TX)
     {
       return;
     }
-  RefreshDutyState ();
+  if (!m_dutyCycleEnabled)
+    {
+      return;
+    }
+
+  // This callback is the source model's already-scheduled SLEEP interrupt,
+  // not a fresh query of the periodic wake phase.  Recomputing the phase with
+  // floating-point fmod() exactly at the awake-window boundary can classify
+  // the boundary as still awake and lose this one-shot Search -> Idle
+  // transition.  br_mac instead runs dsp_off() when SLEEP is delivered unless
+  // transmit preparation or a separate stay-awake guard has superseded it.
+  double now = Simulator::Now ().GetSeconds ();
+  bool preparationKeepsSearch =
+    state == CsrMacCore::State::SEARCH &&
+    m_mac.IsTxPreparationActive ();
+  if (preparationKeepsSearch || m_forceAwakeUntilSec > now)
+    {
+      return;
+    }
+
+  // dsp_off() cancels RX_SIG_FOUND before entering Idle.  Prevent a pending
+  // acquisition callback from surviving this sleep and firing after a later
+  // Idle -> Search transition.
+  if (m_acquisitionEvent.IsPending ())
+    {
+      Simulator::Cancel (m_acquisitionEvent);
+    }
+  m_mac.SetReceiveState (CsrMacCore::State::IDLE);
 }
 
 void

@@ -37,8 +37,10 @@ Ptr<CsrNetDevice> g_zeroDevice;
 Ptr<CsrNetDevice> g_trackDevice;
 Ptr<CsrNetDevice> g_idleZeroDevice;
 Ptr<CsrNetDevice> g_packingRetryDevice;
+Ptr<CsrNetDevice> g_noSignalDevice;
 int32_t g_trackAdvertisedSlot = -1;
 int64_t g_trackExpectedTxNs = -1;
+Time g_noSignalTxTime = Time::Min ();
 
 void
 Require (bool condition, const char* message)
@@ -752,6 +754,191 @@ TestPackingRetryRespectsMacState ()
   g_packingRetryDevice = nullptr;
 }
 
+void
+CheckOpnetWakeEnteredSearch ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::SEARCH,
+           "OPNET periodic WAKE did not enter Search");
+}
+
+void
+CheckNoSignalSearchReturnedIdle ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "no-signal Search did not return to Idle after 8.9 ms");
+}
+
+void ControlLongQuietReservationSlot ();
+
+void
+EnqueueAfterLongQuiet ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "receiver was not Idle after the long no-signal interval");
+  g_noSignalDevice->GetMac ().SetReservationSlotOverrideForDifferentialRun (
+    13);
+  g_noSignalDevice->GetMac ().EnqueueTxFrame (
+    BuildDataFrame (1), 2, 5, true);
+  // Schedule after EnqueueTxFrame() creates Idle's 300.001-s RTS event. Equal-
+  // time event ordering therefore runs prep_tx first, then this test callback.
+  Simulator::Schedule (MilliSeconds (1),
+                       &ControlLongQuietReservationSlot);
+}
+
+void
+CheckLongQuietQueueWaitsForRts ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "long-quiet enqueue bypassed the Idle RTS gate");
+  Require (g_noSignalDevice->GetMac ().GetQueuedFrameCount () == 1,
+           "long-quiet frame was not retained while Idle");
+  Require (g_noSignalDevice->GetMac ().GetTransmittedFrameCount () == 0,
+           "long-quiet frame transmitted before prep_tx");
+}
+
+void
+ControlLongQuietReservationSlot ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::SEARCH,
+           "Idle RTS did not return the long-quiet receiver to Search");
+  Require (g_noSignalDevice->GetMac ().IsTxPreparationActive (),
+           "Idle RTS did not activate prep_tx for the long-quiet frame");
+  Require (g_noSignalDevice->GetMac ().GetLocalReservationCounter () == 13,
+           "controlled long-quiet prep_tx did not select slot 13");
+
+  // The public differential override controls the RNG result but deliberately
+  // aligns multi-sender fixtures to a common epoch. Restore the production
+  // single-node relative clock at the same prep_tx instant, retaining slot 13
+  // and the independently scheduled 300-ms holdoff.
+  g_noSignalDevice->GetMac ().SetReservationSlotOverrideForDifferentialRun (
+    -1);
+  g_noSignalDevice->GetMac ().StopSlotTick ();
+  g_noSignalDevice->GetMac ().StartSlotTick (MilliSeconds (13));
+}
+
+void
+CheckLongQuietHoldoff ()
+{
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::SEARCH,
+           "long-quiet prep_tx left Search before transmission");
+  Require (g_noSignalDevice->GetMac ().IsTxPreparationActive (),
+           "long-quiet prep_tx was cleared during holdoff");
+  Require (g_noSignalDevice->GetMac ().GetLocalReservationCounter () == 13,
+           "slot counter advanced before the restarted holdoff expired");
+  Require (g_noSignalDevice->GetMac ().GetTransmittedFrameCount () == 0,
+           "long-quiet frame bypassed the restarted 300-ms holdoff");
+}
+
+void
+RecordNoSignalTransitionTransmission (CsrNodeId destination,
+                                      uint16_t sequence,
+                                      Time sentTime)
+{
+  Require (destination == 2 && sequence == 1,
+           "long-quiet controlled-slot transmission changed identity");
+  Require (sentTime == Seconds (300.482),
+           "slot 13 did not transmit at the source-exact 300.482-s time");
+  Require (g_noSignalDevice->GetMac ().GetLastTxOpportunitySlot () == 13,
+           "long-quiet transmission did not consume controlled slot 13");
+  g_noSignalTxTime = sentTime;
+  Simulator::Stop (NanoSeconds (1));
+}
+
+void
+TestNoSignalSearchReturnsIdleAndRestartsHoldoff ()
+{
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (9);
+  g_noSignalTxTime = Time::Min ();
+
+  g_noSignalDevice = CreateObject<CsrNetDevice> (1);
+  g_noSignalDevice->GetMac ().SetTxSentCallback (
+    MakeCallback (&RecordNoSignalTransitionTransmission));
+  g_noSignalDevice->EnableOpnetAlignedDutyCycling (true);
+
+  Require (g_noSignalDevice->GetMacState () == CsrMacCore::State::IDLE,
+           "OPNET-aligned no-signal test did not begin in Idle");
+
+  // br_mac's first unconditional WAKE is at 0.988 s. Search with no signal
+  // lasts DSP_RX_BOOTTIME + NO_SIG_SRH_TIME = 8.9 ms, then dsp_off() returns
+  // to Idle. One nanosecond separates boundary checks from event-ID ordering.
+  Simulator::Schedule (Seconds (0.988),
+                       &CheckOpnetWakeEnteredSearch);
+  Simulator::Schedule (Seconds (0.9969) + NanoSeconds (1),
+                       &CheckNoSignalSearchReturnedIdle);
+
+  // The old fmod-based boundary check first demonstrably loses its one-shot
+  // SLEEP on the recovered cycle-six boundary at 5.9369 s.
+  Simulator::Schedule (Seconds (5.928) + NanoSeconds (1),
+                       &CheckOpnetWakeEnteredSearch);
+  Simulator::Schedule (Seconds (5.9369) + NanoSeconds (1),
+                       &CheckNoSignalSearchReturnedIdle);
+
+  // The recovered latency run admits its first DATA at 300 s.  Once the
+  // no-signal transition is preserved, that arrival finds Idle. The global
+  // Idle RTS is at 300.001 s; prep_tx restarts the holdoff to 300.301 s. With
+  // controlled slot 13, the first post-holdoff countdown reaches -1 at the
+  // source-observed 300.482-s transmission instant.
+  Simulator::Schedule (Seconds (300.0), &EnqueueAfterLongQuiet);
+  Simulator::Schedule (Seconds (300.0005),
+                       &CheckLongQuietQueueWaitsForRts);
+  Simulator::Schedule (Seconds (300.301) - NanoSeconds (1),
+                       &CheckLongQuietHoldoff);
+  Simulator::Stop (Seconds (300.6));
+  Simulator::Run ();
+
+  Require (g_noSignalTxTime == Seconds (300.482),
+           "long-quiet controlled-slot transmission was not observed");
+
+  Simulator::Destroy ();
+  g_noSignalDevice = nullptr;
+}
+
+void
+TestNoSignalSleepCancelsStaleAcquisition ()
+{
+  Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (2);
+  sender->AddPeer (receiver);
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  sender->GetPhy ().SetPerModel (noErrors);
+  receiver->GetPhy ().SetPerModel (noErrors);
+  receiver->EnableOpnetAlignedDutyCycling (true);
+
+  // Start a long preamble six milliseconds into the first Search window. Its
+  // 6.63-ms RX_SIG_FOUND acquisition is due at 1.00063 s, after the already-
+  // scheduled no-signal SLEEP at 0.9969 s. Source dsp_off() cancels that old
+  // acquisition. Re-entering Search at 1.000 s must not resurrect it.
+  Simulator::Schedule (Seconds (0.994), [sender] () {
+    sender->SendToPeer (BuildDataFrame (1),
+                        2,
+                        128,
+                        0.0,
+                        PREAMBLE_LONG,
+                        3,
+                        false);
+  });
+  Simulator::Schedule (Seconds (0.9969) + NanoSeconds (1), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+             "pending acquisition prevented the no-signal SLEEP transition");
+  });
+  Simulator::Schedule (Seconds (1.000), [receiver] () {
+    receiver->ForceAwakeFor (0.1);
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "stale-acquisition fixture did not re-enter Search");
+  });
+  Simulator::Schedule (Seconds (1.001), [receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "RX_SIG_FOUND survived dsp_off and entered Track after re-wake");
+  });
+
+  Simulator::Stop (Seconds (1.002));
+  Simulator::Run ();
+  Simulator::Destroy ();
+}
+
 } // namespace
 
 int
@@ -767,6 +954,8 @@ main ()
   TestTrackReturnActivatesImmediately ();
   TestIdleZeroRedrawsAtRts ();
   TestPackingRetryRespectsMacState ();
+  TestNoSignalSearchReturnsIdleAndRestartsHoldoff ();
+  TestNoSignalSleepCancelsStaleAcquisition ();
 
   std::cout << "PASS: OPNET MAC reservation lifecycle test" << std::endl;
   return 0;
