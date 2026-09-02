@@ -349,10 +349,12 @@ timestamp is reused for every such proven copy, matching legacy APP delay
 sampling. Repeated ACKs, changed lineage fields, malformed NSDP transitions,
 and duplicates without feedback remain strict failures.
 
-The packet-path and admission-ledger analyzers remain unchanged and keep
-duplicate delivery fatal. Relaxing either requires binding each proof to a
-complete ordered relay-to-destination suffix (and, for the ledger, distinct
-overlapping HOP legs); a packet-wide budget is not sufficient evidence.
+The admission-ledger analyzer binds concurrent same-packet/node legs by full
+packet and directed-HOP identity, so completions and deferred DACK releases do
+not overwrite another active leg. It still reports packet-identity
+`duplicate_delivery`. The packet-path analyzer also keeps duplicate delivery
+fatal because it cannot yet bind each proven copy to a complete ordered
+relay-to-destination suffix; a packet-wide budget is not sufficient evidence.
 
 Run the imported scenario with the opt-in surface:
 
@@ -530,9 +532,10 @@ sequence, and delivers every destination copy to APP. A three-hop fixture now
 proves two byte-identical ingress receptions, two DACK decisions, two relay
 custody entries, distinct onward HOP sequences, and two destination APP
 callbacks. The aggregate analyzer accepts the extra delivery only with the
-complete enqueue/feedback proof described above. Packet-path and admission
-ledger analysis still keep duplicate delivery fatal until each extra copy can
-be bound to a complete downstream suffix and distinct overlapping HOP leg.
+complete enqueue/feedback proof described above. Admission-ledger analysis now
+binds distinct overlapping HOP legs but still reports the packet-identity
+duplicate delivery. Packet-path analysis remains unable to validate each
+duplicate's complete downstream suffix and keeps the duplicate fatal.
 Reaccepting a Pairwise16-authenticated retry from the DACK bitmap is inferred
 cross-source integration; the downstream lost-DACK delivery fork itself is
 source-exact.
