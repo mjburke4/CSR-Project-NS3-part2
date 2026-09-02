@@ -37,6 +37,7 @@ MISSING_SENTINEL = 2.0e100
 ALL_VALUES_END_SENTINEL = 4.0e100
 RECOVERED_COMPLETE_BUCKET_COUNT = 100
 RECOVERED_ALL_VALUES_MAX_ENCODED_COUNT = 11_019
+RECOVERED_ALL_VALUES_MAX_EVENT_COUNT = 31_758
 RECOVERED_MAX_DESCRIPTION_COUNT = 19
 RECOVERED_MAX_DESCRIPTION_VARIANT_COUNT = 2
 RECOVERED_MAX_METADATA_UNIT_COUNT = 113
@@ -240,9 +241,10 @@ class ExcludedNonAggregateVector:
     below 0x22 hierarchy containers and uses a distinct 0x81 two-array
     encoding.  Other archived 0x224 records use bucket aggregation and 0x82,
     so classification depends on the aggregation string and record marker,
-    not on 0x224 alone.  Event-value semantics are outside this bounded
-    aggregate target; record boundaries, sentinels, and time axes are validated
-    without publishing their numeric contents as aggregate samples.
+    not on 0x224 alone.  Record boundaries, sentinels, and time axes are always
+    validated.  An explicit opt-in may retain the validated interior
+    value/time pairs in the rich JSON manifest, but they are never published
+    as aggregate samples.
     """
 
     hierarchy: tuple[str, ...]
@@ -254,17 +256,19 @@ class ExcludedNonAggregateVector:
     metadata_details_flags: int
     data_record: dict[str, Any] = field(default_factory=dict)
     probe_match: dict[str, Any] | None = None
+    events: list[dict[str, int | float]] = field(default_factory=list)
 
     @property
     def statistic(self) -> str:
         return f"{self.scope}.{self.name}" if self.scope else self.name
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "hierarchy": list(self.hierarchy),
             "scope": self.scope,
             "name": self.name,
             "statistic": self.statistic,
+            "unit": _unit_from_name(self.name),
             "aggregation_description": "All values",
             "aggregation": "",
             "description_id": self.description_id,
@@ -276,9 +280,12 @@ class ExcludedNonAggregateVector:
             "probe_definition_match": self.probe_match,
             "exclusion_reason": (
                 "per-object All values series uses the recovered 0x81 "
-                "two-array encoding; only canonical bucket aggregates are emitted"
+                "two-array encoding; it is excluded from canonical aggregate CSV"
             ),
         }
+        if self.data_record.get("numeric_contents_emitted"):
+            result["events"] = self.events
+        return result
 
 
 def _sha256(data: bytes) -> str:
@@ -1019,8 +1026,49 @@ def _validate_excluded_nonaggregate_block(
         "event_value_count": encoded_count - 2,
         "block_size": block_limit - offset,
         "layout": "value_array_then_time_array_with_boundary_entries",
+        "event_semantics": "per_statistic_write_record_not_packet_trace",
         "numeric_contents_emitted": False,
     }
+
+
+def _emit_excluded_nonaggregate_events(
+    data: bytes,
+    path: Path,
+    vectors: list[ExcludedNonAggregateVector],
+) -> int:
+    """Retain already-validated 0x81 interior pairs under a corpus bound."""
+    event_count = sum(
+        int(vector.data_record["event_value_count"]) for vector in vectors
+    )
+    if event_count > RECOVERED_ALL_VALUES_MAX_EVENT_COUNT:
+        raise OvFormatError(
+            f"{path}: nested All-values event count {event_count} exceeds "
+            "the source-observed total "
+            f"({RECOVERED_ALL_VALUES_MAX_EVENT_COUNT})"
+        )
+
+    # The validation pass has already checked every extent, boundary sentinel,
+    # numeric value, and timestamp.  Allocate only after the aggregate corpus
+    # bound passes, omit the two structural boundary entries, and retain equal
+    # timestamps and encoded order exactly as recorded.
+    for vector in vectors:
+        encoded_count = int(vector.data_record["encoded_count"])
+        values_offset = vector.data_offset + 25
+        times_offset = values_offset + encoded_count * 8
+        vector.events = [
+            {
+                "record_index": index - 1,
+                "time_s": struct.unpack_from(
+                    ">d", data, times_offset + index * 8
+                )[0],
+                "value": struct.unpack_from(
+                    ">d", data, values_offset + index * 8
+                )[0],
+            }
+            for index in range(1, encoded_count - 1)
+        ]
+        vector.data_record["numeric_contents_emitted"] = True
+    return event_count
 
 
 def _parse_vector_block(
@@ -1184,8 +1232,13 @@ def extract_ov(
     *,
     scenario: str | None = None,
     probe_definition: Path | None = None,
+    include_all_values: bool = False,
 ) -> dict[str, Any]:
-    """Decode one supplied-layout ``.ov`` into a canonical JSON-ready object."""
+    """Decode one supplied-layout ``.ov`` into a canonical JSON-ready object.
+
+    ``include_all_values`` retains validated 0x81 event pairs in the rich
+    object only.  It never converts them into canonical aggregate buckets.
+    """
     data = path.read_bytes()
     header = _header_text(data, path)
     header_parts = header.split()
@@ -1382,6 +1435,18 @@ def extract_ov(
                 duration_s,
             )
 
+    validated_nonaggregate_event_count = sum(
+        int(vector.data_record["event_value_count"])
+        for vector in excluded_vectors
+    )
+    emitted_nonaggregate_event_count = 0
+    if include_all_values:
+        emitted_nonaggregate_event_count = _emit_excluded_nonaggregate_events(
+            data,
+            path,
+            excluded_vectors,
+        )
+
     parsed_probe: ProbeDefinition | None = None
     probe_warning: str | None = None
     resolved_scenario = scenario or _scenario_from_path(path)
@@ -1466,6 +1531,12 @@ def extract_ov(
             "validated_excluded_nonaggregate_vector_count": len(
                 excluded_vectors
             ),
+            "validated_nonaggregate_event_count": (
+                validated_nonaggregate_event_count
+            ),
+            "emitted_nonaggregate_event_count": (
+                emitted_nonaggregate_event_count
+            ),
             "decoded_bucket_count": sum(len(vector.buckets) for vector in vectors),
             "missing_bucket_count": sum(
                 bucket.value_status == "missing"
@@ -1489,6 +1560,7 @@ def extract_ov(
                 "statistic_identity": "high",
                 "aggregation": "high",
                 "numeric_values": "high",
+                "all_values_value_time_pairing": "high",
                 "bucket_width": "high",
                 "bucket_end_timestamps": "medium",
                 "missing_value_sentinel": "medium",
@@ -1504,9 +1576,14 @@ def extract_ov(
                 "Unknown tags, broken linked offsets, non-finite values, and "
                 "truncated metadata are rejected instead of guessed.",
                 "The documented latency result's nested All-values 0x81 "
-                "two-array records are structurally and temporally validated "
-                "but their event values are excluded from canonical aggregate "
-                "output.",
+                "two-array records are structurally and temporally validated. "
+                "Their interior event pairs are retained in rich JSON only "
+                "when explicitly requested and remain excluded from canonical "
+                "aggregate output.",
+                "All-values pairs are per-statistic write records, not packet "
+                "traces. Duplicate timestamps and record order are preserved, "
+                "but records from different statistics cannot be joined as "
+                "packets without an independent identifier.",
                 "Nested 0x224 records are not assumed to be All-values: this "
                 "classification also requires the exact aggregation string "
                 "and 0x81 record marker observed in the latency result.",
@@ -1579,6 +1656,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", type=Path, help="write rich JSON manifest")
     parser.add_argument("--csv", type=Path, help="write canonical aggregate CSV")
     parser.add_argument(
+        "--include-all-values",
+        action="store_true",
+        help=(
+            "retain validated nested 0x81 All-values event pairs in rich "
+            "JSON output; canonical aggregate CSV is unchanged"
+        ),
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="return status 3 after writing outputs when the input is partial",
@@ -1650,10 +1735,20 @@ def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
         _validate_output_collisions(arguments)
+        if (
+            arguments.include_all_values
+            and arguments.csv is not None
+            and arguments.json is None
+        ):
+            raise OvFormatError(
+                "--include-all-values requires --json when --csv is the "
+                "selected output"
+            )
         manifest = extract_ov(
             arguments.input,
             scenario=arguments.scenario,
             probe_definition=arguments.probe_definition,
+            include_all_values=arguments.include_all_values,
         )
         if arguments.json:
             arguments.json.write_text(
