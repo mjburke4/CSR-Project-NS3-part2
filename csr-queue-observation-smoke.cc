@@ -1140,6 +1140,18 @@ TestDirectHeldUntilIndependentWakePath ()
              feedback[0].success == "1" &&
              feedback[0].reason == "ack",
            "direct receiver did not record its ACK feedback decision");
+  RequireDetail (feedback[0],
+                 "nsdp_count_before",
+                 "0",
+                 "direct receiver feedback");
+  RequireDetail (feedback[0],
+                 "nsdp_count_after",
+                 "0",
+                 "direct receiver feedback");
+  RequireDetail (feedback[0],
+                 "nsdp_state_valid",
+                 "0",
+                 "direct receiver feedback");
   Require (sizes[0].eventIndex < enqueues[0].eventIndex &&
              enqueues[0].eventIndex < routeChanges[0].eventIndex &&
              routeChanges[0].eventIndex < sizes[1].eventIndex &&
@@ -1152,8 +1164,8 @@ TestDirectHeldUntilIndependentWakePath ()
              delays[1].eventIndex < wakeForwards[0].eventIndex &&
              forwards[0].eventIndex < deliveries[0].eventIndex,
            "direct NWK lifecycle is not in source/event order");
-  Require (deliveries[0].eventIndex < feedback[0].eventIndex,
-           "receiver feedback was recorded before NWK delivery");
+  Require (feedback[0].eventIndex < deliveries[0].eventIndex,
+           "local receiver did not record ACK admission before NWK delivery");
   Require (NearlyEqual (forwards[0].timeSeconds,
                         expectedResidence,
                         1e-12),

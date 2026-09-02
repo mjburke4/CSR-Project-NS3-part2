@@ -18,6 +18,7 @@ namespace
 
 constexpr CsrNodeId SOURCE = 0x010203;
 constexpr CsrNodeId DESTINATION = 0x040506;
+constexpr CsrNodeId RELAY_DESTINATION = 0x070809;
 constexpr uint16_t SECURITY_COUNT = 7;
 
 CsrLegacyCrypto::MissionKey g_missionKey {};
@@ -35,6 +36,7 @@ std::vector<std::vector<uint8_t>> g_livePayloads;
 std::vector<Time> g_ackWakeTimes;
 Ptr<Packet> g_capturedDack;
 uint32_t g_capturedDackPacketBits = 0;
+uint32_t g_liveDackRelayDeliveries = 0;
 
 void
 Require (bool condition, const char *message)
@@ -649,6 +651,23 @@ AlwaysDack (CsrNodeId, CsrNodeId)
   return true;
 }
 
+bool
+DackRelayRouteAvailable (CsrNodeId destination)
+{
+  return destination == RELAY_DESTINATION;
+}
+
+void
+NoteDackRelayDelivery (Ptr<Packet> payload, CsrNodeId source)
+{
+  CsrNetHeader networkHeader;
+  Require (source == SOURCE && payload->PeekHeader (networkHeader) &&
+             networkHeader.GetSrc () == SOURCE &&
+             networkHeader.GetDst () == RELAY_DESTINATION,
+           "DACK wrapper fixture did not exercise a true relay flow");
+  g_liveDackRelayDeliveries++;
+}
+
 void
 CaptureDack (Ptr<Packet> frame, double, double)
 {
@@ -691,11 +710,14 @@ CheckLiveOutboundDackWrapper ()
   dackHop->SetMac (&dackDevice->GetMac ());
   ConfigureHop (dackHop, DESTINATION, SOURCE);
   dackHop->SetShouldDackCallback (MakeCallback (&AlwaysDack));
+  dackHop->SetRelayRouteAvailableCallback (
+    MakeCallback (&DackRelayRouteAvailable));
+  dackHop->SetRxFromHopCallback (MakeCallback (&NoteDackRelayDelivery));
 
   CsrHopSecurityState dataSender;
   ConfigureState (dataSender, SOURCE, DESTINATION);
   Ptr<Packet> networkPayload = Create<Packet> (3);
-  CsrNetHeader networkHeader (SOURCE, DESTINATION, 5);
+  CsrNetHeader networkHeader (SOURCE, RELAY_DESTINATION, 5);
   networkPayload->AddHeader (networkHeader);
   std::vector<uint8_t> plaintext = CopyBytes (networkPayload);
   CsrProtectedPairwiseMessage securedData =
@@ -721,9 +743,11 @@ CheckLiveOutboundDackWrapper ()
 
   g_capturedDack = nullptr;
   g_capturedDackPacketBits = 0;
+  g_liveDackRelayDeliveries = 0;
   dackHop->ReceiveFromMac (dataFrame, 60.0, 40.0);
-  Require (dackDevice->GetMac ().GetAckQueuedFrameCount () == 1,
-           "live DACK producer did not enqueue one ACK-class frame");
+  Require (g_liveDackRelayDeliveries == 1 &&
+             dackDevice->GetMac ().GetAckQueuedFrameCount () == 1,
+           "true relay DATA did not enqueue one Pairwise16 DACK-class frame");
 
   Simulator::Stop (Seconds (4.0));
   Simulator::Run ();

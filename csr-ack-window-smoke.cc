@@ -24,6 +24,18 @@ Ptr<CsrNetDevice> g_localDeliveryDevice;
 uint32_t g_ackQueueAtLocalDelivery = 0;
 uint32_t g_localDackPolicyCalls = 0;
 
+struct CompletionOrderSnapshot
+{
+  uint32_t pendingData {0};
+  uint32_t neighborOutstanding {0};
+  uint32_t resendQueue {0};
+  uint32_t macDataQueue {0};
+};
+
+Ptr<CsrHopLayer> g_completionOrderHop;
+Ptr<CsrNetDevice> g_completionOrderDevice;
+std::vector<CompletionOrderSnapshot> g_completionOrderSnapshots;
+
 Ptr<Packet>
 ProtectFeedback (CsrHeader header)
 {
@@ -61,6 +73,25 @@ Require (bool condition, const char* message)
       std::cerr << "FAIL: " << message << std::endl;
       std::exit (1);
     }
+}
+
+void
+ObserveCompletionNsdpRelease (CsrNodeId source, CsrNodeId destination)
+{
+  Require (g_completionOrderHop != nullptr &&
+             g_completionOrderDevice != nullptr,
+           "completion-order callback has no active fixture");
+  Require (source == 1 && destination == 2,
+           "completion-order callback observed the wrong NWK flow");
+
+  CompletionOrderSnapshot snapshot;
+  snapshot.pendingData = g_completionOrderHop->GetPendingDataCount ();
+  snapshot.neighborOutstanding =
+    g_completionOrderHop->GetOutstandingDataCount (2);
+  snapshot.resendQueue = g_completionOrderHop->GetResendQueueSize ();
+  snapshot.macDataQueue =
+    g_completionOrderDevice->GetMac ().GetDataQueuedFrameCount ();
+  g_completionOrderSnapshots.push_back (snapshot);
 }
 
 Ptr<Packet>
@@ -382,6 +413,79 @@ CheckWakeCount (uint32_t expected, Time expectedLastWake)
     }
 }
 
+void
+CheckSenderCompletionOrder (bool cumulative)
+{
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  hop->SetNodeId (1);
+  hop->SetMac (&device->GetMac ());
+  hop->SetNsdpDecrementCallback (
+    MakeCallback (&ObserveCompletionNsdpRelease));
+  hop->SetNwkQueueWakeCallback (MakeCallback (&WakeNwkQueue));
+
+  const uint32_t transactionCount = cumulative ? 2 : 1;
+  for (uint32_t index = 0; index < transactionCount; ++index)
+    {
+      Ptr<Packet> payload = Create<Packet> (8);
+      payload->AddHeader (CsrNetHeader (1, 2, 5));
+      hop->SendData (2, 5, payload, true);
+    }
+
+  Require (hop->GetPendingDataCount () == transactionCount &&
+             hop->GetOutstandingDataCount (2) == transactionCount &&
+             hop->GetResendQueueSize () == transactionCount &&
+             device->GetMac ().GetDataQueuedFrameCount () == transactionCount,
+           "completion-order fixture did not retain every DATA transaction");
+
+  g_completionOrderHop = hop;
+  g_completionOrderDevice = device;
+  g_completionOrderSnapshots.clear ();
+  g_nwkWakeTimes.clear ();
+
+  hop->ReceiveFromMac (
+    cumulative ? MakeAck (2, 0x3ULL, 0)
+               : MakeExactFeedback (1, false),
+    90.0,
+    10.0);
+
+  Require (g_completionOrderSnapshots.size () == transactionCount,
+           "positive ACK did not release each NWK flow exactly once");
+  for (uint32_t index = 0; index < transactionCount; ++index)
+    {
+      const CompletionOrderSnapshot &snapshot =
+        g_completionOrderSnapshots[index];
+      const uint32_t remaining = transactionCount - index - 1;
+
+      Require (snapshot.pendingData == remaining &&
+                 snapshot.neighborOutstanding == remaining,
+               "NSDP release ran before HOP flow capacity was released");
+      Require (snapshot.resendQueue == remaining + 1,
+               "resend custody was erased before NSDP release");
+      Require (snapshot.macDataQueue == transactionCount,
+               "MAC queued-copy cancellation ran before HOP completion");
+    }
+
+  Require (hop->GetPendingDataCount () == 0 &&
+             hop->GetOutstandingDataCount (2) == 0 &&
+             hop->GetResendQueueSize () == 0 &&
+             device->GetMac ().GetDataQueuedFrameCount () == 0,
+           "positive ACK did not finish HOP custody before returning");
+  Require (g_nwkWakeTimes.empty (),
+           "positive ACK woke NWK synchronously");
+
+  const Time tic = CsrOpnetTic ();
+  Simulator::Stop (tic + NanoSeconds (1));
+  Simulator::Run ();
+  Require (g_nwkWakeTimes.size () == 1 && g_nwkWakeTimes[0] == tic,
+           "positive ACK did not preserve its one-TIC NWK wake");
+
+  g_nwkWakeTimes.clear ();
+  g_completionOrderHop = nullptr;
+  g_completionOrderDevice = nullptr;
+  Simulator::Destroy ();
+}
+
 } // namespace
 
 int
@@ -416,6 +520,8 @@ main ()
   CheckReceiverWindowProduction (true);
   CheckLocalDeliveryQueuesFeedbackFirst ();
   CheckAckWinsOverlap ();
+  CheckSenderCompletionOrder (false);
+  CheckSenderCompletionOrder (true);
 
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
   Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();

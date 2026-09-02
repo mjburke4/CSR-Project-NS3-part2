@@ -2589,9 +2589,30 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
         }
       else
         {
-          m_mac->CancelAcknowledgedFrames (
-            hdr.GetSrc (), hdr.GetSeq (), 1, 0);
+          ResendEntry *ackEntry =
+            FindResendEntry (hdr.GetSrc (), hdr.GetSeq ());
+          const bool dataCompletion =
+            ackEntry != nullptr && ackEntry->flowControlTracked;
+
+          // Keep this branch bounded to ordinary DATA.  Reliable-control
+          // callbacks already observe MAC cancellation first in the
+          // synchronous model; changing them would be unrelated collateral.
+          if (!dataCompletion)
+            {
+              m_mac->CancelAcknowledgedFrames (
+                hdr.GetSrc (), hdr.GetSeq (), 1, 0);
+            }
+
           HandleAckFrame (hdr);
+
+          // The legacy Ack_Inst is posted before HOP completion but handled by
+          // br_mac only after br_hop yields.  For DATA, apply the synchronous
+          // equivalent after HOP flow/NSDP release and resend removal.
+          if (dataCompletion)
+            {
+              m_mac->CancelAcknowledgedFrames (
+                hdr.GetSrc (), hdr.GetSeq (), 1, 0);
+            }
         }
 
       // Legacy br_hop schedules this remote interrupt after every readable,
@@ -3142,6 +3163,13 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     return;
   }
 
+  CsrNetHeader networkHeader;
+  const bool networkMetadataValid =
+    payload->GetSize () >= networkHeader.GetSerializedSize () &&
+    payload->PeekHeader (networkHeader);
+  const bool localNetworkDelivery =
+    networkMetadataValid && networkHeader.GetDst () == m_nodeId;
+
   const bool traceFeedback =
     IsDifferentialAdmissionTraceEnabled () ||
     IsDifferentialTraceAggregateOnly ();
@@ -3156,6 +3184,7 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
   const bool feedbackNsdpStateValid =
     traceFeedback &&
     feedbackNetworkMetadataValid &&
+    !localNetworkDelivery &&
     !m_nsdpObservationCb.IsNull ();
   const uint32_t feedbackNsdpBefore = feedbackNsdpStateValid
     ? m_nsdpObservationCb (feedbackNetworkHeader.GetSrc (),
@@ -3207,15 +3236,14 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
   if (firstReception &&
       !m_relayRouteAvailableCb.IsNull ())
     {
-      CsrNetHeader nwkHeader;
-      if (payload->PeekHeader (nwkHeader) &&
-          nwkHeader.GetDst () != m_nodeId &&
-          !m_relayRouteAvailableCb (nwkHeader.GetDst ()))
+      if (networkMetadataValid &&
+          !localNetworkDelivery &&
+          !m_relayRouteAvailableCb (networkHeader.GetDst ()))
         {
           std::cout << "[HOP " << m_nodeId
                     << "] Drop first relay DATA without onward route"
-                    << " nwkSrc=" << nwkHeader.GetSrc ()
-                    << " nwkDst=" << nwkHeader.GetDst ()
+                    << " nwkSrc=" << networkHeader.GetSrc ()
+                    << " nwkDst=" << networkHeader.GetDst ()
                     << " hopSrc=" << src
                     << " seq=" << hdr.GetSeq ()
                     << " ACK suppressed"
@@ -3224,11 +3252,6 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
           return;
         }
     }
-
-  CsrNetHeader networkHeader;
-  const bool localNetworkDelivery =
-    payload->PeekHeader (networkHeader) &&
-    networkHeader.GetDst () == m_nodeId;
 
   // proc_mac_pk() looks up the NSDP entry before sending a relay packet to NWK.
   // The later NWK stream interrupt increments relay NSDP, so ACK/DACK uses
@@ -3262,10 +3285,42 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
       }
   };
 
+  Ptr<Packet> ackPkt;
+  if (ackable)
+    {
+      // The relay branch posts NWK delivery first, but br_hop still completes
+      // its DACK bookkeeping and protected feedback construction before either
+      // posted downstream event can execute.  Build the frame before invoking
+      // the synchronous NWK callback, then preserve the posted admission order
+      // below.
+      if (sendDack)
+        {
+          MarkDataDack (src, hdr.GetSeq ());
+        }
+
+      const RxSeqState &rxState = m_rxDataStateBySrc[src];
+
+      CsrHeader ackHdr (m_nodeId,
+                        src,
+                        static_cast<uint16_t> (rxState.highest),
+                        /*dscp*/ 7,
+                        /*ackable*/ false,
+                        /*isAck*/ true);
+      ackHdr.SetIsDack (sendDack);
+      // OPNET-parity metadata
+      ackHdr.SetType (sendDack ? CSR_PKT_DACK : CSR_PKT_ACK);
+      ackHdr.SetDestType (CSR_DEST_UNICAST);
+      ackHdr.SetHasAckWindow (true);
+      ackHdr.SetAckBitmap (rxState.ackBitmap);
+      ackHdr.SetDackBitmap (rxState.dackBitmap);
+
+      ackPkt = ProtectAckFrame (ackHdr);
+    }
+
   // The operational br_hop local-delivery path calls send_ack() before its
   // HOP_TO_NWK stream send.  Its relay path intentionally does the reverse:
-  // enqueue to NWK first, then choose ACK/DACK from the pre-enqueue NSDP
-  // snapshot.  Preserve both source orderings instead of applying one order
+  // it posts NWK delivery before the already-constructed ACK/DACK is admitted
+  // to MAC.  Preserve both downstream orderings instead of applying one order
   // to every locally addressed HOP frame.
   if (!localNetworkDelivery)
     {
@@ -3273,41 +3328,29 @@ CsrHopLayer::HandleDataFrame (const CsrHeader &hdr,
     }
 
   if (ackable)
-  {
-    if (sendDack)
-      {
-        MarkDataDack (src, hdr.GetSeq ());
-      }
+    {
+      m_mac->EnqueueTxFrame (ackPkt, src, /*dscp*/ 7, /*ackable*/ false);
 
-    const RxSeqState &rxState = m_rxDataStateBySrc[src];
-
-    CsrHeader ackHdr (m_nodeId,
-                      src,
-                      static_cast<uint16_t> (rxState.highest),
-                      /*dscp*/ 7,
-                      /*ackable*/ false,
-                      /*isAck*/ true);
-    ackHdr.SetIsDack (sendDack);
-    // OPNET-parity metadata
-    ackHdr.SetType (sendDack ? CSR_PKT_DACK : CSR_PKT_ACK);
-    ackHdr.SetDestType (CSR_DEST_UNICAST);
-    ackHdr.SetHasAckWindow (true);
-    ackHdr.SetAckBitmap (rxState.ackBitmap);
-    ackHdr.SetDackBitmap (rxState.dackBitmap);
-
-    Ptr<Packet> ackPkt = ProtectAckFrame (ackHdr);
-    m_mac->EnqueueTxFrame (ackPkt, src, /*dscp*/ 7, /*ackable*/ false);
-  }
+      // The local-delivery branch posts HOP_TO_MAC before HOP_TO_NWK in the
+      // recovered process.  Record the feedback at the same boundary as its
+      // MAC admission, before the synchronous NWK callback below.  Relay
+      // feedback is recorded later because that source branch posts
+      // HOP_TO_NWK first.
+      if (localNetworkDelivery)
+        {
+          writeFeedback (sendDack ? "dack" : "ack", true);
+        }
+    }
 
   if (localNetworkDelivery)
     {
       deliverToNwk ();
     }
 
-  if (ackable)
-  {
-    writeFeedback (sendDack ? "dack" : "ack", true);
-  }
+  if (ackable && !localNetworkDelivery)
+    {
+      writeFeedback (sendDack ? "dack" : "ack", true);
+    }
 }
 
 void
@@ -3322,9 +3365,6 @@ CsrHopLayer::HandleAckWindow (const CsrHeader &hdr)
   // outstanding entry.
   uint64_t ackBitmap = hdr.GetAckBitmap ();
   uint64_t dackBitmap = hdr.GetDackBitmap () & ~ackBitmap;
-
-  m_mac->CancelAcknowledgedFrames (
-    src, baseSeq, ackBitmap, dackBitmap);
 
   for (uint32_t bit = 0; bit < 64; ++bit)
     {
@@ -3353,6 +3393,13 @@ CsrHopLayer::HandleAckWindow (const CsrHeader &hdr)
           HandleAckFrame (completed);
         }
     }
+
+  // br_hop posts one br_Mac_Hop_Inst before scanning the cumulative maps, but
+  // br_mac cannot handle that stream event until the current HOP event yields.
+  // Complete every HOP/NSDP/resend mutation first, then apply the equivalent
+  // queued-copy cancellation at MAC.
+  m_mac->CancelAcknowledgedFrames (
+    src, baseSeq, ackBitmap, dackBitmap);
 }
 
 void
@@ -3496,12 +3543,6 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
         }
     }
 
-	  // Inform Net layer only when the single resend transaction is complete.
-  if (allTargetsAcked)
-    {
-      NotifyNsdpFromEntry (*entry);
-    }
-
   if (entry->flowControlTracked && allTargetsAcked)
     {
       FlowCtrlEntry &fc =
@@ -3561,6 +3602,15 @@ CsrHopLayer::HandleAckFrame (const CsrHeader &hdr)
         {
           fc.consecutiveCleanAcks = 0;
         }
+    }
+
+  // The source releases HOP capacity before decrementing the shared NWK
+  // source/destination-pair count.  Keep the resend entry alive through that
+  // callback; it is removed below before the separately handled MAC
+  // cancellation instruction.
+  if (allTargetsAcked)
+    {
+      NotifyNsdpFromEntry (*entry);
     }
 
   if (neighborCheckCompleted && allTargetsAcked)
