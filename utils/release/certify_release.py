@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import Counter, defaultdict
+import ctypes
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -139,6 +140,10 @@ SUPPORTED_PACKET_PATH_SCHEMAS = {
 PACKET_PATH_V2_MATCHING_CONTRACT = (
     "exact directed-HOP identity plus queue-delay-constrained unique bipartite "
     "queue-copy matching; never FIFO"
+)
+PACKET_PATH_V2_UNDELIVERED_PATH_CONTRACT = (
+    "path contains only observed NWK nodes; hop_lineage may contain one "
+    "terminal admitted but unreceived HOP edge"
 )
 PACKET_PATH_V2_QUEUE_DELAY_STATISTIC = "NWK.Network Queuing Delay (sec)"
 PACKET_PATH_V2_QUEUE_DELAY_ADJACENCY = (
@@ -268,6 +273,7 @@ OPNET_SCOPE_EXEMPTIONS: dict[str, dict[str, str]] = {
 }
 PacketKey = tuple[str, str, str]
 LineageIdentity = tuple[str, str, str, str, str, str]
+ALLOWED_SEALED_HIDDEN_PATHS = {"manifests/.lock-ns3_linux_build"}
 
 
 class CertificationError(RuntimeError):
@@ -289,6 +295,31 @@ def sha256(path: Path) -> str:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise CertificationError(message)
+
+
+def hop_lineage_path_relation(
+    path: list[int], hop_lineage: list[dict[str, Any]], delivered: bool
+) -> str | None:
+    """Classify an exact observed path or one terminal unreceived HOP attempt."""
+
+    observed_edges = len(path) - 1
+    if len(hop_lineage) < observed_edges:
+        return None
+    prefix_matches = all(
+        hop_lineage[index]["from"] == path[index]
+        and hop_lineage[index]["to"] == path[index + 1]
+        for index in range(observed_edges)
+    )
+    if not prefix_matches:
+        return None
+    if len(hop_lineage) == observed_edges:
+        return "exact_observed_path"
+    if delivered or len(hop_lineage) != observed_edges + 1:
+        return None
+    terminal = hop_lineage[-1]
+    if terminal["from"] != path[-1] or terminal["to"] in path:
+        return None
+    return "terminal_admitted_unreceived"
 
 
 def json_load(path: Path) -> dict[str, Any]:
@@ -346,11 +377,65 @@ def is_within(path: Path, directory: Path) -> bool:
         return False
 
 
+def validate_ns3_lock_binding(
+    record: Any, output: Path
+) -> tuple[Path, Path]:
+    """Verify the parsed ns-3 build lock and its frozen byte-exact copy."""
+
+    require(
+        isinstance(record, dict)
+        and set(record)
+        == {"source_path", "frozen_artifact", "sha256", "size_bytes"},
+        "ns-3 build-lock binding record is malformed",
+    )
+    source_path = record.get("source_path")
+    frozen_artifact = record.get("frozen_artifact")
+    digest = record.get("sha256")
+    size_bytes = record.get("size_bytes")
+    require(
+        isinstance(source_path, str)
+        and Path(source_path).is_absolute()
+        and isinstance(frozen_artifact, str)
+        and frozen_artifact == "manifests/.lock-ns3_linux_build"
+        and isinstance(digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+        and isinstance(size_bytes, int)
+        and not isinstance(size_bytes, bool)
+        and size_bytes >= 0,
+        "ns-3 build-lock binding fields are malformed",
+    )
+    source = Path(source_path)
+    frozen = output / frozen_artifact
+    require(
+        source.is_file()
+        and not source.is_symlink()
+        and source.stat().st_nlink == 1
+        and frozen.is_file()
+        and not frozen.is_symlink()
+        and frozen.stat().st_nlink == 1
+        and not is_within(source, output)
+        and is_within(frozen, output)
+        and source.resolve() != frozen.resolve()
+        and not os.path.samefile(source, frozen)
+        and source.stat().st_size == size_bytes
+        and frozen.stat().st_size == size_bytes
+        and sha256(source) == digest
+        and sha256(frozen) == digest,
+        "ns-3 build lock or frozen binding changed",
+    )
+    return source, frozen
+
+
 def enumerate_sealed_evidence(
     output: Path, roots: Sequence[Path]
 ) -> list[Path]:
     """Return the complete regular-file set covered by the checksum list."""
 
+    required_lock = output / "manifests" / ".lock-ns3_linux_build"
+    require(
+        required_lock.is_file() and not required_lock.is_symlink(),
+        f"required frozen ns-3 build lock is absent or invalid: {required_lock}",
+    )
     included: list[Path] = []
     for root in roots:
         require(
@@ -365,35 +450,209 @@ def enumerate_sealed_evidence(
                 and (path.is_dir() or path.is_file()),
                 f"frozen evidence contains a symlink or non-regular entry: {path}",
             )
+            relative_path = path.relative_to(output)
+            if any(part.startswith(".") for part in relative_path.parts):
+                require(
+                    relative_path.as_posix() in ALLOWED_SEALED_HIDDEN_PATHS
+                    and path.is_file(),
+                    f"frozen evidence contains an unexpected hidden entry: {path}",
+                )
             if path.is_file():
+                require(
+                    path.stat().st_nlink == 1,
+                    f"frozen evidence file has an unsafe hard-link count: {path}",
+                )
                 included.append(path)
     release_manifest = output / "release-manifest.json"
     require(
-        release_manifest.is_file() and not release_manifest.is_symlink(),
-        "frozen release manifest is absent or symlinked",
+        release_manifest.is_file()
+        and not release_manifest.is_symlink()
+        and release_manifest.stat().st_nlink == 1,
+        "frozen release manifest is absent, linked, or invalid",
     )
     included.append(release_manifest)
     return sorted(set(included), key=lambda path: relative(path, output))
 
 
 def validate_sealed_evidence_snapshot(
-    output: Path, roots: Sequence[Path], sealed_hashes: dict[Path, str]
+    output: Path,
+    roots: Sequence[Path],
+    sealed_hashes: dict[Path, str],
+    *,
+    additional_files: Sequence[Path] = (),
 ) -> None:
     """Fail if the post-enumeration file set or any sealed content changed."""
 
-    current = enumerate_sealed_evidence(output, roots)
-    require(
-        set(current) == set(sealed_hashes),
-        "frozen evidence file set changed during final checksum sealing",
+    def enumerate_snapshot() -> list[Path]:
+        expected_root_entries = set(roots) | {
+            output / "release-manifest.json",
+            *additional_files,
+        }
+        require(
+            set(output.iterdir()) == expected_root_entries
+            and all(not path.is_symlink() for path in expected_root_entries),
+            "frozen output root changed during checksum sealing",
+        )
+        current = enumerate_sealed_evidence(output, roots)
+        for path in additional_files:
+            require(
+                is_within(path, output)
+                and path.parent == output
+                and path.is_file()
+                and not path.is_symlink()
+                and path.stat().st_nlink == 1,
+                f"final checksum artifact is absent, invalid, or misplaced: {path}",
+            )
+            current.append(path)
+        return sorted(set(current), key=lambda path: relative(path, output))
+
+    def validate_snapshot() -> None:
+        current = enumerate_snapshot()
+        require(
+            set(current) == set(sealed_hashes),
+            "frozen evidence file set changed during final checksum sealing",
+        )
+        require(
+            all(sha256(path) == sealed_hashes[path] for path in current),
+            "frozen evidence content changed during final checksum sealing",
+        )
+
+    validate_snapshot()
+    validate_snapshot()
+
+
+class EvidenceMutationMonitor:
+    """Reject Linux inotify-reported changes during final seal validation."""
+
+    _BASE_MASK = (
+        0x00000002  # IN_MODIFY
+        | 0x00000004  # IN_ATTRIB
+        | 0x00000008  # IN_CLOSE_WRITE
+        | 0x00000400  # IN_DELETE_SELF
+        | 0x00000800  # IN_MOVE_SELF
+        | 0x00002000  # IN_UNMOUNT
+        | 0x00004000  # IN_Q_OVERFLOW
+        | 0x00008000  # IN_IGNORED
+        | 0x02000000  # IN_DONT_FOLLOW
     )
-    require(
-        all(sha256(path) == sealed_hashes[path] for path in current),
-        "frozen evidence content changed during final checksum sealing",
+    _DIRECTORY_MASK = (
+        _BASE_MASK
+        | 0x00000040  # IN_MOVED_FROM
+        | 0x00000080  # IN_MOVED_TO
+        | 0x00000100  # IN_CREATE
+        | 0x00000200  # IN_DELETE
+        | 0x01000000  # IN_ONLYDIR
     )
-    require(
-        set(enumerate_sealed_evidence(output, roots)) == set(sealed_hashes),
-        "frozen evidence file set changed during final checksum sealing",
-    )
+    _FILE_MASK = _BASE_MASK
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.fd = -1
+        self._libc: Any = None
+
+    def __enter__(self) -> EvidenceMutationMonitor:
+        require(
+            platform.system() == "Linux",
+            "final evidence mutation monitor requires Linux inotify",
+        )
+        self._libc = ctypes.CDLL(None, use_errno=True)
+        init = self._libc.inotify_init1
+        init.argtypes = [ctypes.c_int]
+        init.restype = ctypes.c_int
+        add_watch = self._libc.inotify_add_watch
+        add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        add_watch.restype = ctypes.c_int
+        self.fd = init(os.O_NONBLOCK | os.O_CLOEXEC)
+        require(
+            self.fd >= 0,
+            f"cannot initialize final evidence mutation monitor: errno={ctypes.get_errno()}",
+        )
+        try:
+            pending = [self.root]
+            watched: set[Path] = set()
+            while pending:
+                directory = pending.pop()
+                require(
+                    directory.is_dir() and not directory.is_symlink(),
+                    f"cannot monitor invalid evidence directory: {directory}",
+                )
+                resolved = directory.resolve()
+                if resolved in watched:
+                    continue
+                descriptor = add_watch(
+                    self.fd, os.fsencode(directory), self._DIRECTORY_MASK
+                )
+                require(
+                    descriptor >= 0,
+                    f"cannot watch evidence directory {directory}: errno={ctypes.get_errno()}",
+                )
+                watched.add(resolved)
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        require(
+                            not entry.is_symlink(),
+                            f"cannot monitor symlinked evidence entry: {entry.path}",
+                        )
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        else:
+                            require(
+                                entry.is_file(follow_symlinks=False),
+                                f"cannot monitor non-regular evidence entry: {entry.path}",
+                            )
+                            descriptor = add_watch(
+                                self.fd,
+                                os.fsencode(entry.path),
+                                self._FILE_MASK,
+                            )
+                            require(
+                                descriptor >= 0,
+                                f"cannot watch evidence file {entry.path}: errno={ctypes.get_errno()}",
+                            )
+            self.require_quiet()
+            return self
+        except Exception:
+            os.close(self.fd)
+            self.fd = -1
+            raise
+
+    def require_quiet(self) -> None:
+        require(self.fd >= 0, "final evidence mutation monitor is not active")
+        try:
+            changed = os.read(self.fd, 1024 * 1024)
+        except BlockingIOError:
+            changed = b""
+        require(
+            not changed,
+            "frozen evidence mutated during the final monitored sealing interval",
+        )
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        try:
+            if exc_type is None:
+                self.require_quiet()
+        finally:
+            if self.fd >= 0:
+                os.close(self.fd)
+                self.fd = -1
+
+
+def validate_quiescent_sealed_evidence_snapshot(
+    output: Path,
+    roots: Sequence[Path],
+    sealed_hashes: dict[Path, str],
+    *,
+    additional_files: Sequence[Path] = (),
+) -> None:
+    """Validate a checksum snapshot with inotify mutation defense-in-depth."""
+
+    with EvidenceMutationMonitor(output):
+        validate_sealed_evidence_snapshot(
+            output,
+            roots,
+            sealed_hashes,
+            additional_files=additional_files,
+        )
 
 
 def safe_remote(value: str) -> dict[str, str]:
@@ -1866,7 +2125,17 @@ class Certification:
         locks = list(self.ns3_stage.glob(".lock-ns3_*_build"))
         require(len(locks) == 1, f"expected one ns-3 build lock, found {len(locks)}")
         lock = locks[0]
+        require(
+            lock.is_file() and not lock.is_symlink(),
+            f"ns-3 build lock is not a regular file: {lock}",
+        )
+        lock_digest = sha256(lock)
+        lock_size = lock.stat().st_size
         runnable = self.parse_runnable_programs(lock)
+        require(
+            lock.stat().st_size == lock_size and sha256(lock) == lock_digest,
+            "ns-3 build lock changed while it was parsed",
+        )
         for target in targets:
             matches = [Path(path) for path in runnable if Path(path).name.endswith(f"-{target}-debug")]
             require(len(matches) == 1, f"cannot resolve exactly one binary for {target}: {matches}")
@@ -1897,14 +2166,32 @@ class Certification:
                 "frozen_artifact": relative(frozen, self.output),
                 "source_sha256": sha256(self.rc_stage / f"{target}.cc"),
             }
+        frozen_lock = self.manifests / lock.name
+        shutil.copy2(lock, frozen_lock)
+        require(
+            lock.is_file()
+            and not lock.is_symlink()
+            and lock.stat().st_size == lock_size
+            and sha256(lock) == lock_digest
+            and frozen_lock.is_file()
+            and not frozen_lock.is_symlink()
+            and frozen_lock.stat().st_size == lock_size
+            and sha256(frozen_lock) == lock_digest,
+            "ns-3 build lock changed during frozen-copy capture",
+        )
         self.release["executables"] = executable_records
         self.release["build"] = {
             "cmake_cache": relative(self.manifests / "CMakeCache.txt", self.output),
-            "ns3_lock": relative(self.manifests / lock.name, self.output),
+            "ns3_lock": {
+                "source_path": str(lock.resolve()),
+                "frozen_artifact": relative(frozen_lock, self.output),
+                "sha256": lock_digest,
+                "size_bytes": lock_size,
+            },
             "binary_count": len(executable_records),
         }
         shutil.copy2(cache, self.manifests / "CMakeCache.txt")
-        shutil.copy2(lock, self.manifests / lock.name)
+        validate_ns3_lock_binding(self.release["build"]["ns3_lock"], self.output)
         self.capture_linkage()
 
     def validate_source_bindings(self) -> None:
@@ -3031,6 +3318,7 @@ class Certification:
             "node",
             "peer",
             "next_hop",
+            "success",
             "detail",
         }
         deliveries: Counter[PacketKey] = Counter()
@@ -3039,6 +3327,17 @@ class Certification:
         seen_proof_indexes: set[int] = set()
         dack_feedback_counts: Counter[LineageIdentity] = Counter()
         hop_admission_counts: Counter[LineageIdentity] = Counter()
+        hop_admission_event_indexes: defaultdict[
+            LineageIdentity, list[int]
+        ] = defaultdict(list)
+        hop_first_reception_counts: Counter[LineageIdentity] = Counter()
+        hop_first_reception_event_indexes: defaultdict[
+            LineageIdentity, list[int]
+        ] = defaultdict(list)
+        hop_feedback_counts: Counter[LineageIdentity] = Counter()
+        hop_completion_outcomes: defaultdict[
+            LineageIdentity, list[tuple[int, str, str]]
+        ] = defaultdict(list)
         feedback_reasons: defaultdict[LineageIdentity, list[str]] = defaultdict(list)
         event_counts: Counter[str] = Counter()
         previous_index = -1
@@ -3109,6 +3408,69 @@ class Certification:
                         hop_sequence,
                     )
                     hop_admission_counts[identity] += 1
+                    hop_admission_event_indexes[identity].append(event_index)
+                if event == "hop_feedback" and key in lineage_keys:
+                    detail = cls.parse_trace_detail(
+                        row["detail"].strip(), row_number
+                    )
+                    first_reception = detail.get("first_reception")
+                    require(
+                        first_reception in {"0", "1"},
+                        f"trace row {row_number} has malformed first-reception evidence",
+                    )
+                    node = row["node"].strip()
+                    peer = row["peer"].strip()
+                    hop_sequence = detail.get("hop_sequence", "")
+                    require(
+                        row["reason"].strip() in {"ack", "dack"}
+                        and node.isdigit()
+                        and peer.isdigit()
+                        and hop_sequence.isdigit(),
+                        f"trace row {row_number} has malformed tagged HOP reception evidence",
+                    )
+                    directed_identity: LineageIdentity = (
+                        key[0],
+                        key[1],
+                        key[2],
+                        peer,
+                        node,
+                        hop_sequence,
+                    )
+                    hop_feedback_counts[directed_identity] += 1
+                    if first_reception == "1":
+                        hop_first_reception_counts[directed_identity] += 1
+                        hop_first_reception_event_indexes[
+                            directed_identity
+                        ].append(event_index)
+                if event == "hop_completion" and key in lineage_keys:
+                    detail = cls.parse_trace_detail(
+                        row["detail"].strip(), row_number
+                    )
+                    node = row["node"].strip()
+                    peer = row["peer"].strip()
+                    hop_sequence = detail.get("hop_sequence", "")
+                    success = row["success"].strip()
+                    reason = row["reason"].strip()
+                    require(
+                        node.isdigit()
+                        and peer.isdigit()
+                        and row["next_hop"].strip() == peer
+                        and hop_sequence.isdigit()
+                        and success in {"0", "1"}
+                        and bool(reason),
+                        f"trace row {row_number} has malformed tagged HOP completion evidence",
+                    )
+                    completion_identity: LineageIdentity = (
+                        key[0],
+                        key[1],
+                        key[2],
+                        node,
+                        peer,
+                        hop_sequence,
+                    )
+                    hop_completion_outcomes[completion_identity].append(
+                        (event_index, success, reason)
+                    )
                 if key in lineage_keys:
                     latest[key] = {
                         "event_index": event_index,
@@ -3175,6 +3537,13 @@ class Certification:
             "latest": latest,
             "dack_feedback_counts": dack_feedback_counts,
             "hop_admission_counts": hop_admission_counts,
+            "hop_admission_event_indexes": hop_admission_event_indexes,
+            "hop_first_reception_counts": hop_first_reception_counts,
+            "hop_first_reception_event_indexes": (
+                hop_first_reception_event_indexes
+            ),
+            "hop_feedback_counts": hop_feedback_counts,
+            "hop_completion_outcomes": hop_completion_outcomes,
             "feedback_reasons": feedback_reasons,
             "event_counts": event_counts,
             "row_count": row_count,
@@ -3210,9 +3579,26 @@ class Certification:
         rows_by_key: defaultdict[PacketKey, list[dict[str, Any]]] = defaultdict(list)
         csv_deliveries: Counter[PacketKey] = Counter()
         csv_issue_counts: Counter[str] = Counter()
+        terminal_unreceived_attempts: list[dict[str, Any]] = []
+        consumed_terminal_unreceived_identities: set[LineageIdentity] = set()
         observed_hop_admissions: Counter[LineageIdentity] = observations[
             "hop_admission_counts"
         ]
+        observed_hop_admission_indexes: defaultdict[
+            LineageIdentity, list[int]
+        ] = observations["hop_admission_event_indexes"]
+        observed_hop_first_receptions: Counter[LineageIdentity] = observations[
+            "hop_first_reception_counts"
+        ]
+        observed_hop_first_reception_indexes: defaultdict[
+            LineageIdentity, list[int]
+        ] = observations["hop_first_reception_event_indexes"]
+        observed_hop_feedback: Counter[LineageIdentity] = observations[
+            "hop_feedback_counts"
+        ]
+        observed_hop_completions: defaultdict[
+            LineageIdentity, list[tuple[int, str, str]]
+        ] = observations["hop_completion_outcomes"]
         require(
             all(count == 1 for count in observed_hop_admissions.values()),
             "trace repeats a directed-HOP admission identity",
@@ -3358,15 +3744,87 @@ class Certification:
                     f"packet-path row {row_number} contains HOP lineage absent from the trace",
                 )
                 if hop_lineage:
+                    relation = hop_lineage_path_relation(
+                        path, hop_lineage, delivered
+                    )
                     require(
-                        len(hop_lineage) == len(path) - 1
-                        and all(
-                            leg["from"] == path[index]
-                            and leg["to"] == path[index + 1]
-                            for index, leg in enumerate(hop_lineage)
-                        ),
+                        relation is not None,
                         f"packet-path row {row_number} HOP lineage does not reproduce its path",
                     )
+                    for observed_identity in parsed_legs[: len(path) - 1]:
+                        admission_indexes = observed_hop_admission_indexes.get(
+                            observed_identity, []
+                        )
+                        reception_indexes = (
+                            observed_hop_first_reception_indexes.get(
+                                observed_identity, []
+                            )
+                        )
+                        require(
+                            len(admission_indexes) == 1
+                            and bool(reception_indexes)
+                            and all(
+                                index > admission_indexes[0]
+                                for index in reception_indexes
+                            ),
+                            f"packet-path row {row_number} observed path edge lacks post-admission first-reception evidence",
+                        )
+                    if relation == "terminal_admitted_unreceived":
+                        terminal_identity = parsed_legs[-1]
+                        terminal_admission_indexes = (
+                            observed_hop_admission_indexes.get(
+                                terminal_identity, []
+                            )
+                        )
+                        terminal_completions = observed_hop_completions.get(
+                            terminal_identity, []
+                        )
+                        require(
+                            observed_hop_feedback.get(terminal_identity, 0)
+                            == 0
+                            and observed_hop_first_receptions.get(
+                                terminal_identity, 0
+                            )
+                            == 0,
+                            f"packet-path row {row_number} terminal HOP attempt has receiver feedback",
+                        )
+                        require(
+                            terminal_identity
+                            not in consumed_terminal_unreceived_identities,
+                            f"packet-path row {row_number} reuses one terminal HOP attempt across lifecycles",
+                        )
+                        consumed_terminal_unreceived_identities.add(
+                            terminal_identity
+                        )
+                        require(
+                            len(terminal_admission_indexes) == 1
+                            and len(terminal_completions) == 1
+                            and terminal_completions[0][1:]
+                            == ("0", "no_ack")
+                            and terminal_completions[0][0]
+                            > terminal_admission_indexes[0],
+                            f"packet-path row {row_number} terminal HOP attempt lacks one exact post-admission no_ack completion",
+                        )
+                        terminal = hop_lineage[-1]
+                        terminal_unreceived_attempts.append(
+                            {
+                                "src": int(key[0]),
+                                "dst": int(key[1]),
+                                "sequence": int(key[2]),
+                                "copy_index": copy_index,
+                                "from": terminal["from"],
+                                "to": terminal["to"],
+                                "hop_sequence": terminal["hop_sequence"],
+                                "admission_event_index": (
+                                    terminal_admission_indexes[0]
+                                ),
+                                "completion_event_index": (
+                                    terminal_completions[0][0]
+                                ),
+                                "completion_success": 0,
+                                "completion_reason": "no_ack",
+                            }
+                        )
                 if key in budgets:
                     lineage = lineage_records[key]
                     expected_leg: LineageIdentity = tuple(
@@ -3498,9 +3956,15 @@ class Certification:
             "packet_lifecycle_count": lifecycle_count,
             "reconstructed_branch_packet_keys": len(budgets),
             "source_exact_dack_retry_forks": sum(budgets.values()),
+            "terminal_unreceived_hop_attempt_count": len(
+                terminal_unreceived_attempts
+            ),
+            "terminal_unreceived_hop_attempts": terminal_unreceived_attempts,
             "note": (
                 "Every observed ns-3 lifecycle or terminal prefix is strict-valid. "
                 "Repeated-DACK copies are bound to exact directed-HOP identities; "
+                "any terminal unreceived HOP is admission-, reception-, and "
+                "no_ack-completion-bound; "
                 "the recovered OPNET evidence remains aggregate-only."
             ),
         }
@@ -4050,6 +4514,8 @@ class Certification:
                 == ["src", "dst", "sequence", "from", "to", "hop_sequence"]
                 and path_configuration.get("repeated_dack_branch_matching")
                 == PACKET_PATH_V2_MATCHING_CONTRACT
+                and path_configuration.get("undelivered_path_semantics")
+                == PACKET_PATH_V2_UNDELIVERED_PATH_CONTRACT
                 and path_configuration.get("queue_delay_statistic")
                 == PACKET_PATH_V2_QUEUE_DELAY_STATISTIC
                 and path_configuration.get("queue_delay_evidence_adjacency")
@@ -4521,6 +4987,9 @@ class Certification:
             "release harness RC blob binding changed during certification",
         )
         self.repository_identity(self.args.ns3_repo.resolve(), NS3_COMMIT, require_origin_main=False)
+        validate_ns3_lock_binding(
+            (self.release.get("build") or {}).get("ns3_lock"), self.output
+        )
         for target, binary in self.binary_paths.items():
             require(sha256(binary) == self.binary_hashes_before[target], f"binary changed after execution: {target}")
             frozen = self.output / self.release["executables"][target]["frozen_artifact"]
@@ -4664,6 +5133,7 @@ class Certification:
             "immutable_rc_tree_unchanged": True,
             "ns3_csr_source_bindings_unchanged": True,
             "ns3_git_source_files_unchanged": True,
+            "ns3_build_lock_and_frozen_copy_unchanged": True,
             "executed_binaries_unchanged": True,
             "frozen_binary_copies_unchanged": True,
             "loaded_shared_libraries_unchanged": True,
@@ -4720,6 +5190,7 @@ class Certification:
         sums_sidecar = self.output / "SHA256SUMS.sha256"
         sidecar_text = f"{sums_digest}  SHA256SUMS\n"
         sums_sidecar.write_text(sidecar_text, encoding="utf-8")
+        sums_sidecar_digest = sha256(sums_sidecar)
         require(
             sums_sidecar.is_file()
             and not sums_sidecar.is_symlink()
@@ -4727,14 +5198,20 @@ class Certification:
             and sha256(sums) == sums_digest,
             "frozen evidence changed during final checksum sealing",
         )
-        validate_sealed_evidence_snapshot(
-            self.output, seal_roots, sealed_hashes
-        )
+        completed_seal_hashes = dict(sealed_hashes)
+        completed_seal_hashes[sums] = sums_digest
+        completed_seal_hashes[sums_sidecar] = sums_sidecar_digest
         require(
             set(self.output.iterdir())
             == expected_root_entries
             | {self.output / "SHA256SUMS", self.output / "SHA256SUMS.sha256"},
             "frozen output root changed during checksum sealing",
+        )
+        validate_quiescent_sealed_evidence_snapshot(
+            self.output,
+            seal_roots,
+            completed_seal_hashes,
+            additional_files=(sums, sums_sidecar),
         )
         print(f"release evidence checkpoint sealed: {self.output}", flush=True)
         print(f"SHA256SUMS sha256: {sums_digest}", flush=True)

@@ -418,6 +418,52 @@ def repeated_reordered_branch_rows(
 
 
 class AnalyzePacketPathsTests(unittest.TestCase):
+    def test_incomplete_branch_keeps_terminal_unreceived_hop_out_of_path(self) -> None:
+        rows = [
+            row
+            for row in repeated_reordered_branch_rows()
+            if not (
+                (
+                    row["event"] == "hop_feedback"
+                    and "hop_sequence=110;" in row["detail"]
+                )
+                or (row["event"] == "nwk_delivery" and row["time_s"] == "9.0")
+            )
+        ]
+        for event_index, row in enumerate(rows):
+            row["event_index"] = str(event_index)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.csv"
+            write_trace(trace, rows)
+            packets, report = analyzer.analyze_trace(
+                trace, startup_time_s=0.0, bucket_width_s=10.0
+            )
+
+        self.assertTrue(report["pass"])
+        self.assertEqual(report["counts"]["packet_lifecycles"], 2)
+        self.assertEqual(report["counts"]["delivered_packets"], 1)
+        self.assertEqual(report["counts"]["undelivered_packets"], 1)
+        self.assertEqual(report["counts"]["invalid_packets"], 0)
+        self.assertEqual(
+            report["counts"]["ambiguous_repeated_dack_branch_packet_keys"], 0
+        )
+        terminal = next(packet for packet in packets if not packet.delivered)
+        delivered = next(packet for packet in packets if packet.delivered)
+        self.assertTrue(terminal.valid)
+        self.assertFalse(terminal.complete)
+        self.assertEqual(terminal.path, [0, 1, 2])
+        self.assertEqual(
+            [(leg.from_node, leg.to_node) for leg in terminal.hop_lineage],
+            [(0, 1), (1, 2), (2, 3)],
+        )
+        self.assertEqual(terminal.hop_lineage[-1].hop_sequence, 110)
+        self.assertEqual(delivered.path, [0, 1, 2, 3])
+        self.assertEqual(
+            report["configuration"]["undelivered_path_semantics"],
+            analyzer.UNDELIVERED_PATH_SEMANTICS,
+        )
+
     def test_reconstructs_reordered_repeated_dack_suffixes_by_exact_hop_identity(
         self,
     ) -> None:

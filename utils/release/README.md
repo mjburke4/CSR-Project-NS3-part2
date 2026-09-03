@@ -32,8 +32,12 @@ utils/release/certify_release.py \
   --jobs 4
 ```
 
-The output path must not exist and must not be inside either repository or the
-evidence input tree. On success, the root contains `release-manifest.json`,
+The output path must not exist, must not be inside either repository or the
+evidence input tree, and must be on a local unsynchronized filesystem under
+exclusive writer control for the entire harness run. Stage the sealed output
+elsewhere only after certification, then run `sha256sum -c SHA256SUMS.sha256`
+followed by `sha256sum -c SHA256SUMS` from the transferred root.
+On success, the root contains `release-manifest.json`,
 `SHA256SUMS`, and `SHA256SUMS.sha256`. `artifacts/` is the frozen evidence set;
 the ephemeral build/staging workspace defaults to the disjoint sibling
 `OUTPUT_DIR.work` (or an explicit new `--work-dir`) and is not part of the
@@ -149,8 +153,14 @@ equals a provenance proof budget, delivery multiplicity exactly matches the
 trace, and every directed-HOP identity in each reconstructed path exists in and
 exactly covers the tagged HOP-admission evidence in the trace. Distinct
 delivered lifecycles must have distinct trace-grounded HOP lineages.
-Valid undelivered terminal prefixes are the only allowed issue class. This is
-an internal ns-3 packet-path integrity claim, not OPNET packet-event parity.
+Valid undelivered terminal prefixes are the only allowed issue class. Their
+observed path contains only nodes that received the NWK packet; their HOP
+lineage may include exactly one trailing admitted-but-unreceived attempt only
+when the trace has one matching admission, no tagged receiver feedback, and
+one later `success=0, reason=no_ack` completion. Every lineage edge represented
+in the observed path must independently have post-admission first-reception
+evidence. This is an internal ns-3 packet-path integrity claim, not OPNET
+packet-event parity.
 
 Legacy schema `csr-packet-path-analysis-v1` remains supported only through the
 older exact, trace-bound repeated-DACK exception: its strict failure is retained
@@ -162,3 +172,18 @@ directed-HOP, queue-delay-constrained, unique bipartite queue-copy matching
 contract. It also requires the exact queue-delay statistic, evidence-adjacency
 rule, numeric tolerance, and zero ambiguous repeated-DACK branch keys. The
 earlier existence-only bipartite contract fails closed.
+
+At sealing, every hidden entry below the evidence roots is rejected except the
+required harness-owned `manifests/.lock-ns3_linux_build` file. That lock is
+size- and SHA-256-bound across parsing, source recheck, frozen copy, and final
+integrity. The last pre-success validation recursively rechecks all sealed
+names and contents, including `SHA256SUMS` and its sidecar. Every sealed file
+must have link count one, and Linux inotify watches every directory and file
+inode throughout that final validation; any inotify-reported write, attribute,
+create, delete, or move event aborts certification. This is defense-in-depth
+under the mandatory exclusive-writer precondition, not an OS-enforced immutable
+snapshot. Unexpected hidden or synchronizer-temporary entries present during
+sealing are rejected. Stable visible regular files are not semantically
+allowlisted: they are included and made evident in the recursive checksum
+manifest. Later transfer or storage remains outside the sealing interval and
+must be verified against the frozen checksums.

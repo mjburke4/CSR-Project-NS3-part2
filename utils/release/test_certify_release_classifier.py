@@ -7,6 +7,7 @@ from argparse import Namespace
 import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -32,6 +33,7 @@ TRACE_COLUMNS = (
     "dst",
     "sequence",
     "size_bytes",
+    "success",
     "reason",
     "node",
     "statistic",
@@ -152,7 +154,18 @@ def protocol_aggregate_report() -> dict[str, object]:
 
 
 class ClassifierProbe(unittest.TestCase):
-    def build_case(self, terminal_reason: str = "neighbor_flow_full") -> tuple[object, ...]:
+    def build_case(
+        self,
+        terminal_reason: str = "neighbor_flow_full",
+        *,
+        terminal_attempt_feedback: bool = False,
+        terminal_attempt_feedback_first_reception: str = "1",
+        terminal_completion_reason: str | None = "no_ack",
+        duplicate_terminal_admission: bool = False,
+        duplicate_terminal_completion: bool = False,
+        terminal_completion_before_admission: bool = False,
+        reverse_terminal_completion: bool = False,
+    ) -> tuple[object, ...]:
         temporary = tempfile.TemporaryDirectory(prefix="csr-classifier-probe-")
         root = Path(temporary.name).resolve()
         trace = root / "trace.csv"
@@ -167,6 +180,7 @@ class ClassifierProbe(unittest.TestCase):
             node: str = "",
             peer: str = "",
             next_hop: str = "",
+            success: str = "",
             detail: str = "",
         ) -> dict[str, str]:
             row = {name: "" for name in TRACE_COLUMNS}
@@ -183,6 +197,7 @@ class ClassifierProbe(unittest.TestCase):
                     "node": node,
                     "peer": peer,
                     "next_hop": next_hop,
+                    "success": success,
                     "detail": detail,
                 }
             )
@@ -190,27 +205,126 @@ class ClassifierProbe(unittest.TestCase):
 
         delivered = ("1", "9", "10")
         terminal = ("2", "9", "20")
+
+        def feedback_detail(
+            hop_sequence: int, before: int, after: int
+        ) -> str:
+            return (
+                f"hop_sequence={hop_sequence};first_reception=1;ackable=1;"
+                "nsdp_state_valid=1;"
+                f"nsdp_count_before={before};nsdp_count_after={after};"
+                "nsdp_limit=16"
+            )
+
         rows = [
             trace_row(1, 1.0, "app_send", delivered, node="1"),
-            trace_row(2, 2.0, "nwk_enqueue", delivered, reason="relay", node="4", peer="2"),
-            trace_row(3, 3.0, "hop_feedback", delivered, reason="dack", node="4", peer="2", detail="hop_sequence=50;first_reception=1;ackable=1;nsdp_state_valid=1;nsdp_count_before=1;nsdp_count_after=2;nsdp_limit=16"),
-            trace_row(4, 4.0, "nwk_enqueue", delivered, reason="relay", node="4", peer="2"),
-            trace_row(5, 5.0, "hop_feedback", delivered, reason="dack", node="4", peer="2", detail="hop_sequence=50;first_reception=1;ackable=1;nsdp_state_valid=1;nsdp_count_before=2;nsdp_count_after=3;nsdp_limit=16"),
-            trace_row(6, 6.0, "nwk_delivery", delivered, node="9"),
-            trace_row(7, 7.0, "nwk_delivery", delivered, node="9"),
-            trace_row(8, 8.0, "app_send", terminal, node="2"),
-            trace_row(9, 9.0, "nwk_enqueue", terminal, reason="relay", node="5", peer="4"),
-            trace_row(10, 10.0, "hop_feedback", terminal, reason="dack", node="5", peer="4", detail="hop_sequence=60;first_reception=1;ackable=1;nsdp_state_valid=1;nsdp_count_before=4;nsdp_count_after=5;nsdp_limit=16"),
-            trace_row(11, 11.0, "nwk_enqueue", terminal, reason="relay", node="5", peer="4"),
-            trace_row(12, 12.0, "hop_feedback", terminal, reason="dack", node="5", peer="4", detail="hop_sequence=60;first_reception=1;ackable=1;nsdp_state_valid=1;nsdp_count_before=5;nsdp_count_after=6;nsdp_limit=16"),
-            trace_row(13, 13.0, "hop_admission", delivered, reason="admitted", node="1", peer="2", next_hop="2", detail="hop_sequence=49"),
-            trace_row(14, 14.0, "hop_admission", delivered, reason="admitted", node="2", peer="4", next_hop="4", detail="hop_sequence=50"),
-            trace_row(15, 15.0, "hop_admission", delivered, reason="admitted", node="4", peer="9", next_hop="9", detail="hop_sequence=51"),
-            trace_row(16, 16.0, "hop_admission", delivered, reason="admitted", node="4", peer="9", next_hop="9", detail="hop_sequence=52"),
-            trace_row(17, 17.0, "hop_admission", terminal, reason="admitted", node="2", peer="4", next_hop="4", detail="hop_sequence=59"),
+            trace_row(2, 2.0, "hop_admission", delivered, reason="admitted", node="1", peer="2", next_hop="2", detail="hop_sequence=49"),
+            trace_row(3, 3.0, "hop_feedback", delivered, reason="ack", node="2", peer="1", detail=feedback_detail(49, 0, 1)),
+            trace_row(4, 4.0, "hop_admission", delivered, reason="admitted", node="2", peer="4", next_hop="4", detail="hop_sequence=50"),
+            trace_row(5, 5.0, "nwk_enqueue", delivered, reason="relay", node="4", peer="2"),
+            trace_row(6, 6.0, "hop_feedback", delivered, reason="dack", node="4", peer="2", detail=feedback_detail(50, 1, 2)),
+            trace_row(7, 7.0, "nwk_enqueue", delivered, reason="relay", node="4", peer="2"),
+            trace_row(8, 8.0, "hop_feedback", delivered, reason="dack", node="4", peer="2", detail=feedback_detail(50, 2, 3)),
+            trace_row(9, 9.0, "hop_admission", delivered, reason="admitted", node="4", peer="9", next_hop="9", detail="hop_sequence=51"),
+            trace_row(10, 10.0, "hop_feedback", delivered, reason="ack", node="9", peer="4", detail=feedback_detail(51, 0, 1)),
+            trace_row(11, 11.0, "nwk_delivery", delivered, node="9"),
+            trace_row(12, 12.0, "hop_admission", delivered, reason="admitted", node="4", peer="9", next_hop="9", detail="hop_sequence=52"),
+            trace_row(13, 13.0, "hop_feedback", delivered, reason="ack", node="9", peer="4", detail=feedback_detail(52, 1, 2)),
+            trace_row(14, 14.0, "nwk_delivery", delivered, node="9"),
+            trace_row(15, 15.0, "app_send", terminal, node="2"),
+            trace_row(16, 16.0, "hop_admission", terminal, reason="admitted", node="2", peer="4", next_hop="4", detail="hop_sequence=59"),
+            trace_row(17, 17.0, "hop_feedback", terminal, reason="ack", node="4", peer="2", detail=feedback_detail(59, 0, 1)),
             trace_row(18, 18.0, "hop_admission", terminal, reason="admitted", node="4", peer="5", next_hop="5", detail="hop_sequence=60"),
+            trace_row(19, 19.0, "nwk_enqueue", terminal, reason="relay", node="5", peer="4"),
+            trace_row(20, 20.0, "hop_feedback", terminal, reason="dack", node="5", peer="4", detail=feedback_detail(60, 4, 5)),
+            trace_row(21, 21.0, "nwk_enqueue", terminal, reason="relay", node="5", peer="4"),
+            trace_row(22, 22.0, "hop_feedback", terminal, reason="dack", node="5", peer="4", detail=feedback_detail(60, 5, 6)),
+        ]
+        next_event_index = 23
+
+        def append_terminal_completion(time_s: float) -> None:
+            nonlocal next_event_index
+            if terminal_completion_reason is None:
+                return
+            node, peer = (
+                ("6", "5") if reverse_terminal_completion else ("5", "6")
+            )
+            rows.append(
+                trace_row(
+                    next_event_index,
+                    time_s,
+                    "hop_completion",
+                    terminal,
+                    reason=terminal_completion_reason,
+                    node=node,
+                    peer=peer,
+                    next_hop=peer,
+                    success=(
+                        "0" if terminal_completion_reason == "no_ack" else "1"
+                    ),
+                    detail="hop_sequence=61;resend_count=2",
+                )
+            )
+            next_event_index += 1
+
+        if terminal_completion_before_admission:
+            append_terminal_completion(22.5)
+        terminal_admission_event_index = next_event_index
+        rows.append(
             trace_row(
-                30,
+                terminal_admission_event_index,
+                23.0,
+                "hop_admission",
+                terminal,
+                reason="admitted",
+                node="5",
+                peer="6",
+                next_hop="6",
+                detail="hop_sequence=61",
+            )
+        )
+        next_event_index += 1
+        if duplicate_terminal_admission:
+            rows.append(
+                trace_row(
+                    next_event_index,
+                    23.5,
+                    "hop_admission",
+                    terminal,
+                    reason="admitted",
+                    node="5",
+                    peer="6",
+                    next_hop="6",
+                    success="1",
+                    detail="hop_sequence=61",
+                )
+            )
+            next_event_index += 1
+        if not terminal_completion_before_admission:
+            append_terminal_completion(24.0)
+        if duplicate_terminal_completion:
+            append_terminal_completion(24.5)
+        if terminal_attempt_feedback:
+            rows.append(
+                trace_row(
+                    next_event_index,
+                    25.0,
+                    "hop_feedback",
+                    terminal,
+                    reason="ack",
+                    node="6",
+                    peer="5",
+                    detail=(
+                        "hop_sequence=61;first_reception="
+                        f"{terminal_attempt_feedback_first_reception};ackable=1;"
+                        "nsdp_state_valid=1;nsdp_count_before=0;"
+                        "nsdp_count_after=1;nsdp_limit=16"
+                    ),
+                ),
+            )
+        rows.append(
+            trace_row(
+                40,
                 5998.0,
                 "nwk_admission",
                 terminal,
@@ -223,8 +337,8 @@ class ClassifierProbe(unittest.TestCase):
                     "pending=1;pending_limit=16;global_spad=16;outstanding=1;"
                     "threshold=0;neighbor_spad=0;route_known=1"
                 ),
-            ),
-        ]
+            )
+        )
         with trace.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=TRACE_COLUMNS, lineterminator="\n")
             writer.writeheader()
@@ -243,8 +357,8 @@ class ClassifierProbe(unittest.TestCase):
                 "dack_feedback_count": 2,
                 "proven_extra_delivery_budget": 1,
                 "source_ordered_pairs": [
-                    {"enqueue_event_index": 2, "feedback_event_index": 3},
-                    {"enqueue_event_index": 4, "feedback_event_index": 5},
+                    {"enqueue_event_index": 5, "feedback_event_index": 6},
+                    {"enqueue_event_index": 7, "feedback_event_index": 8},
                 ],
             },
             {
@@ -258,8 +372,8 @@ class ClassifierProbe(unittest.TestCase):
                 "dack_feedback_count": 2,
                 "proven_extra_delivery_budget": 1,
                 "source_ordered_pairs": [
-                    {"enqueue_event_index": 9, "feedback_event_index": 10},
-                    {"enqueue_event_index": 11, "feedback_event_index": 12},
+                    {"enqueue_event_index": 19, "feedback_event_index": 20},
+                    {"enqueue_event_index": 21, "feedback_event_index": 22},
                 ],
             },
         ]
@@ -506,8 +620,30 @@ class ClassifierProbe(unittest.TestCase):
             1,
         )
 
-    def build_v2_case(self) -> tuple[object, ...]:
-        case = self.build_case()
+    def build_v2_case(
+        self,
+        *,
+        terminal_attempt_feedback: bool = False,
+        terminal_attempt_feedback_first_reception: str = "1",
+        terminal_completion_reason: str | None = "no_ack",
+        duplicate_terminal_admission: bool = False,
+        duplicate_terminal_completion: bool = False,
+        terminal_completion_before_admission: bool = False,
+        reverse_terminal_completion: bool = False,
+    ) -> tuple[object, ...]:
+        case = self.build_case(
+            terminal_attempt_feedback=terminal_attempt_feedback,
+            terminal_attempt_feedback_first_reception=(
+                terminal_attempt_feedback_first_reception
+            ),
+            terminal_completion_reason=terminal_completion_reason,
+            duplicate_terminal_admission=duplicate_terminal_admission,
+            duplicate_terminal_completion=duplicate_terminal_completion,
+            terminal_completion_before_admission=(
+                terminal_completion_before_admission
+            ),
+            reverse_terminal_completion=reverse_terminal_completion,
+        )
         (
             temporary,
             certification,
@@ -578,6 +714,12 @@ class ClassifierProbe(unittest.TestCase):
             {"code": "undelivered_lifecycle"},
         ]
         for copy_index in range(2):
+            terminal_lineage = [
+                leg(terminal, 2, 4, 59),
+                leg(terminal, 4, 5, 60),
+            ]
+            if copy_index == 0:
+                terminal_lineage.append(leg(terminal, 5, 6, 61))
             rows.append(
                 {
                     "src": terminal[0],
@@ -591,12 +733,7 @@ class ClassifierProbe(unittest.TestCase):
                     "path_json": json.dumps([2, 4, 5]),
                     "issue_count": "2",
                     "issues_json": json.dumps(terminal_issues),
-                    "hop_lineage_json": json.dumps(
-                        [
-                            leg(terminal, 2, 4, 59),
-                            leg(terminal, 4, 5, 60),
-                        ]
-                    ),
+                    "hop_lineage_json": json.dumps(terminal_lineage),
                 }
             )
         with packets.open("w", encoding="utf-8", newline="") as stream:
@@ -630,6 +767,9 @@ class ClassifierProbe(unittest.TestCase):
                         ],
                         "repeated_dack_branch_matching": (
                             CERTIFY.PACKET_PATH_V2_MATCHING_CONTRACT
+                        ),
+                        "undelivered_path_semantics": (
+                            CERTIFY.PACKET_PATH_V2_UNDELIVERED_PATH_CONTRACT
                         ),
                         "queue_delay_statistic": (
                             CERTIFY.PACKET_PATH_V2_QUEUE_DELAY_STATISTIC
@@ -719,6 +859,217 @@ class ClassifierProbe(unittest.TestCase):
         self.assertTrue(packet["packet_path_integrity_claim"])
         self.assertFalse(packet["opnet_packet_event_parity_claim"])
         self.assertEqual(packet["packet_lifecycle_count"], 4)
+        self.assertEqual(packet["terminal_unreceived_hop_attempt_count"], 1)
+        self.assertEqual(
+            packet["terminal_unreceived_hop_attempts"],
+            [
+                {
+                    "src": 2,
+                    "dst": 9,
+                    "sequence": 20,
+                    "copy_index": 0,
+                    "from": 5,
+                    "to": 6,
+                    "hop_sequence": 61,
+                    "admission_event_index": 23,
+                    "completion_event_index": 24,
+                    "completion_success": 0,
+                    "completion_reason": "no_ack",
+                }
+            ],
+        )
+
+    def test_hop_lineage_path_relation_is_fail_closed(self) -> None:
+        exact = [
+            {"from": 1, "to": 2},
+            {"from": 2, "to": 4},
+        ]
+        terminal = exact + [{"from": 4, "to": 5}]
+        self.assertEqual(
+            CERTIFY.hop_lineage_path_relation([1, 2, 4], exact, True),
+            "exact_observed_path",
+        )
+        self.assertEqual(
+            CERTIFY.hop_lineage_path_relation([1, 2, 4], terminal, False),
+            "terminal_admitted_unreceived",
+        )
+        self.assertIsNone(
+            CERTIFY.hop_lineage_path_relation([1, 2, 4], terminal, True)
+        )
+        self.assertIsNone(
+            CERTIFY.hop_lineage_path_relation(
+                [1, 2, 4], terminal + [{"from": 5, "to": 6}], False
+            )
+        )
+        self.assertIsNone(
+            CERTIFY.hop_lineage_path_relation(
+                [1, 2, 4], exact + [{"from": 9, "to": 5}], False
+            )
+        )
+        self.assertIsNone(
+            CERTIFY.hop_lineage_path_relation(
+                [1, 2, 4], exact + [{"from": 4, "to": 1}], False
+            )
+        )
+        self.assertIsNone(
+            CERTIFY.hop_lineage_path_relation(
+                [1, 2, 4],
+                [{"from": 1, "to": 2}, {"from": 7, "to": 4}],
+                False,
+            )
+        )
+
+    def test_rejects_v2_terminal_attempt_with_receiver_feedback(self) -> None:
+        for first_reception in ("1", "0"):
+            with self.subTest(first_reception=first_reception):
+                case = self.build_v2_case(
+                    terminal_attempt_feedback=True,
+                    terminal_attempt_feedback_first_reception=first_reception,
+                )
+                (
+                    temporary,
+                    certification,
+                    trace,
+                    provenance,
+                    admission,
+                    summary,
+                    packets,
+                ) = case
+                self.addCleanup(temporary.cleanup)
+                with self.assertRaisesRegex(
+                    CERTIFY.CertificationError,
+                    "terminal HOP attempt has receiver feedback",
+                ):
+                    certification.classify_analyzer_results(
+                        trace, provenance, admission, 1, summary, packets, 0
+                    )
+
+    def test_rejects_v2_terminal_attempt_without_no_ack_completion(self) -> None:
+        for reason in (None, "ack"):
+            with self.subTest(reason=reason):
+                case = self.build_v2_case(terminal_completion_reason=reason)
+                (
+                    temporary,
+                    certification,
+                    trace,
+                    provenance,
+                    admission,
+                    summary,
+                    packets,
+                ) = case
+                self.addCleanup(temporary.cleanup)
+                with self.assertRaisesRegex(
+                    CERTIFY.CertificationError,
+                    "terminal HOP attempt lacks one exact post-admission no_ack completion",
+                ):
+                    certification.classify_analyzer_results(
+                        trace, provenance, admission, 1, summary, packets, 0
+                    )
+
+    def test_rejects_v2_duplicate_terminal_hop_admission(self) -> None:
+        case = self.build_v2_case(duplicate_terminal_admission=True)
+        temporary, certification, trace, provenance, admission, summary, packets = case
+        self.addCleanup(temporary.cleanup)
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError,
+            "trace repeats a directed-HOP admission identity",
+        ):
+            certification.classify_analyzer_results(
+                trace, provenance, admission, 1, summary, packets, 0
+            )
+
+    def test_rejects_v2_duplicate_terminal_hop_completion(self) -> None:
+        case = self.build_v2_case(duplicate_terminal_completion=True)
+        temporary, certification, trace, provenance, admission, summary, packets = case
+        self.addCleanup(temporary.cleanup)
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError,
+            "terminal HOP attempt lacks one exact post-admission no_ack completion",
+        ):
+            certification.classify_analyzer_results(
+                trace, provenance, admission, 1, summary, packets, 0
+            )
+
+    def test_rejects_v2_pre_admission_terminal_hop_completion(self) -> None:
+        case = self.build_v2_case(terminal_completion_before_admission=True)
+        temporary, certification, trace, provenance, admission, summary, packets = case
+        self.addCleanup(temporary.cleanup)
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError,
+            "terminal HOP attempt lacks one exact post-admission no_ack completion",
+        ):
+            certification.classify_analyzer_results(
+                trace, provenance, admission, 1, summary, packets, 0
+            )
+
+    def test_rejects_v2_reversed_terminal_hop_completion(self) -> None:
+        case = self.build_v2_case(reverse_terminal_completion=True)
+        temporary, certification, trace, provenance, admission, summary, packets = case
+        self.addCleanup(temporary.cleanup)
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError,
+            "terminal HOP attempt lacks one exact post-admission no_ack completion",
+        ):
+            certification.classify_analyzer_results(
+                trace, provenance, admission, 1, summary, packets, 0
+            )
+
+    def test_rejects_reusing_one_terminal_hop_across_lifecycles(self) -> None:
+        case = self.build_v2_case()
+        temporary, certification, trace, provenance, admission, summary, packets = case
+        self.addCleanup(temporary.cleanup)
+        with packets.open("r", encoding="utf-8", newline="") as stream:
+            reader = csv.DictReader(stream)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        first_terminal_lineage = json.loads(rows[2]["hop_lineage_json"])
+        second_terminal_lineage = json.loads(rows[3]["hop_lineage_json"])
+        second_terminal_lineage.append(first_terminal_lineage[-1])
+        rows[3]["hop_lineage_json"] = json.dumps(second_terminal_lineage)
+        with packets.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=fieldnames, lineterminator="\n"
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        value = json.loads(summary.read_text(encoding="utf-8"))
+        value["outputs"]["packet_csv"]["sha256"] = CERTIFY.sha256(packets)
+        summary.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError,
+            "reuses one terminal HOP attempt across lifecycles",
+        ):
+            certification.classify_analyzer_results(
+                trace, provenance, admission, 1, summary, packets, 0
+            )
+
+    def test_rejects_terminal_hop_reused_as_observed_path_edge(self) -> None:
+        case = self.build_v2_case()
+        temporary, certification, trace, provenance, admission, summary, packets = case
+        self.addCleanup(temporary.cleanup)
+        with packets.open("r", encoding="utf-8", newline="") as stream:
+            reader = csv.DictReader(stream)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        terminal_lineage = json.loads(rows[2]["hop_lineage_json"])
+        rows[3]["path_json"] = json.dumps([2, 4, 5, 6])
+        rows[3]["hop_lineage_json"] = json.dumps(terminal_lineage)
+        with packets.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=fieldnames, lineterminator="\n"
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        value = json.loads(summary.read_text(encoding="utf-8"))
+        value["outputs"]["packet_csv"]["sha256"] = CERTIFY.sha256(packets)
+        summary.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError,
+            "observed path edge lacks post-admission first-reception evidence",
+        ):
+            certification.classify_analyzer_results(
+                trace, provenance, admission, 1, summary, packets, 0
+            )
 
     def test_rejects_v2_branch_count_drift(self) -> None:
         case = self.build_v2_case()
@@ -749,6 +1100,29 @@ class ClassifierProbe(unittest.TestCase):
         value["configuration"]["repeated_dack_branch_matching"] = (
             "exact directed-HOP identity plus complete bipartite queue-copy "
             "matching; never FIFO"
+        )
+        summary.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError,
+            "unique queue-delay matching contract drift",
+        ):
+            certification.classify_analyzer_results(
+                trace,
+                provenance,
+                admission,
+                1,
+                summary,
+                packets,
+                0,
+            )
+
+    def test_rejects_v2_undelivered_path_contract_drift(self) -> None:
+        case = self.build_v2_case()
+        temporary, certification, trace, provenance, admission, summary, packets = case
+        self.addCleanup(temporary.cleanup)
+        value = json.loads(summary.read_text(encoding="utf-8"))
+        value["configuration"]["undelivered_path_semantics"] = (
+            "path includes an unreceived next hop"
         )
         summary.write_text(json.dumps(value), encoding="utf-8")
         with self.assertRaisesRegex(
@@ -1321,6 +1695,9 @@ class ClassifierProbe(unittest.TestCase):
             manifests.mkdir()
             (artifacts / "evidence.txt").write_text("evidence\n", encoding="utf-8")
             (manifests / "inputs.json").write_text("{}\n", encoding="utf-8")
+            (manifests / ".lock-ns3_linux_build").write_text(
+                "lock\n", encoding="utf-8"
+            )
             (output / "release-manifest.json").write_text("{}\n", encoding="utf-8")
             files = CERTIFY.enumerate_sealed_evidence(
                 output, (artifacts, manifests)
@@ -1351,6 +1728,308 @@ class ClassifierProbe(unittest.TestCase):
                     CERTIFY.validate_sealed_evidence_snapshot(
                         output, (artifacts, manifests), sealed_hashes
                     )
+
+    def test_completed_seal_rechecks_after_final_root_scan(self) -> None:
+        for mutation in ("nested_file", "content_replacement"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(
+                prefix="csr-completed-seal-race-probe-"
+            ) as temporary:
+                output = Path(temporary)
+                artifacts = output / "artifacts"
+                manifests = output / "manifests"
+                artifacts.mkdir()
+                manifests.mkdir()
+                evidence = artifacts / "evidence.txt"
+                evidence.write_text("evidence\n", encoding="utf-8")
+                (manifests / ".lock-ns3_linux_build").write_text(
+                    "lock\n", encoding="utf-8"
+                )
+                (output / "release-manifest.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+                sums = output / "SHA256SUMS"
+                sidecar = output / "SHA256SUMS.sha256"
+                sums.write_text("sealed\n", encoding="utf-8")
+                sidecar.write_text("sidecar\n", encoding="utf-8")
+                files = CERTIFY.enumerate_sealed_evidence(
+                    output, (artifacts, manifests)
+                )
+                sealed_hashes = {
+                    path: CERTIFY.sha256(path)
+                    for path in [*files, sums, sidecar]
+                }
+                original_iterdir = Path.iterdir
+                output_scan_count = 0
+
+                def iterdir_with_late_mutation(path: Path):
+                    nonlocal output_scan_count
+                    entries = list(original_iterdir(path))
+                    if path == output:
+                        output_scan_count += 1
+                        if output_scan_count == 2:
+                            if mutation == "nested_file":
+                                (artifacts / "late.txt").write_text(
+                                    "late\n", encoding="utf-8"
+                                )
+                            else:
+                                evidence.write_text(
+                                    "replaced\n", encoding="utf-8"
+                                )
+                    return iter(entries)
+
+                with mock.patch.object(
+                    Path, "iterdir", new=iterdir_with_late_mutation
+                ):
+                    with self.assertRaisesRegex(
+                        CERTIFY.CertificationError,
+                        "frozen evidence (file set|content) changed",
+                    ):
+                        CERTIFY.validate_sealed_evidence_snapshot(
+                            output,
+                            (artifacts, manifests),
+                            sealed_hashes,
+                            additional_files=(sums, sidecar),
+                        )
+
+    def test_monitored_seal_rejects_mutation_after_final_hash(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="csr-monitored-seal-race-probe-"
+        ) as temporary:
+            output = Path(temporary)
+            artifacts = output / "artifacts"
+            manifests = output / "manifests"
+            artifacts.mkdir()
+            manifests.mkdir()
+            evidence = artifacts / "evidence.txt"
+            evidence.write_text("evidence\n", encoding="utf-8")
+            (manifests / ".lock-ns3_linux_build").write_text(
+                "lock\n", encoding="utf-8"
+            )
+            (output / "release-manifest.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            sums = output / "SHA256SUMS"
+            sidecar = output / "SHA256SUMS.sha256"
+            sums.write_text("sealed\n", encoding="utf-8")
+            sidecar.write_text("sidecar\n", encoding="utf-8")
+            files = CERTIFY.enumerate_sealed_evidence(
+                output, (artifacts, manifests)
+            )
+            sealed_hashes = {
+                path: CERTIFY.sha256(path)
+                for path in [*files, sums, sidecar]
+            }
+            original_sha256 = CERTIFY.sha256
+            hash_call_count = 0
+            final_hash_call = 2 * len(sealed_hashes)
+
+            def sha256_with_final_mutation(path: Path) -> str:
+                nonlocal hash_call_count
+                digest = original_sha256(path)
+                hash_call_count += 1
+                if hash_call_count == final_hash_call:
+                    evidence.write_text("replaced\n", encoding="utf-8")
+                return digest
+
+            with mock.patch.object(
+                CERTIFY, "sha256", side_effect=sha256_with_final_mutation
+            ):
+                with self.assertRaisesRegex(
+                    CERTIFY.CertificationError,
+                    "mutated during the final monitored sealing interval",
+                ):
+                    CERTIFY.validate_quiescent_sealed_evidence_snapshot(
+                        output,
+                        (artifacts, manifests),
+                        sealed_hashes,
+                        additional_files=(sums, sidecar),
+                    )
+
+    def test_monitored_seal_rejects_external_hardlink_mutation(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="csr-hardlink-seal-race-probe-"
+        ) as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            artifacts = output / "artifacts"
+            manifests = output / "manifests"
+            artifacts.mkdir(parents=True)
+            manifests.mkdir()
+            evidence = artifacts / "evidence.txt"
+            evidence.write_text("evidence\n", encoding="utf-8")
+            (manifests / ".lock-ns3_linux_build").write_text(
+                "lock\n", encoding="utf-8"
+            )
+            (output / "release-manifest.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            sums = output / "SHA256SUMS"
+            sidecar = output / "SHA256SUMS.sha256"
+            sums.write_text("sealed\n", encoding="utf-8")
+            sidecar.write_text("sidecar\n", encoding="utf-8")
+            files = CERTIFY.enumerate_sealed_evidence(
+                output, (artifacts, manifests)
+            )
+            sealed_hashes = {
+                path: CERTIFY.sha256(path)
+                for path in [*files, sums, sidecar]
+            }
+            original_sha256 = CERTIFY.sha256
+            hash_call_count = 0
+            final_hash_call = 2 * len(sealed_hashes)
+            outside_link = root / "outside-evidence-link"
+
+            def sha256_with_hardlink_mutation(path: Path) -> str:
+                nonlocal hash_call_count
+                digest = original_sha256(path)
+                hash_call_count += 1
+                if hash_call_count == final_hash_call:
+                    os.link(evidence, outside_link)
+                    outside_link.write_text("replaced\n", encoding="utf-8")
+                return digest
+
+            with mock.patch.object(
+                CERTIFY, "sha256", side_effect=sha256_with_hardlink_mutation
+            ):
+                with self.assertRaisesRegex(
+                    CERTIFY.CertificationError,
+                    "mutated during the final monitored sealing interval",
+                ):
+                    CERTIFY.validate_quiescent_sealed_evidence_snapshot(
+                        output,
+                        (artifacts, manifests),
+                        sealed_hashes,
+                        additional_files=(sums, sidecar),
+                    )
+
+    def test_seal_rejects_preexisting_hardlinked_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="csr-hardlink-seal-probe-"
+        ) as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            artifacts = output / "artifacts"
+            manifests = output / "manifests"
+            artifacts.mkdir(parents=True)
+            manifests.mkdir()
+            evidence = artifacts / "evidence.txt"
+            evidence.write_text("evidence\n", encoding="utf-8")
+            os.link(evidence, root / "outside-evidence-link")
+            (manifests / ".lock-ns3_linux_build").write_text(
+                "lock\n", encoding="utf-8"
+            )
+            (output / "release-manifest.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                CERTIFY.CertificationError, "unsafe hard-link count"
+            ):
+                CERTIFY.enumerate_sealed_evidence(
+                    output, (artifacts, manifests)
+                )
+
+    def test_seal_rejects_unexpected_hidden_artifact(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="csr-hidden-seal-probe-") as temporary:
+            output = Path(temporary)
+            artifacts = output / "artifacts"
+            manifests = output / "manifests"
+            artifacts.mkdir()
+            manifests.mkdir()
+            (manifests / ".lock-ns3_linux_build").write_text(
+                "lock\n", encoding="utf-8"
+            )
+            (artifacts / ".partial-transfer").write_text(
+                "undeclared\n", encoding="utf-8"
+            )
+            (output / "release-manifest.json").write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                CERTIFY.CertificationError,
+                "unexpected hidden entry",
+            ):
+                CERTIFY.enumerate_sealed_evidence(output, (artifacts, manifests))
+
+    def test_seal_requires_exact_frozen_ns3_build_lock(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="csr-missing-lock-probe-") as temporary:
+            output = Path(temporary)
+            artifacts = output / "artifacts"
+            manifests = output / "manifests"
+            artifacts.mkdir()
+            manifests.mkdir()
+            (output / "release-manifest.json").write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                CERTIFY.CertificationError,
+                "required frozen ns-3 build lock is absent or invalid",
+            ):
+                CERTIFY.enumerate_sealed_evidence(output, (artifacts, manifests))
+
+    def test_seal_accepts_only_exact_harness_lock_hidden_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="csr-lock-seal-probe-") as temporary:
+            output = Path(temporary)
+            artifacts = output / "artifacts"
+            manifests = output / "manifests"
+            artifacts.mkdir()
+            manifests.mkdir()
+            lock = manifests / ".lock-ns3_linux_build"
+            lock.write_text("lock\n", encoding="utf-8")
+            (output / "release-manifest.json").write_text("{}\n", encoding="utf-8")
+            files = CERTIFY.enumerate_sealed_evidence(
+                output, (artifacts, manifests)
+            )
+            self.assertIn(lock, files)
+
+    def test_seal_rejects_directory_named_like_harness_lock(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="csr-lock-dir-probe-") as temporary:
+            output = Path(temporary)
+            artifacts = output / "artifacts"
+            manifests = output / "manifests"
+            artifacts.mkdir()
+            manifests.mkdir()
+            (manifests / ".lock-ns3_linux_build").mkdir()
+            (output / "release-manifest.json").write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                CERTIFY.CertificationError,
+                "required frozen ns-3 build lock is absent or invalid",
+            ):
+                CERTIFY.enumerate_sealed_evidence(output, (artifacts, manifests))
+
+    def test_ns3_build_lock_binding_is_byte_exact_and_fail_closed(self) -> None:
+        for fault in ("source_changed", "frozen_missing", "frozen_directory"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(
+                prefix="csr-lock-binding-probe-"
+            ) as temporary:
+                root = Path(temporary)
+                output = root / "output"
+                manifests = output / "manifests"
+                manifests.mkdir(parents=True)
+                source = root / ".lock-ns3_linux_build"
+                frozen = manifests / source.name
+                source.write_text(
+                    "ns3_runnable_programs = ['build/scratch/probe']\n",
+                    encoding="utf-8",
+                )
+                frozen.write_bytes(source.read_bytes())
+                record = {
+                    "source_path": str(source.resolve()),
+                    "frozen_artifact": "manifests/.lock-ns3_linux_build",
+                    "sha256": CERTIFY.sha256(source),
+                    "size_bytes": source.stat().st_size,
+                }
+                self.assertEqual(
+                    CERTIFY.validate_ns3_lock_binding(record, output),
+                    (source, frozen),
+                )
+                if fault == "source_changed":
+                    source.write_text("changed\n", encoding="utf-8")
+                elif fault == "frozen_missing":
+                    frozen.unlink()
+                else:
+                    frozen.unlink()
+                    frozen.mkdir()
+                with self.assertRaisesRegex(
+                    CERTIFY.CertificationError,
+                    "ns-3 build lock or frozen binding changed",
+                ):
+                    CERTIFY.validate_ns3_lock_binding(record, output)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,10 @@ PACKET_EVENTS = {"app_send", "nwk_enqueue", "nwk_forward", "nwk_delivery"}
 HOP_EVIDENCE_EVENTS = {"hop_admission", "hop_feedback"}
 NWK_QUEUE_DELAY_STATISTIC = "NWK.Network Queuing Delay (sec)"
 QUEUE_DELAY_MATCH_ABS_TOLERANCE_S = 1.0e-9
+UNDELIVERED_PATH_SEMANTICS = (
+    "path contains only observed NWK nodes; hop_lineage may contain one "
+    "terminal admitted but unreceived HOP edge"
+)
 REQUIRED_COLUMNS = {
     "schema",
     "event_index",
@@ -1789,6 +1793,7 @@ def analyze_trace(
                 "exact directed-HOP identity plus queue-delay-constrained unique "
                 "bipartite queue-copy matching; never FIFO"
             ),
+            "undelivered_path_semantics": UNDELIVERED_PATH_SEMANTICS,
             "queue_delay_statistic": NWK_QUEUE_DELAY_STATISTIC,
             "queue_delay_evidence_adjacency": (
                 "immediately preceding CSV row, consecutive event index, same node "
