@@ -238,11 +238,29 @@ class CsrMacCore
 
   uint32_t GetReportedActiveNodesForSlotting () const
   {
-    // OPNET-style:
+    // Supplied later br_mac.pr.c behavior:
     // get_slot(max_reported_active_nodes > active_nodes ?
     //          max_reported_active_nodes : active_nodes, rn_range)
     return std::max<uint32_t> (m_activeNodesForPostTx,
                               m_maxReportedActiveNodes);
+  }
+
+  uint32_t GetActiveNodesForSlotting () const
+  {
+    // adb97c... has no max_reported_active_nodes process-state member.  Its
+    // five get_slot() call sites reload nwk_IFptr->int_1 into active_nodes and
+    // pass that one value.  Keep the supplied later-source
+    // max(local, reported) behavior available to profiles whose provenance is
+    // not the adb97 campus-multihop executable.
+    if (m_slotSelectionProfile ==
+          SlotSelectionProfile::HIST_2014_COARSE_INCLUSIVE_NO_AVOID ||
+        m_slotSelectionProfile ==
+          SlotSelectionProfile::HIST_2014_NEXT_TSLOT_MODULO_PROBE)
+      {
+        return m_activeNodesForPostTx;
+      }
+
+    return GetReportedActiveNodesForSlotting ();
   }
 
   private:
@@ -644,7 +662,8 @@ private:
   void IdleRts ();
   void StartTxHoldoff ();
   void TxHoldoffExpired ();
-  void ActivateTxPreparation (bool redrawZero = false);
+  void ActivateTxPreparation (bool redrawZero = false,
+                              bool cancelPostTxWait = false);
   void FinishTx ();
   void DoTx ();
   int SelectQueuedFrameRate (Ptr<Packet> frame,
@@ -775,14 +794,7 @@ private:
   int
   PickTxSlot (CsrNodeId dest)
   {
-    // The recovered operational get_slot() call sites pass the process-local
-    // active_nodes value directly.  Other profiles retain their existing
-    // max(local active_nodes, reported active nodes) input.
-    uint32_t activeForSlotting =
-      m_slotSelectionProfile ==
-          SlotSelectionProfile::HIST_2014_COARSE_INCLUSIVE_NO_AVOID
-        ? m_activeNodesForPostTx
-        : GetReportedActiveNodesForSlotting ();
+    uint32_t activeForSlotting = GetActiveNodesForSlotting ();
     int slotRange = GetOpnetSlotRange (activeForSlotting);
 
     if (m_slotSelectionProfile ==
@@ -1122,7 +1134,7 @@ CsrMacCore::SlotTick ()
           // Source ordering is deliberate: an empty reservation advances
           // before newly queued traffic activates.  In particular, counter
           // zero expires and selects a new slot rather than being reused.
-          ActivateTxPreparation ();
+          ActivateTxPreparation (false, true);
         }
     }
 }

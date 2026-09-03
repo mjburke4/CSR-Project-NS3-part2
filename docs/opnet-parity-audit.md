@@ -4,11 +4,13 @@ Updated: 2026-09-02
 
 ## Scope and confidence limits
 
-Battery/energy and supervisory-layer behavior are excluded because they were
-experimental and were not part of the deployed system. BBN routing is also
-excluded; the target is the `__ARL_ROUTING__` configuration selected by the
-supplied `csr_api.h`. This audit compares the supplied OPNET process, pipeline,
-ARL API, and packet-model files with the ns-3 model.
+Battery/energy and supervisory-layer behavior are the only project-authorized
+scope exemptions because they were experimental and were not part of the
+deployed system. The canonical target is the `__ARL_ROUTING__` configuration
+selected by the supplied `csr_api.h`. The alternative BBN routing behavior is
+not implemented or validated; it remains an explicit parity gap and non-claim,
+not a third exemption. This audit compares the supplied OPNET process,
+pipeline, ARL API, and packet-model files with the ns-3 model.
 
 `br_nwk.pr.c` delegates core routing decisions to an external routing library
 through functions such as `routesCreate`, `routesRcvMsg`, `routesProcess`, and
@@ -16,17 +18,19 @@ through functions such as `routesCreate`, `routesRcvMsg`, `routesProcess`, and
 ARL implementation, including automatic changed-route fanout, routing requests,
 and full INFO/UPDATE/FLUSH snapshots. Together with `csr_api_routes.h`,
 `csr_api_linkchar.h`, and the original `br_*.pk.m` definitions, this supports a
-source-backed routing audit. The later-supplied `arlSecurity.c`,
-`arlSecurity.h`, `packetTypes.h`, `msectime.*`, and split
-`arlAuthTag.c`/`arlContext.c`/`arlEncrypt.c`/`arlKey.c` sources establish the
-KeyRequest/KeyUpdate security records, exact enabled cryptographic transforms,
-millisecond timer units, the ACK-driven group-key lifecycle, all three
-pairwise and all three group security modes, and the source's key-evolution
-rules. The later-supplied node/network models, DES configurations, modulation
-tables, and output-vector files additionally establish radio defaults,
-scenario overrides, the BER-table inventory, and aggregate receiver-drop
-baselines. Exact end-to-end certification still requires authoritative
-OPNET/ns-3 event-trace comparison.
+source-backed routing audit. Prior audit work reports reviewing later-supplied
+`arlSecurity.c`, `arlSecurity.h`, `packetTypes.c`, `packetTypes.h`,
+`msectime.*`, and split
+`arlAuthTag.c`/`arlContext.c`/`arlEncrypt.c`/`arlKey.c` sources when deriving
+the documented security behavior. Those individual files are not present in
+the current frozen certification inputs and are not individually hash-bound by
+this certificate, so the resulting conclusions are historical audit findings,
+not independently reproducible from this certificate. This is an open source-
+provenance gap, not a parity-scope exemption. The hash-bound node/network
+models, DES configurations, modulation tables, and output-vector artifacts
+additionally establish radio defaults, scenario overrides, the BER-table
+inventory, and aggregate receiver-drop baselines. Exact end-to-end
+certification still requires authoritative OPNET/ns-3 event-trace comparison.
 
 ## Current status
 
@@ -35,18 +39,21 @@ OPNET/ns-3 event-trace comparison.
 | Visible NWK wrapper behavior | 95-98% | Queue order/timing, blocked-entry scanning, DATA reliability, NSDP, reverse routes, source-owned self capability, source-exact same-cycle grouped changed-route fanout, local-only link cost, gateway-driven SNMP discovery coordination, relay-holdoff/clear state, active-node accounting, and fixed packet/control envelopes are covered. |
 | Full NWK routing behavior | 90-94% | ARL byte-stream exchange, self-route capability advertisement, same-pass INFO/changed-route propagation with NWK-owned residual-destination retry, 24-bit node identifiers, exact supplied `br_Routes`/`br_SNMP` fixed fields, and no-static-route multi-hop convergence now have source-backed coverage. |
 | ARL neighbor admission | 88-94% | Inactive/active state is now separate from freshness; two-sided key completion, deferred NeighborCheck proof, DATA gating, RoutingUpdate handling, security-count reset, and 5-second retry foundations are source-backed. Loss/restart edge cases still need broader trace coverage. |
-| HOP | 93-96% | ACK/DACK windows, source-exact Pairwise16 ACK/DACK wrapping, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
-| Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Ordinary DATA and packet-type-0 ACK/DACK use Pairwise16, an explicit encrypted DATA path uses Pairwise32Encrypt, and AppNeighborcast uses live Group32Encrypt with authentication before state mutation or delivery. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
+| HOP | 93-96% | ACK/DACK windows, atomic source-version-profiled DATA/ACK wrapping, exact DACK expiration and generic-wake ordering, actual-MAC-sent resend/final-expiration timing, flow control, queue limits, grouped routing ACKs, retry DSCP, custody, overhearing, link-control export, reliable KeyUpdate completion, authenticated Discover/routing/DATA/neighborcast paths, one-hop SNMP dispatch ordering, exact fixed HOP/ACK envelope models, and OPNET DATA-versus-control timeout effects are covered. |
+| Full hop security | 89-94% | Pairwise16, Pairwise32, Pairwise32Encrypt, KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt now have source-faithful KDF, HMAC, AES, key-rotation, replay, and golden-record coverage. Production ordinary DATA and packet-type-0 ACK/DACK use Pairwise16; the hash-bound archived profile atomically selects bare ordinary DATA and ACK/DACK. Impossible metadata fails before neighbor, replay, ACK, or delivery state; declared cross-profile DATA fails after source-intentional link observation but before replay, ACK, or NWK delivery. Deliberately clearing the optional security-count flag remains body-ambiguous. Remaining uncertainty is exact security wrapping for other control packets, distinct network-security modes, differential traces, and operational key-store hardware. |
 | MAC transmit/control | 90-95% | Slot selection, holdoff, ACK priority, queue limits, exact OPNET segment-size accounting and airtime, concatenation, rate/power aggregation, preamble selection, freshness, Tx occupancy, and RX-induced countdown freezing are covered. |
-| Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in stochastic synchronization and differential traces. |
-| PHY | 84-91% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, gains, bandwidth-scaled noise, mixed-/same-rate interference, exact modulation curves, interval errors, ECC, closure ordering, final accept/drop, and promoted scenario radio/link attributes are live. Remaining uncertainty is threshold variance, opaque off-grid interpolation, external LOS/TMM closure, and authoritative trace calibration. |
+| Full MAC including receive contention | 89-94% | Idle/Search/Track/Tx state, 6.63-ms acquisition, per-attempt normal synchronization thresholds, overlapping-signal selection, rate-aware interference, table/ECC-based collision outcomes, half duplex, slot freezing, and long-preamble sleep/wake behavior are reproduced. Remaining uncertainty is concentrated in authoritative differential traces. |
+| PHY | 84-91% | Airtime, receiver/channel qualification, source-exact non-TMM three-path power, band overlap, gains, bandwidth-scaled noise, mixed-/same-rate interference, exact modulation curves, interval errors, ECC, closure ordering, final accept/drop, and promoted scenario radio/link attributes are live. Remaining uncertainty is opaque off-grid interpolation, external LOS/TMM closure, and authoritative trace calibration. |
 
 Overall estimates:
 
 - NWK/HOP/MAC protocol-control behavior excluding PHY: 92-96% complete.
-- Whole in-scope radio behavior including PHY, excluding battery and BBN:
-  86-91%
-  complete.
+- Canonical `__ARL_ROUTING__` radio behavior including PHY, excluding only
+  battery/energy and the supervisory layer: 86-91% complete.
+
+The alternative BBN routing configuration is outside that estimate because it
+is still an unimplemented parity gap/non-claim; it is not a
+project-authorized exemption.
 
 These ranges reflect confidence in observable behavior, not code-volume
 completion.
@@ -60,9 +67,12 @@ completion.
   receipt, neighbor activation, and discovery completion do not themselves
   wake a packet already held in NWK, and DATA never starts implicit discovery.
 - OPNET-global ACK/resend behavior for NWK DATA.
-- HELLO role metadata preservation and monotonic active-node population,
-  separated from routing capability. A direct route begins at capability zero;
-  only the reporter's source-owned routing UPDATE establishes capability 1/2.
+- HELLO role metadata preservation and monotonic directly-heard active-node
+  population, separated from routing capability and transit path records. A
+  direct route begins at capability zero; only the reporter's source-owned
+  routing UPDATE establishes capability 1/2. The archived multihop MAC uses
+  that local direct population, rather than a neighbor-reported maximum, for
+  its coarse `get_slot()` range.
 - OPNET ARL local-only link-cost calculation: RoutingInfo is retained as
   transaction data but does not create non-legacy bidirectional negotiation.
 - NWK/HOP admission, NSDP ACK/DACK selection, and global pending-DATA state.
@@ -90,12 +100,23 @@ completion.
 - Source-faithful Group16 protection for routing broadcasts and reliable
   routing control, with authentication before HOP duplicate handling,
   delivery, or ACK.
-- Source-faithful Pairwise16 protection for ordinary acknowledged and
-  unacknowledged DATA, plus Pairwise32Encrypt for explicit encrypted one-hop
-  DATA. HMAC binds the source, destination, packet type, length, and protected
-  record; AES-CTR uses the legacy source/destination/count/key/sequence IV.
-- Source-exact Pairwise16 policy for the common ACK/DACK packet type 0. The
-  ns-3 logical ACK body authenticates before cancellation, custody mutation,
+- Source-faithful production Pairwise16 protection for ordinary acknowledged
+  and unacknowledged DATA, plus Pairwise32Encrypt for explicit encrypted
+  one-hop DATA. HMAC binds the source, destination, packet type, length, and
+  protected record; AES-CTR uses the legacy source/destination/count/key/sequence IV.
+- Explicit atomic DATA/ACK source-version policy. Production defaults to
+  Pairwise16; the profile bound to archived
+  executable SHA-256
+  `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af`
+  instead preserves its direct bare ordinary-DATA and `br_Ack` envelopes. A
+  192-byte network packet is 217 bytes archived versus 222 bytes production.
+  All five
+  compiled `send_ack()` callers select the cumulative-register branch, making
+  41 bytes the source-evidenced archived transmit size. The 25-byte exact form
+  is packet-format arithmetic and receive compatibility, not a demonstrated
+  archived transmit path. The ns-3 logical production ACK body authenticates
+  before cancellation, custody
+  mutation,
   or the delayed NWK wake. For an ordinary DATA positive ACK, exact and
   cumulative feedback release HOP pending/per-neighbor capacity, decrement
   NWK NSDP, remove resend custody, and only then cancel the queued MAC copy
@@ -185,9 +206,10 @@ completion.
   concatenation, retransmission DSCP, and head blocking.
 - Aggregate rate/power and preamble selection across all destinations,
   preamble freshness, wireless overhearing, and live HOP link-control results.
-- OPNET Idle/Search/Track/Tx transitions, deterministic -11-dB synchronization
-  qualification, 6.63-ms acquisition, mature-preamble selection, and Track
-  lock that rejects later acquisition attempts.
+- OPNET Idle/Search/Track/Tx transitions, one source-style normal
+  synchronization-threshold draw per attempt (mean -11 dB, variance 0.25 dB
+  squared), 6.63-ms acquisition, mature-preamble selection, and Track lock
+  that rejects later acquisition attempts.
 - Explicit overlapping-signal lifetime, equal-power collision, strongest-signal
   capture at the source-backed 10.5-dB JSR boundary, post-lock interference,
   and half-duplex receive loss while transmitting.
@@ -242,7 +264,7 @@ complete. The mapping is:
 | A Discover authenticated only by its mission tag waits for the missing key | `HandleProtectedHello()` and `ReplayPendingGroupEstablish()` | Newest-per-source queue replacement and KeyUpdate-before-payload callback order. |
 | RoutingUpdate uses Group16 over its plaintext record | `SendAuthenticatedRoutingHello()` and protected `SendRoutingControl()` | Golden record plus valid/tampered/replayed reliable-control tests. |
 | Group32Encrypt authenticates encrypted payload | `ProtectGroupMessage()` / `ReceiveGroupMessage()` | Golden ciphertext/tag, wrong-key rejection, and decrypt round trip. |
-| AppData/AppDataNoAck use Pairwise16 | `SendData()` and `ReceivePairwiseMessage(Pairwise16)` | Independent golden record, tamper/replay checks, auth-before-ACK/delivery, and live over-air round trip. |
+| Production AppData/AppDataNoAck use Pairwise16; adb97 ordinary DATA is bare | `SendData()` and profile-gated receive | Independent golden record, tamper/replay checks, impossible-metadata and declared-profile checks, and live 222-/217-byte over-air round trips. A cleared optional security-count flag is not claimed distinguishable from arbitrary bare bytes. |
 | Pairwise32 and Pairwise32Encrypt use four-byte HMAC; the encrypted mode applies AES-CTR before HMAC | `ProtectPairwiseMessage()` / `ReceivePairwiseMessage()` | Independent records for all three pairwise modes plus wrong-key/type and ciphertext-tamper tests. |
 | AppNeighborcast uses non-ACKed Group32Encrypt broadcast | `SendNeighborcast()` / `HandleProtectedNeighborcast()` | Live one-hop encrypted delivery, exact-once replay behavior, and malformed-envelope rejection. |
 | Group sequence rollover evolves or replaces the key | `NextGroupKeySequence()` / `DeriveNextGroupKeyMaterial()` | ID 1-to-2 derived-key vector, previous-key receive, and ID 15-to-16 fresh-key redistribution state. |
@@ -303,22 +325,26 @@ delivery events.
 | Legacy source behavior | ns-3 implementation | Verification |
 | --- | --- | --- |
 | `Idle_st`, `Search_st`, `Track_st`, and `Tx_st` are distinct operational states | `CsrMacCore::State` plus device-owned receive transitions and MAC-owned Tx transitions | State test observes Search before acquisition, Track after 6.63 ms, and Search after completion. |
-| `SYNC2TRACK_MIN` is 0.00663 s and synchronization requires the source threshold | Scheduled acquisition over sync-eligible preambles with the deterministic -11-dB mean threshold | Acquisition cannot occur at 5 ms and has occurred by 10 ms. |
+| `SYNC2TRACK_MIN` is 0.00663 s and `mark_sync()` draws `normal(-11, 0.25)` | Scheduled acquisition over preambles qualified by a dedicated, stream-assignable normal threshold RNG | Acquisition cannot occur at 5 ms and has occurred by 10 ms; distribution, boundary, and stream-replay checks pass. |
 | Search starts with the earliest signal; a later mature and stronger preamble may replace it | Per-receiver `RxSignal` registry ordered by start time and arrival order | Simultaneous strong/weak scenario delivers only the strongest mature candidate. |
-| Track rejects new synchronization attempts while the tracked packet remains exposed to interference | Fixed tracked-signal identity and post-lock jammer processing | A later, stronger signal cannot capture and corrupts the tracked packet. |
+| Track rejects new synchronization attempts while the tracked packet remains exposed to interference, but `back2search()` can reacquire a surviving preamble | Fixed tracked-signal identity, Track-epoch rejection, and re-admission on a fresh 6.63-ms acquisition | A later signal cannot capture in the current epoch; a weak replacement that remains synchronized is acquired after the first packet completes. |
 | Comparable overlaps collide; sufficiently weak interference falls in the source's -12-dB JSR bucket | Selected overlaps proceed through exact JSR/offset BER and full-packet ECC; only explicit test hooks retain the old hard gate | Equal-power overlap is ECC-dropped while a weak selected jammer remains decodable. |
 | `tslot_tasks()` changes counters only in Search with no `SYNC_PRES` | Tick-by-tick local Tx countdown and neighbor reservation decay gates | A tracked reception freezes and later resumes a pending transmission. |
 | The 13-ms clock and 300-ms holdoff are independent; every Tx loads and advertises its next persistent reservation | One shared local/neighbor slot clock, explicit PREP/holdoff state, Idle's globally aligned RTS event, and retained empty-queue counter | During-Tx, post-Tx, Track-return, Idle-RTS, expiry, zero-counter, and HOP-retry cases consume or redraw the source-ordered slot. |
 | Tx is half duplex and returns to Search after OTA completion | `NotifyPhyTxStart()` / `FinishTx()` plus state-gated receive delivery | A receiver cannot decode an overlapping frame while transmitting. |
 | Long preamble supports duty-cycled discovery; short preamble must arrive during an awake window | Periodic wake phase, Idle/Search transitions, and preamble-survival check | Long preamble bridges a 500-ms sleep interval; short preamble records one miss. |
+| Tracked completion runs `back2search()` and, absent `PREP_TX`, queued traffic, or `WAIT_FOR_ACK`, sleeps after `NO_SIG_SRH_TIME = 0.0078` s; a pipeline-suppressed packet uses the `END_RX + TIC` fallback | Decoded frames reach HOP before immediate Track return; PHY/ECC rejection defers only the return transition by one TIC; ACK/Tx preparation or post-Tx wait supersedes no-signal sleep | The controlled slot-13 DATA/ACK chain remains in Search; malformed/bad-auth HOP rejection returns immediately; a separate ECC drop stays Track for 28 ns and then receives the 7.8-ms Search. |
+| `post_tx()` starts `WAIT_FOR_ACK` at `DONE_TX` only when both queues are empty; expiry sends Search to Idle but only clears the flag in Track | Dedicated post-Tx wait flag/event, distinct from explicit `ForceAwakeFor()` compatibility control | Tests pin no wait during Tx or with queued work, Search expiry inside an aligned periodic wake, and Track expiry followed by the normal 7.8-ms `back2search()`. |
 | Preamble/header fields transmit at S0 and payload/FCS at the selected rate | Source-derived OTA duration using exact OPNET envelope bytes | Existing sent-time, queue, integration, and slot tests use the new airtime checkpoints. |
 
-One pre-existing receive-duty approximation remains outside the source-exact
-boundary. `CsrNetDevice::DeliverTrackedSignal()` calls
-`ForceAwakeFor(0.35)` whenever a decoded aggregate contains an ACKable segment
-addressed to the local node, before HOP authentication runs. No matching fixed
-350-ms receive hold has been recovered from the OPNET source, so a malformed
-or authentication-rejected addressed DATA frame can extend ns-3's awake state.
+The unsupported pre-authentication receive-duty approximation is now closed.
+The earlier `ForceAwakeFor(0.35)` call ran before HOP authentication and had no
+matching fixed receive hold in the supplied source. It has been replaced by
+the source `Track -> Search` / `back2search()` ordering: authenticated ACK
+construction can activate `PREP_TX`, the dedicated post-Tx `WAIT_FOR_ACK`
+event can retain Search, and otherwise the receiver sleeps after 7.8 ms. The timing
+change is classified as source-exact MAC behavior rather than a security or
+battery-model extension.
 
 The recovered discovery schedule is independent of radio completion.
 `routesDiscoveryInitLocal()` uses a 5,000-ms interval with repeat count three:
@@ -395,6 +421,12 @@ send-only-to-gateway. All three historical packet generators lack DSCP code,
 so their profiles force FIFO DSCP 0. The newer supplied source remains a
 separate send-only profile with an explicit fixed-DSCP approximation.
 
+The newer `br_app` source also contains a percentage-driven DSCP choice, but
+no selected scenario recovers the `DSCP_pct` value or an authoritative mapping
+for its `op_dist_uniform(100.0)` draw. The current profile therefore keeps
+explicit deterministic `flow_dscp` input and does not claim percentage-mixture
+or RNG-stream parity.
+
 The canonical run row also carries an executable-backed `mac_profile`.
 Selection is hash-bound and explicit; it is never inferred from a topology,
 scenario name, or node count because a network model can be paired with a
@@ -453,13 +485,14 @@ tolerances, and reports missing, extra, replaced, or field-mismatched events.
 Every run records normalized inputs, a JSON report, logs, hashes, and exact
 commands in a manifest.
 
-The application runner schedules the next constant generator event before
-all gates, caches the discovered gateway, supports the historical gateway's
-live destination draw, and writes one compact admission row per flow by
-default. Those rows partition attempts into discovery, empty topology,
-unknown gateway route, missing dynamic destination, NSDP-full, and admitted
-counts. An explicit `--admissionTrace=1` diagnostic mode additionally records
-every source-ordered attempt and its live application/NWK/HOP state; ordinary
+The application runner schedules the next constant generator event before all
+gates, scans selected routes for the source-defined `Gateway` capability,
+caches the matching destination, supports the historical gateway's live
+destination draw, and writes one compact admission row per flow by default.
+Those rows partition attempts into discovery, empty topology, unknown gateway
+route, missing dynamic destination, NSDP-full, and admitted counts. An
+explicit `--admissionTrace=1` diagnostic mode additionally records every
+source-ordered attempt and its live application/NWK/HOP state; ordinary
 aggregate runs retain the compact surface.
 
 Historical result databases are now available and executable evidence. The
@@ -599,11 +632,13 @@ transmit-delay, error, and concatenation code implement only 8--128 kbit/s and
 fall through or reject high-rate packets. It therefore does not supersede the
 opt-in recovered-modem extension.
 
-The hidden-node ECC-drop probe also exposes a deliberately unresolved identity
-mapping: Modeler records 10.84105
-dropped packets/s on average, while ns-3's narrow `reason=ecc` event
-classification records 0.6195167 packets/s. It is excluded from the default
-equivalence set until prior-stage rejection accounting is reconciled. The
+The hidden-node ECC-drop probe also exposes a substantive behavioral gap:
+Modeler records 10.84105 dropped packets/s on average, while ns-3's
+source-equivalent `reason=ecc` event classification records 0.6195167
+packets/s. Inspection of `br_mac` and `br_ecc` proves that prior-stage and
+half-duplex rejections do not increment this statistic. ECC remains outside
+the default set because the vector is absent from some recovered results, but
+can now be selected as an exact-identity diagnostic where present. The
 `*.ov` files contain bucket aggregates rather than packet-level ordering, so
 an instrumented OPNET CSV event export remains necessary for reservation/
 collision event certification. Exact formats, commands, measured results, and
@@ -627,15 +662,12 @@ the licensed Modeler export. The complete one-run handoff is documented in
 1. When licensed Modeler access is available, execute the prepared
    reservation/collision case, retain its CSV and provenance manifest,
    validate it, and run the event-order differential comparison.
-2. Reproduce synchronization-threshold variance for calibrated runs.
-3. Close exact security-wrapper gaps for remaining HOP control packets and the
+2. Close exact security-wrapper gaps for remaining HOP control packets and the
    distinct network-security modes once authoritative mapping or trace
    evidence is available.
 
 ## Deferred PHY/calibration work
 
-- Stochastic synchronization threshold variance around the implemented
-  -11-dB mean.
 - Authoritative off-grid `op_tbl_mod_ber()` behavior if an OPNET probe becomes
   available; current lookups use endpoint clamp and arithmetic interpolation.
 - Exact external Earth-LOS/TMM injection; imported TMM scenarios are rejected
@@ -650,15 +682,22 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 ## Missing high-value scenarios
 
-1. Route loss and recovery while mixed-DSCP traffic is held in NWK.
-2. Sequence wraparound and cumulative windows older than 64 packets.
-3. Sustained lossy overload across all queue limits with counter invariants.
-4. Three-or-more-signal mixed-rate intervals and multiple competing same-rate
+Focused regressions now cover route loss/recovery while mixed-DSCP traffic is
+held in NWK, a 66-packet cumulative receive window that crosses 16-bit
+sequence rollover and retains exactly its newest 64 ACK bits, and three
+simultaneous equal-power signals without counting either rejected acquisition
+contender as an ECC drop. Existing queue tests also exercise the individual
+512-entry MAC DATA and HOP resend limits.
+The remaining high-value expansions are:
+
+1. DACK and key-ID rollover at a live cumulative feedback boundary.
+2. Sustained lossy overload across all queue limits with counter invariants.
+3. Three-or-more-signal mixed-rate intervals and multiple competing same-rate
    JSR records under the recovered receiver-global last-collision state.
-5. An authoritative OPNET CSV event reference using the now-identical imported
+4. An authoritative OPNET CSV event reference using the now-identical imported
    topology, explicit traffic, and seed. Historical aggregate results are
    available but cannot substitute for chronological events.
-6. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
+5. Lost KeyRequest, lost KeyUpdate ACK, and pairwise sequence/key-ID rollover
    during admission. Focused tests now cover authenticated security-count
    restart and wrap.
 
@@ -666,7 +705,7 @@ the licensed Modeler export. The complete one-run handoff is documented in
 
 All 38 CSR executable targets build on this audit revision. The 36 focused
 parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (38/38). All 190 focused Python tests pass; the suite additionally
+workflow pass (38/38). All 202 focused Python tests pass; the suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end
@@ -688,12 +727,15 @@ test adds exact GroupEstablish/Group16/Group32Encrypt records, deferred replay,
 both authentication halves, key evolution, previous-key handling, and fresh
 epoch redistribution. The remaining-security test adds independent
 Pairwise16/Pairwise32/Pairwise32Encrypt records, AES-CTR ciphertext, wrong-type
-and wrong-key rejection, pairwise auth-before-ACK/delivery, source-exact
-Pairwise16 ACK/DACK policy and live DACK capture, live encrypted
+and wrong-key rejection, pairwise auth-before-ACK/delivery, explicit production
+Pairwise16 and hash-bound historical bare DATA/ACK profiles with live
+222-/217-byte DATA and 46-/41-byte DACK capture, live encrypted
 AppNeighborcast, malformed-envelope rejection, and all three live send paths.
-The receive-contention test covers Search/Track timing, simultaneous collision,
-strongest-preamble capture, post-lock interference, RX-induced slot freezing,
-long- versus short-preamble duty-cycle behavior, and half-duplex loss.
+The receive-contention test covers Search/Track timing, two- and three-signal
+simultaneous collision, strongest-preamble capture, post-lock interference,
+RX-induced slot freezing, long- versus short-preamble duty-cycle behavior,
+half-duplex loss, and source-separated prior-stage/half-duplex/ECC drop
+identity.
 The reservation-lifecycle test adds Idle queueing until its globally aligned
 RTS TSLOT, the shared local/neighbor phase, `prep_tx` holdoff restart,
 first-contact reservation ordering, persistent advertisement/reuse,
@@ -717,9 +759,11 @@ trace.
 The MAC-sent-time test now pins retry and final-expiry scans one `TIC` beyond
 their nominal actual-send boundaries, verifies the final queue wake one
 additional `TIC` later, and covers the missing-entry fallback plus
-delete-all-before-retry ordering. The ACK-window and DACK-hold tests cover
-HOP-owned generic wakes for valid and no-op feedback, wrong-destination
-suppression, HOP-only coalescing, and DACK capacity-release ordering.
+delete-all-before-retry ordering. The ACK-window and DACK-hold tests cover a
+66-packet cumulative window across 16-bit sequence rollover with the newest 64
+acknowledgments retained. They also cover HOP-owned generic wakes for valid and
+no-op feedback, wrong-destination suppression, HOP-only coalescing, and DACK
+capacity-release ordering.
 The queue-observation test adds exact source write-site and ordering checks for
 HOP enqueue/ACK removal, MAC data admission/selection delay, ACK duplicate and
 cumulative-update suppression, unchanged full-queue rejection, and
@@ -735,16 +779,22 @@ pre-16/post-17 selects DACK, an ACK-marked duplicate ACKs without another
 enqueue, a DACK-marked retry is re-enqueued and reassessed, and a first
 no-route reception remains ACK-suppressed. Legacy NWK performs no duplicate
 suppression after that retry and can deliver both relay copies under fresh
-onward HOP sequences. The strict packet-path analyzer currently treats that
-source-exact lost-DACK quirk as a duplicate-delivery failure. A three-hop
-lineage fixture now proves two byte-identical ingress receptions, two DACKs,
-two relay custody entries, distinct onward HOP sequences, and two destination
-deliveries; the aggregate analyzer accepts the extra delivery only with its
-complete enqueue/feedback proof. Binding each extra copy to a complete
-downstream suffix and distinct overlapping HOP leg in the strict packet-path
-analyzer remains open. For all other paths, that analyzer validates delivered
-and in-flight event grammars, route context, next-hop continuity, loops, and
-the end-to-end residence/transit decomposition.
+onward HOP sequences. The strict packet-path analyzer now joins each admission
+and first-reception feedback by exact
+`(src,dst,sequence,from,to,hop_sequence)` identity, proves the repeated-DACK
+fork from the pre/post-NSDP transition, and constrains each enqueue-to-forward
+edge with the same-node `NWK.Network Queuing Delay (sec)` sample immediately
+preceding the forward. The delay must agree within 1 ns, and edge-removal
+rematching must prove the complete graph match is unique. Regressions pin
+candidate-order independence, missing/displaced/wrong evidence, non-unique
+matching, and the observed out-of-order case where HOP sequence 990 is
+acknowledged before 989. The frozen 6,000-second trace
+`1f18699e67cb3d57906c04f29cb305e6fd7aa10913aa00f74fb97aef05e98863`
+then passes with 8,733 valid delivered copies, 433 valid incomplete copies,
+zero invalid copies, and zero route-context mismatches; all 100 end-to-end
+buckets exactly match the aggregate builder. Unproved or incompletely covered
+duplicates remain fatal. This closes the former packet-path analyzer boundary,
+but does not supply the missing chronological OPNET event trace.
 The PHY-front-end test adds independent propagation, overlap, gain, noise, and
 SNR vectors plus live channel-mismatch, different-rate additive-noise, and
 same-rate JSR/time-offset paths. The BER/ECC test adds exact modulation-table
@@ -771,7 +821,10 @@ test pins the gateway's `10/15/20/25`-second broadcast/completion boundaries and
 newest-destination-first SNMP handoff, including exact reverse-only HOP and
 final-destination addressing. The queue-order tests prove that route
 receipt, neighbor activation, and discovery completion do not create an
-unsourced NWK wake. The autonomous convergence test still covers a lossless
-0-1-2 line with no static routes, complete ARL snapshot ACK/reassembly state,
+unsourced NWK wake. They also hold mixed best-effort and positive-DSCP traffic
+through route loss, then verify source-ordered service when the next
+application arrival exposes the recovered route. The autonomous convergence
+test still covers a lossless 0-1-2 line with no static routes, complete ARL
+snapshot ACK/reassembly state,
 bidirectional two-hop learning, and exactly-once DATA delivery. Warnings are
 limited to the pre-existing unused callback/CSV helper warnings.

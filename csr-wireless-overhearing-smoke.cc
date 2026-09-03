@@ -127,6 +127,7 @@ main ()
 
   hop3->SetNodeId (3);
   hop3->SetMac (&node3->GetMac ());
+  hop3->SetHopWireProfile (CsrHopWireProfile::HIST_ADB97C54_BARE);
   hop3->SetRxFromHopCallback (MakeCallback (&RecordAtNode3Nwk));
 
   node1->GetMac ().SetRxCallback (MakeCallback (&RecordAtNode1Mac));

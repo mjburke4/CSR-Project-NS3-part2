@@ -4,6 +4,7 @@
 #include "ns3/csr-net-device.h"
 #include "ns3/csr-nwk-layer.h"
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -112,6 +113,26 @@ BuildDataFrame (uint16_t sequence, uint32_t payloadBytes = 20)
 }
 
 Ptr<Packet>
+BuildNoAckDataFrame (CsrNodeId source,
+                     CsrNodeId destination,
+                     uint16_t sequence,
+                     uint32_t payloadBytes = 20)
+{
+  CsrHeader header (source,
+                    destination,
+                    sequence,
+                    0,
+                    false,
+                    false);
+  header.SetType (CSR_PKT_DATA);
+  header.SetDestType (CSR_DEST_UNICAST);
+
+  Ptr<Packet> frame = Create<Packet> (payloadBytes);
+  frame->AddHeader (header);
+  return frame;
+}
+
+Ptr<Packet>
 BuildFixedRateDataFrame (uint16_t sequence,
                          uint32_t payloadBytes,
                          CsrRateKey rateKbps)
@@ -206,6 +227,12 @@ RecordLifecycleTransmission (CsrNodeId destination,
                  sentTime <= MilliSeconds (559),
                "first TX fell outside the source holdoff/slot window");
       Simulator::Schedule (MilliSeconds (1), &EnqueueDuringTx);
+      Simulator::Schedule (
+        Seconds (g_shortFrameDuration) + NanoSeconds (1),
+        [] () {
+          Require (!g_sender->IsPostTxWaitActive (),
+                   "DONE_TX started WAIT while a queued frame remained");
+        });
     }
   else if (sequence == 2)
     {
@@ -1070,6 +1097,7 @@ TestControlledFirstDataAckReleaseChain ()
   const Time sourceTrackAt = Seconds (301.827634);
   const Time ackCompletionAt = Seconds (301.843384);
   const Time nwkWakeAt = ackCompletionAt + CsrOpnetTic ();
+  const Time postReceiveSleepAt = dataDeliveryAt + Seconds (0.0078);
 
   RngSeedManager::SetSeed (1);
   RngSeedManager::SetRun (10);
@@ -1206,6 +1234,13 @@ TestControlledFirstDataAckReleaseChain ()
     Require (g_chainReceiverDevice->GetMac ().GetTransmittedFrameCount () == 0,
              "controlled ACK transmitted before slot 13");
   });
+  Simulator::Schedule (postReceiveSleepAt + NanoSeconds (1), [] () {
+    Require (g_chainReceiverDevice->GetMacState () ==
+               CsrMacCore::State::SEARCH &&
+               g_chainReceiverDevice->GetMac ().IsTxPreparationActive () &&
+               g_chainReceiverDevice->GetMac ().GetAckQueuedFrameCount () == 1,
+             "ACK preparation did not supersede post-RX no-signal sleep");
+  });
   Simulator::Schedule (ackTxAt - NanoSeconds (1),
                        &PollControlledAckTransmission);
   Simulator::Schedule (ackTxAt + NanoSeconds (1), [] () {
@@ -1281,6 +1316,599 @@ TestControlledFirstDataAckReleaseChain ()
   g_chainReceiverNwk = nullptr;
 }
 
+// Exercise the post-Track timer through the actual PHY/MAC/HOP path. Both
+// records are PHY-valid and locally addressed; only HOP rejects them.
+enum class RejectedProtectedData
+{
+  MALFORMED,
+  AUTHENTICATION_FAILED
+};
+
+void
+TestOverAirRejectedDataReturnsIdle (RejectedProtectedData rejection)
+{
+  constexpr CsrNodeId sourceNode = 1;
+  constexpr CsrNodeId receiverNode = 2;
+  constexpr uint16_t securityCount = 7;
+  constexpr double distanceMeters = 1.0;
+  const Time sendAt = Seconds (0.988);
+  const Time postReceiveSearch = Seconds (0.0078);
+
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (
+    rejection == RejectedProtectedData::MALFORMED ? 11 : 12);
+
+  Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (receiverNode);
+  sender->AddPeer (receiver);
+  receiver->GetPhy ().SetLinkDistanceMeters (
+    sourceNode, receiverNode, distanceMeters);
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  sender->GetPhy ().SetPerModel (noErrors);
+  receiver->GetPhy ().SetPerModel (noErrors);
+
+  CsrLegacyCrypto::MissionKey missionKey {};
+  CsrLegacyCrypto::PairwiseKeyMaterial pairwiseMaterial {};
+  for (std::size_t i = 0; i < missionKey.size (); ++i)
+    {
+      missionKey[i] = static_cast<uint8_t> (i);
+    }
+  for (std::size_t i = 0; i < pairwiseMaterial.size (); ++i)
+    {
+      pairwiseMaterial[i] = static_cast<uint8_t> (0x40 + i);
+    }
+
+  Ptr<CsrHopLayer> receiverHop = CreateObject<CsrHopLayer> ();
+  receiverHop->SetNodeId (receiverNode);
+  receiverHop->SetMac (&receiver->GetMac ());
+  receiverHop->SetOwnSecurityCount (securityCount);
+  receiverHop->SetMissionKey (missionKey);
+  receiverHop->SetPairwiseKeyMaterial (sourceNode, pairwiseMaterial);
+  receiver->GetMac ().SetRxCallback (
+    MakeCallback (&CsrHopLayer::ReceiveFromMac, receiverHop));
+
+  CsrHopSecurityState senderSecurity;
+  senderSecurity.SetNodeId (sourceNode);
+  senderSecurity.SetOwnSecurityCount (securityCount);
+  senderSecurity.SetMissionKey (missionKey);
+  senderSecurity.SetPairwiseKeyMaterial (receiverNode,
+                                         pairwiseMaterial);
+
+  std::vector<uint8_t> record;
+  if (rejection == RejectedProtectedData::MALFORMED)
+    {
+      // Pairwise16 needs a packed key/sequence word and a two-byte tag.
+      // This shorter record reaches HOP over the air but is structurally
+      // malformed before authentication can succeed.
+      record = {0x00, 0x10, 0x02};
+    }
+  else
+    {
+      const std::array<uint8_t, 4> body {0x21, 0x22, 0x23, 0x24};
+      CsrProtectedPairwiseMessage protectedMessage =
+        senderSecurity.ProtectPairwiseMessage (
+          receiverNode,
+          CsrPairwiseSecurityMode::Pairwise16,
+          3,
+          body);
+      record = protectedMessage.record;
+      record.back () ^= 0x80;
+    }
+
+  Ptr<Packet> frame = Create<Packet> (record.data (), record.size ());
+  CsrHeader outer (sourceNode,
+                   receiverNode,
+                   rejection == RejectedProtectedData::MALFORMED ? 21 : 22,
+                   7,
+                   true,
+                   false);
+  outer.SetType (CSR_PKT_DATA);
+  outer.SetDestType (CSR_DEST_UNICAST);
+  outer.SetSecurityCount (securityCount);
+  outer.SetLinkControl (128, 33.0, -109.0);
+  frame->AddHeader (outer);
+
+  receiver->EnableOpnetAlignedDutyCycling (true);
+  Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+           "rejected over-air fixture did not begin in Idle");
+
+  Time completionAt = Time::Min ();
+  Simulator::Schedule (sendAt, [&, sender, receiver, frame] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "rejected over-air frame did not begin in periodic Search");
+    Time duration = sender->SendToPeer (frame,
+                                        receiver->GetId (),
+                                        128,
+                                        33.0,
+                                        PREAMBLE_SHORT,
+                                        1,
+                                        true);
+    Time propagation = Seconds (
+      distanceMeters /
+      CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
+    completionAt = Simulator::Now () + propagation + duration;
+    Time untilCompletion = completionAt - Simulator::Now ();
+
+    Simulator::Schedule (untilCompletion - NanoSeconds (1), [receiver] () {
+      Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+               "rejected over-air frame left Track before completion");
+    });
+    Simulator::Schedule (untilCompletion + NanoSeconds (1), [receiver] () {
+      Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+               "rejected over-air frame did not return Track to Search");
+      Require (receiver->GetMac ().GetAckQueuedFrameCount () == 0,
+               "rejected over-air frame earned an ACK");
+    });
+    Simulator::Schedule (
+      untilCompletion + postReceiveSearch - NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                 "post-RX Search ended before NO_SIG_SRH_TIME");
+      });
+    Simulator::Schedule (
+      untilCompletion + postReceiveSearch + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+                 "rejected over-air frame extended Search beyond 7.8 ms");
+        Require (!receiver->GetMac ().IsTxPreparationActive () &&
+                   receiver->GetMac ().GetAckQueuedFrameCount () == 0 &&
+                   receiver->GetMac ().GetTransmittedFrameCount () == 0,
+                 "rejected over-air frame changed ACK/Tx state");
+      });
+    Simulator::Schedule (
+      untilCompletion + Seconds (0.35) + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+                 "unsupported 350-ms receive hold remains active");
+      });
+  });
+
+  Simulator::Stop (Seconds (1.5));
+  Simulator::Run ();
+
+  Require (completionAt != Time::Min (),
+           "rejected over-air frame did not run");
+
+  Simulator::Destroy ();
+}
+
+void
+TestPostReceiveAcquisitionSupersedesSleep ()
+{
+  constexpr CsrNodeId sourceNode = 1;
+  constexpr CsrNodeId receiverNode = 2;
+  constexpr double distanceMeters = 1.0;
+  const Time sendAt = Seconds (0.988);
+  const Time nextSignalDelay = Seconds (0.0005);
+  const Time postReceiveSearch = Seconds (0.0078);
+
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (13);
+
+  Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (receiverNode);
+  sender->AddPeer (receiver);
+  receiver->GetPhy ().SetLinkDistanceMeters (
+    sourceNode, receiverNode, distanceMeters);
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  sender->GetPhy ().SetPerModel (noErrors);
+  receiver->GetPhy ().SetPerModel (noErrors);
+
+  auto buildNoAckFrame = [] (uint16_t sequence) {
+    CsrHeader header (sourceNode,
+                      receiverNode,
+                      sequence,
+                      0,
+                      false,
+                      false);
+    header.SetType (CSR_PKT_DATA);
+    header.SetDestType (CSR_DEST_UNICAST);
+    Ptr<Packet> frame = Create<Packet> (4);
+    frame->AddHeader (header);
+    return frame;
+  };
+
+  receiver->EnableOpnetAlignedDutyCycling (true);
+  Simulator::Schedule (sendAt, [=] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "replacement-signal fixture did not begin in Search");
+    Time firstDuration = sender->SendToPeer (buildNoAckFrame (30),
+                                             receiverNode,
+                                             128,
+                                             33.0,
+                                             PREAMBLE_SHORT,
+                                             1,
+                                             false);
+    Time propagation = Seconds (
+      distanceMeters /
+      CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
+    Time firstCompletionOffset = propagation + firstDuration;
+
+    Simulator::Schedule (firstCompletionOffset + nextSignalDelay,
+      [=] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                 "post-RX Search did not admit a replacement SYNC");
+        Time secondDuration = sender->SendToPeer (buildNoAckFrame (31),
+                                                  receiverNode,
+                                                  128,
+                                                  33.0,
+                                                  PREAMBLE_SHORT,
+                                                  1,
+                                                  false);
+        Time secondCompletionOffset = propagation + secondDuration;
+
+        Simulator::Schedule (
+          secondCompletionOffset + postReceiveSearch + NanoSeconds (1),
+          [receiver] () {
+            Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+                     "replacement frame did not receive its own 7.8-ms Search");
+          });
+      });
+
+    Simulator::Schedule (
+      firstCompletionOffset + postReceiveSearch + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+                 "new acquisition did not supersede post-RX sleep");
+      });
+  });
+
+  Simulator::Stop (Seconds (1.2));
+  Simulator::Run ();
+  Simulator::Destroy ();
+}
+
+void
+TestTrackEpochRejectedReplacementReacquires ()
+{
+  constexpr CsrNodeId firstSource = 1;
+  constexpr CsrNodeId receiverNode = 2;
+  constexpr CsrNodeId replacementSource = 3;
+  constexpr double distanceMeters = 1.0;
+  const Time sendAt = Seconds (0.988);
+  const Time syncToTrack = Seconds (0.00663);
+  const Time postReceiveSearch = Seconds (0.0078);
+
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (14);
+
+  Ptr<CsrNetDevice> first = CreateObject<CsrNetDevice> (firstSource);
+  Ptr<CsrNetDevice> replacement =
+    CreateObject<CsrNetDevice> (replacementSource);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (receiverNode);
+  first->AddPeer (receiver);
+  replacement->AddPeer (receiver);
+  receiver->GetPhy ().SetLinkDistanceMeters (
+    firstSource, receiverNode, distanceMeters);
+  receiver->GetPhy ().SetLinkDistanceMeters (
+    replacementSource, receiverNode, distanceMeters);
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  first->GetPhy ().SetPerModel (noErrors);
+  replacement->GetPhy ().SetPerModel (noErrors);
+  receiver->GetPhy ().SetPerModel (noErrors);
+  receiver->EnableOpnetAlignedDutyCycling (true);
+
+  Time firstCompletionAt = Time::Min ();
+  Time replacementCompletionAt = Time::Min ();
+  Simulator::Schedule (sendAt, [&, first, replacement, receiver] () {
+    Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+             "Track-epoch fixture did not begin in periodic Search");
+    Time firstDuration = first->SendToPeer (
+      BuildNoAckDataFrame (firstSource, receiverNode, 40),
+      receiverNode,
+      128,
+      33.0,
+      PREAMBLE_SHORT,
+      1,
+      false);
+    Time propagation = Seconds (
+      distanceMeters /
+      CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
+    firstCompletionAt = Simulator::Now () + propagation + firstDuration;
+
+    // The replacement begins six milliseconds before END_RX: the receiver is
+    // already in Track, yet 7.26 ms of its 13.26-ms preamble remains.  This is
+    // long enough for back2search() to run a fresh 6.63-ms acquisition.
+    Time replacementStartOffset = firstDuration - MilliSeconds (6);
+    Simulator::Schedule (
+      replacementStartOffset,
+      [&, replacement, receiver, propagation] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+                 "replacement SYNC did not begin during Track");
+        Time replacementDuration = replacement->SendToPeer (
+          BuildNoAckDataFrame (replacementSource, receiverNode, 41),
+          receiverNode,
+          128,
+          20.0,
+          PREAMBLE_SHORT,
+          1,
+          false);
+        replacementCompletionAt = Simulator::Now () +
+          propagation + replacementDuration;
+
+        Time untilReplacementCompletion =
+          replacementCompletionAt - Simulator::Now ();
+        Simulator::Schedule (
+          untilReplacementCompletion + NanoSeconds (1),
+          [receiver] () {
+            Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                     "reacquired replacement did not return to Search");
+          });
+        Simulator::Schedule (
+          untilReplacementCompletion + postReceiveSearch + NanoSeconds (1),
+          [receiver] () {
+            Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+                     "replacement did not receive a fresh 7.8-ms Search");
+          });
+      });
+
+    Time untilFirstCompletion = firstCompletionAt - Simulator::Now ();
+    Simulator::Schedule (
+      untilFirstCompletion + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                 "first completion did not return Track to Search");
+      });
+    Simulator::Schedule (
+      untilFirstCompletion + syncToTrack - NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                 "Track-rejected replacement reacquired before 6.63 ms");
+      });
+    Simulator::Schedule (
+      untilFirstCompletion + syncToTrack + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+                 "surviving Track-rejected replacement was not reacquired");
+      });
+  });
+
+  Simulator::Stop (Seconds (1.1));
+  Simulator::Run ();
+
+  Require (firstCompletionAt != Time::Min () &&
+             replacementCompletionAt != Time::Min (),
+           "Track-epoch replacement fixture did not complete");
+  Simulator::Destroy ();
+}
+
+void
+TestPostTxWaitExpiresFromSearch ()
+{
+  constexpr CsrNodeId sourceNode = 1;
+  constexpr CsrNodeId destinationNode = 2;
+  const Time sendAt = Seconds (0.763);
+  const Time postTxWait = Seconds (17.0);
+
+  Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (sourceNode);
+  sender->EnableOpnetAlignedDutyCycling (true);
+
+  Time completionAt = Time::Min ();
+  Time waitExpiryAt = Time::Min ();
+  Simulator::Schedule (sendAt, [&, sender] () {
+    Time duration = sender->SendToPeer (
+      BuildNoAckDataFrame (sourceNode, destinationNode, 50),
+      destinationNode,
+      128,
+      0.0,
+      PREAMBLE_SHORT,
+      1,
+      false);
+    Require (sender->GetMacState () == CsrMacCore::State::TX &&
+               !sender->IsPostTxWaitActive (),
+             "post-Tx WAIT started before local transmission completed");
+    completionAt = Simulator::Now () + duration;
+    waitExpiryAt = completionAt + postTxWait;
+
+    double periodicOffset = std::fmod (waitExpiryAt.GetSeconds (), 0.988);
+    Require (periodicOffset >= 0.0 && periodicOffset < 0.0089,
+             "post-Tx Search expiry was not placed inside a periodic window");
+
+    Simulator::Schedule (duration + NanoSeconds (1), [sender] () {
+      Require (sender->GetMacState () == CsrMacCore::State::SEARCH &&
+                 sender->IsPostTxWaitActive (),
+               "empty-queue DONE_TX did not start source post-Tx WAIT");
+    });
+    Simulator::Schedule (
+      duration + postTxWait - NanoSeconds (1),
+      [sender] () {
+        Require (sender->GetMacState () == CsrMacCore::State::SEARCH &&
+                   sender->IsPostTxWaitActive (),
+                 "post-Tx WAIT ended before its source deadline");
+      });
+    Simulator::Schedule (
+      duration + postTxWait + NanoSeconds (1),
+      [sender] () {
+        Require (sender->GetMacState () == CsrMacCore::State::IDLE &&
+                   !sender->IsPostTxWaitActive (),
+                 "Search POST_TX_WAIT did not force Idle in an awake window");
+      });
+  });
+
+  Simulator::Stop (Seconds (17.8));
+  Simulator::Run ();
+
+  Require (completionAt != Time::Min () && waitExpiryAt != Time::Min (),
+           "post-Tx Search expiry fixture did not run");
+  Simulator::Destroy ();
+}
+
+void
+TestPostTxWaitExpiresDuringTrack ()
+{
+  constexpr CsrNodeId trackedSource = 1;
+  constexpr CsrNodeId receiverNode = 2;
+  constexpr CsrNodeId initialDestination = 3;
+  constexpr double distanceMeters = 1.0;
+  const Time initialTxAt = Seconds (0.763);
+  const Time postTxWait = Seconds (17.0);
+  const Time trackBeforeWaitExpiry = MilliSeconds (10);
+  const Time postReceiveSearch = Seconds (0.0078);
+
+  Ptr<CsrNetDevice> trackedSender =
+    CreateObject<CsrNetDevice> (trackedSource);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (receiverNode);
+  trackedSender->AddPeer (receiver);
+  receiver->GetPhy ().SetLinkDistanceMeters (
+    trackedSource, receiverNode, distanceMeters);
+
+  CsrPerModelFn noErrors =
+    [] (int, double, uint32_t) { return 0.0; };
+  trackedSender->GetPhy ().SetPerModel (noErrors);
+  receiver->GetPhy ().SetPerModel (noErrors);
+  receiver->EnableOpnetAlignedDutyCycling (true);
+
+  Time trackedCompletionAt = Time::Min ();
+  Simulator::Schedule (initialTxAt, [&, trackedSender, receiver] () {
+    Time initialDuration = receiver->SendToPeer (
+      BuildNoAckDataFrame (receiverNode, initialDestination, 60),
+      initialDestination,
+      128,
+      0.0,
+      PREAMBLE_SHORT,
+      1,
+      false);
+    Time waitExpiryAt = Simulator::Now () + initialDuration + postTxWait;
+    Time trackedStartAt = waitExpiryAt - trackBeforeWaitExpiry;
+
+    Simulator::Schedule (
+      trackedStartAt - Simulator::Now (),
+      [&, trackedSender, receiver, waitExpiryAt] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::SEARCH &&
+                   receiver->IsPostTxWaitActive (),
+                 "tracked signal did not begin during post-Tx WAIT");
+        Time trackedDuration = trackedSender->SendToPeer (
+          BuildNoAckDataFrame (trackedSource, receiverNode, 61),
+          receiverNode,
+          128,
+          33.0,
+          PREAMBLE_SHORT,
+          1,
+          false);
+        Time propagation = Seconds (
+          distanceMeters /
+          CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
+        trackedCompletionAt = Simulator::Now () +
+          propagation + trackedDuration;
+
+        Simulator::Schedule (
+          waitExpiryAt - Simulator::Now () + NanoSeconds (1),
+          [receiver] () {
+            Require (receiver->GetMacState () == CsrMacCore::State::TRACK &&
+                       !receiver->IsPostTxWaitActive (),
+                     "Track POST_TX_WAIT did not only clear WAIT_FOR_ACK");
+          });
+        Simulator::Schedule (
+          trackedCompletionAt - Simulator::Now () + NanoSeconds (1),
+          [receiver] () {
+            Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                     "post-WAIT tracked completion did not enter Search");
+          });
+        Simulator::Schedule (
+          trackedCompletionAt - Simulator::Now () +
+            postReceiveSearch - NanoSeconds (1),
+          [receiver] () {
+            Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                     "post-WAIT back2search ended before 7.8 ms");
+          });
+        Simulator::Schedule (
+          trackedCompletionAt - Simulator::Now () +
+            postReceiveSearch + NanoSeconds (1),
+          [receiver] () {
+            Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+                     "post-WAIT back2search did not sleep after 7.8 ms");
+          });
+      });
+  });
+
+  Simulator::Stop (Seconds (17.9));
+  Simulator::Run ();
+
+  Require (trackedCompletionAt != Time::Min (),
+           "post-Tx Track expiry fixture did not run");
+  Simulator::Destroy ();
+}
+
+void
+TestPipelineRejectedReceiveUsesTicFallback ()
+{
+  constexpr CsrNodeId sourceNode = 1;
+  constexpr CsrNodeId receiverNode = 2;
+  constexpr double distanceMeters = 1.0;
+  const Time sendAt = Seconds (0.988);
+  const Time postReceiveSearch = Seconds (0.0078);
+  const Time tic = CsrOpnetTic ();
+
+  Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (sourceNode);
+  Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (receiverNode);
+  sender->AddPeer (receiver);
+  receiver->GetPhy ().SetLinkDistanceMeters (
+    sourceNode, receiverNode, distanceMeters);
+  receiver->GetPhy ().SetPerModel (
+    [] (int, double, uint32_t) { return 1.0; });
+  receiver->EnableOpnetAlignedDutyCycling (true);
+
+  Time completionAt = Time::Min ();
+  Simulator::Schedule (sendAt, [&, sender, receiver] () {
+    Time duration = sender->SendToPeer (
+      BuildNoAckDataFrame (sourceNode, receiverNode, 70),
+      receiverNode,
+      128,
+      33.0,
+      PREAMBLE_SHORT,
+      1,
+      false);
+    Time propagation = Seconds (
+      distanceMeters /
+      CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
+    completionAt = Simulator::Now () + propagation + duration;
+    Time untilCompletion = completionAt - Simulator::Now ();
+
+    Simulator::Schedule (
+      untilCompletion + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+                 "pipeline drop returned before END_RX plus TIC");
+        Require (receiver->HasLastRxDecision () &&
+                   !receiver->GetLastRxDecision ().success,
+                 "pipeline-drop fixture did not reject the tracked packet");
+      });
+    Simulator::Schedule (
+      untilCompletion + tic - NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+                 "pipeline drop left Track before the TIC fallback");
+      });
+    Simulator::Schedule (
+      untilCompletion + tic + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+                 "pipeline drop did not return at END_RX plus TIC");
+      });
+    Simulator::Schedule (
+      untilCompletion + tic + postReceiveSearch + NanoSeconds (1),
+      [receiver] () {
+        Require (receiver->GetMacState () == CsrMacCore::State::IDLE,
+                 "pipeline fallback did not start a fresh 7.8-ms Search");
+      });
+  });
+
+  Simulator::Stop (Seconds (1.1));
+  Simulator::Run ();
+
+  Require (completionAt != Time::Min (),
+           "pipeline-drop timing fixture did not run");
+  Require (receiver->GetRxEccDropCount () == 1,
+           "pipeline-drop fixture did not exercise the ECC gate");
+  Simulator::Destroy ();
+}
+
 void
 TestNoSignalSleepCancelsStaleAcquisition ()
 {
@@ -1343,6 +1971,15 @@ main ()
   TestPackingRetryRespectsMacState ();
   TestNoSignalSearchReturnsIdleAndRestartsHoldoff ();
   TestControlledFirstDataAckReleaseChain ();
+  TestOverAirRejectedDataReturnsIdle (
+    RejectedProtectedData::MALFORMED);
+  TestOverAirRejectedDataReturnsIdle (
+    RejectedProtectedData::AUTHENTICATION_FAILED);
+  TestPostReceiveAcquisitionSupersedesSleep ();
+  TestTrackEpochRejectedReplacementReacquires ();
+  TestPostTxWaitExpiresFromSearch ();
+  TestPostTxWaitExpiresDuringTrack ();
+  TestPipelineRejectedReceiveUsesTicFallback ();
   TestNoSignalSleepCancelsStaleAcquisition ();
 
   std::cout << "PASS: OPNET MAC reservation lifecycle test" << std::endl;

@@ -1,6 +1,7 @@
 #include "ns3/core-module.h"
 #include "ns3/csr-common.h"
 #include "ns3/csr-net-device.h"
+#include "ns3/csr-nwk-layer.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -19,11 +20,41 @@ struct CsrMacSlotParitySmokeAccess
   }
 };
 
+struct CsrNwkActiveNodeProvenanceSmokeAccess
+{
+  static void
+  AddRouteOnlyNode (CsrNetLayer &nwk, CsrNodeId node)
+  {
+    nwk.GetOrCreateNwkNeighbor (node);
+  }
+
+  static void
+  MarkDirectlyHeard (CsrNetLayer &nwk, CsrNodeId node)
+  {
+    CsrNetLayer::NwkNeighborEntry &entry =
+      nwk.GetOrCreateNwkNeighbor (node);
+    entry.lastHeardSec = Simulator::Now ().GetSeconds ();
+  }
+
+  static uint32_t
+  GetActiveNodeCount (const CsrNetLayer &nwk)
+  {
+    return nwk.GetActiveNodeCount ();
+  }
+
+  static uint32_t
+  GetStoredNeighborCount (const CsrNetLayer &nwk)
+  {
+    return nwk.GetNeighborCount ();
+  }
+};
+
 namespace
 {
 
 std::vector<uint16_t> g_sequences;
 std::vector<double> g_txTimes;
+int32_t g_expiredReservationCounter = 0;
 
 void
 Require (bool condition, const char* message)
@@ -167,6 +198,70 @@ CheckCoarseInclusiveNoAvoidVectors ()
 }
 
 void
+CheckDirectHeardActiveNodeProvenance ()
+{
+  // Campus node 5 directly hears nodes 1, 3, and 4.  Nodes 2, 7, and 8
+  // appear in learned route paths but are not link neighbors.  br_nwk's
+  // shared HOP neighbor list therefore reports active_nodes=4, not 7.
+  CsrNetLayer nwk;
+  nwk.SetNodeId (5);
+
+  for (CsrNodeId directPeer : {1u, 3u, 4u})
+    {
+      CsrNwkActiveNodeProvenanceSmokeAccess::MarkDirectlyHeard (
+        nwk, directPeer);
+    }
+  for (CsrNodeId transitNode : {2u, 7u, 8u})
+    {
+      CsrNwkActiveNodeProvenanceSmokeAccess::AddRouteOnlyNode (
+        nwk, transitNode);
+    }
+
+  Require (
+    CsrNwkActiveNodeProvenanceSmokeAccess::GetStoredNeighborCount (nwk) == 6,
+    "route-path fixture did not retain all NWK records");
+  Require (
+    CsrNwkActiveNodeProvenanceSmokeAccess::GetActiveNodeCount (nwk) == 4,
+    "transit-only route nodes inflated the direct active-node population");
+
+  CsrMacCore mac;
+  mac.SetNodeId (5);
+  mac.SetActiveNodesForPostTx (
+    CsrNwkActiveNodeProvenanceSmokeAccess::GetActiveNodeCount (nwk));
+  mac.NoteReportedActiveNodes (7);
+  mac.SetSlotSelectionProfile (
+    CsrMacCore::SlotSelectionProfile::
+      HIST_2014_NEXT_TSLOT_MODULO_PROBE);
+
+  Require (mac.GetActiveNodesForSlotting () == 4,
+           "adb97 modulo-probe profile substituted reported active nodes");
+  Require (mac.GetOpnetSlotRange (mac.GetActiveNodesForSlotting ()) == 31,
+           "three direct peers did not select the archived 0..31 range");
+
+  // Preserve the max-reported behavior of profiles that are not bound to the
+  // adb97 executable: the same fixture resolves to seven nodes and range 63.
+  mac.SetSlotSelectionProfile (
+    CsrMacCore::SlotSelectionProfile::
+      HIST_2014_ZERO_BASED_REBUILD_LIST);
+  Require (mac.GetActiveNodesForSlotting () == 7,
+           "unrelated MAC profile lost max-reported active-node behavior");
+  Require (mac.GetOpnetSlotRange (mac.GetActiveNodesForSlotting ()) == 63,
+           "seven-node comparison fixture did not select range 63");
+
+  // Once a fourth node is actually heard, the exact coarse threshold crosses
+  // from active_nodes=4/range=31 to active_nodes=5/range=63.
+  CsrNwkActiveNodeProvenanceSmokeAccess::MarkDirectlyHeard (nwk, 2);
+  mac.SetActiveNodesForPostTx (
+    CsrNwkActiveNodeProvenanceSmokeAccess::GetActiveNodeCount (nwk));
+  mac.SetSlotSelectionProfile (
+    CsrMacCore::SlotSelectionProfile::
+      HIST_2014_NEXT_TSLOT_MODULO_PROBE);
+  Require (mac.GetActiveNodesForSlotting () == 5 &&
+             mac.GetOpnetSlotRange (mac.GetActiveNodesForSlotting ()) == 63,
+           "fourth direct peer did not cross the archived coarse threshold");
+}
+
+void
 CheckHoldoff (Ptr<CsrNetDevice> device)
 {
   Require (device->GetMac ().GetTransmittedFrameCount () == 0,
@@ -231,8 +326,24 @@ CheckReservationPausedInTx (Ptr<CsrNetDevice> device)
 void
 CheckReservationResumedAfterTx (Ptr<CsrNetDevice> device)
 {
-  Require (device->GetMac ().GetNeighborReservationCounter (10) == -2,
-           "neighbor counter did not keep advancing after expiration");
+  Require (device->GetMacState () == CsrMacCore::State::SEARCH &&
+             device->IsPostTxWaitActive (),
+           "reservation continuation check did not run in post-Tx WAIT");
+  g_expiredReservationCounter =
+    device->GetMac ().GetNeighborReservationCounter (10);
+  Require (g_expiredReservationCounter <= -2,
+           "neighbor reservation had not expired during post-Tx WAIT");
+}
+
+void
+CheckReservationContinuesAfterExpiration (Ptr<CsrNetDevice> device)
+{
+  Require (device->GetMacState () == CsrMacCore::State::SEARCH &&
+             device->IsPostTxWaitActive (),
+           "neighbor continuation left post-Tx WAIT unexpectedly");
+  Require (device->GetMac ().GetNeighborReservationCounter (10) ==
+             g_expiredReservationCounter - 1,
+           "neighbor counter did not advance below -1 on the next TSLOT");
 }
 
 void
@@ -259,6 +370,7 @@ main ()
   Time::SetResolution (Time::NS);
 
   CheckCoarseInclusiveNoAvoidVectors ();
+  CheckDirectHeardActiveNodeProvenance ();
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
   CheckSlotSelectionProfileRanges (device);
   device->GetMac ().SetActiveNodesForPostTx (1);
@@ -296,11 +408,15 @@ main ()
   Simulator::Schedule (Seconds (1.0),
                        &CheckReservationPausedInTx,
                        device);
-  // Exact br_OTA airtime keeps this long-preamble aggregate in Tx until
-  // roughly 1.55 seconds.  The source keeps decrementing after expiration,
-  // so this checkpoint observes -2 rather than clamping at -1.
-  Simulator::Schedule (Seconds (1.65),
+  // The selected reservation can move Tx completion by one or more 13-ms
+  // slots.  At 1.670 s even the latest valid completion has seen enough
+  // post-Tx Search ticks to expire this counter. The 1.677-s tick must then
+  // decrement the signed source counter once more rather than clamp at -1.
+  Simulator::Schedule (Seconds (1.670),
                        &CheckReservationResumedAfterTx,
+                       device);
+  Simulator::Schedule (Seconds (1.678),
+                       &CheckReservationContinuesAfterExpiration,
                        device);
   Simulator::Schedule (Seconds (1.8),
                        &CheckFinalState,

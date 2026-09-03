@@ -6,6 +6,26 @@
 #include "csr-opnet-packet-model.h"
 #include <algorithm>
 
+/**
+ * Select the source-version boundary for ordinary DATA and ACK/DACK wire
+ * envelopes.
+ *
+ * Production packetTypes.c maps ordinary DATA and the common AckMsg packet
+ * type to Pairwise16.  The recovered campus-multihop executable identified by
+ * SHA-256
+ * adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af
+ * predates that integration and sends both ordinary DATA and br_Ack directly.
+ */
+enum class CsrHopWireProfile : uint8_t
+{
+  PRODUCTION_PAIRWISE16 = 0,
+  HIST_ADB97C54_BARE = 1
+};
+
+// Backward-compatible type name for callers introduced with the original
+// ACK-only profile.  New code should use CsrHopWireProfile.
+using CsrAckEnvelopeProfile = CsrHopWireProfile;
+
 class CsrHopLayer : public Object
 {
 public:
@@ -23,6 +43,30 @@ public:
       m_resendTime (Seconds (2.0)),
       m_maxNumResend (2)
   {}
+
+  /** Select the explicit ordinary-DATA and ACK/DACK wire profile. */
+  void SetHopWireProfile (CsrHopWireProfile profile)
+  {
+    m_hopWireProfile = profile;
+  }
+
+  /** Return the active ordinary-DATA and ACK/DACK wire profile. */
+  CsrHopWireProfile GetHopWireProfile () const
+  {
+    return m_hopWireProfile;
+  }
+
+  /** Backward-compatible ACK-only API name. */
+  void SetAckEnvelopeProfile (CsrAckEnvelopeProfile profile)
+  {
+    SetHopWireProfile (profile);
+  }
+
+  /** Backward-compatible ACK-only API name. */
+  CsrAckEnvelopeProfile GetAckEnvelopeProfile () const
+  {
+    return GetHopWireProfile ();
+  }
 
   void SetMac (CsrMacCore *mac)
   {
@@ -703,13 +747,14 @@ private:
   };
 
   void HandleDataFrame (const CsrHeader &hdr, Ptr<Packet> payload, bool firstReception);
-  void SendProtectedPairwiseData (CsrNodeId dst,
-                                  uint8_t dscp,
-                                  Ptr<Packet> payload,
-                                  bool ack,
-                                  CsrPairwiseSecurityMode mode,
-                                  uint8_t legacyPacketType,
-                                  uint8_t packetType);
+  void SendDataFrame (CsrNodeId dst,
+                      uint8_t dscp,
+                      Ptr<Packet> payload,
+                      bool ack,
+                      CsrPairwiseSecurityMode mode,
+                      uint8_t legacyPacketType,
+                      uint8_t packetType,
+                      bool historicalBare);
   Ptr<Packet> ProtectPairwisePayload (
     CsrNodeId destination,
     CsrPairwiseSecurityMode mode,
@@ -857,6 +902,8 @@ private:
   std::map<CsrNodeId, NeighborInfo> m_neighbors;
 
   CsrHopSecurityState m_hopSecurity;
+  CsrHopWireProfile m_hopWireProfile {
+    CsrHopWireProfile::PRODUCTION_PAIRWISE16}; ///< DATA/ACK wire policy.
 
   struct PendingGroupEstablish
   {
@@ -1220,6 +1267,25 @@ CsrHopLayer::ProtectPairwisePayload (
 Ptr<Packet>
 CsrHopLayer::ProtectAckFrame (CsrHeader header)
 {
+  if (m_hopWireProfile == CsrHopWireProfile::HIST_ADB97C54_BARE)
+    {
+      // The hash-bound archived executable creates br_Ack directly and sends
+      // it through br_Mac.  It has no packetTypes/hopSecLayer dispatcher, so
+      // do not add security-count or Pairwise16 bytes in this profile.
+      ApplyLinkControl (header, {header.GetDst ()});
+      Ptr<Packet> bareFrame = Create<Packet> ();
+      bareFrame->AddHeader (header);
+      CsrSetOpnetEnvelope (
+        bareFrame,
+        CsrOpnetPacketFormat::Mac,
+        CsrOpnetPacketModel::GetFixedSizeBytes (
+          CsrOpnetPacketFormat::Mac) +
+        CsrOpnetPacketModel::GetFixedSizeBytes (
+          CsrOpnetPacketFormat::Ack) +
+        (header.HasAckWindow () ? LEGACY_ACK_WINDOW_OVERHEAD : 0));
+      return bareFrame;
+    }
+
   // packetTypes.c maps the common AckMsg packet type (ACK and DACK subtypes)
   // to Pairwise16. Authenticate the complete logical ACK body; only the
   // transport-visible compatibility header carries security/link metadata.
@@ -1250,6 +1316,36 @@ bool
 CsrHopLayer::AuthenticateAckFrame (CsrHeader &header,
                                    Ptr<Packet> recordPacket)
 {
+  if (m_hopWireProfile == CsrHopWireProfile::HIST_ADB97C54_BARE)
+    {
+      bool validBareAck =
+        !header.HasSecurityCount () &&
+        !header.HasGroupSecurity () &&
+        !header.HasDestinationSequences () &&
+        header.IsAck () &&
+        (header.GetType () == CSR_PKT_ACK ||
+         header.GetType () == CSR_PKT_DACK) &&
+        header.GetSrc () != CSR_BROADCAST_ID &&
+        header.GetDst () == m_nodeId &&
+        header.GetDestType () == CSR_DEST_UNICAST &&
+        !header.IsAckable () &&
+        recordPacket != nullptr &&
+        recordPacket->GetSize () == 0;
+      if (!validBareAck)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop malformed historical bare ACK/DACK"
+                    << " from=" << header.GetSrc ()
+                    << std::endl;
+          return false;
+        }
+
+      // MAC exposes both ACK and DACK as the common AckMsg outer type.  The
+      // logical subtype remains in IsDack, exactly as in br_Ack.
+      header.SetType (header.IsDack () ? CSR_PKT_DACK : CSR_PKT_ACK);
+      return true;
+    }
+
   if (!header.HasSecurityCount () || header.HasGroupSecurity ())
     {
       std::cout << "[HOP " << m_nodeId
@@ -1505,7 +1601,9 @@ void
 CsrHopLayer::SendData (CsrNodeId dst, uint8_t dscp,
                        Ptr<Packet> payload, bool ack)
 {
-  SendProtectedPairwiseData (
+  const bool historicalBare =
+    m_hopWireProfile == CsrHopWireProfile::HIST_ADB97C54_BARE;
+  SendDataFrame (
     dst,
     dscp,
     payload,
@@ -1513,7 +1611,8 @@ CsrHopLayer::SendData (CsrNodeId dst, uint8_t dscp,
     CsrPairwiseSecurityMode::Pairwise16,
     ack ? LEGACY_APP_DATA_PACKET_TYPE
         : LEGACY_APP_DATA_NO_ACK_PACKET_TYPE,
-    CSR_PKT_DATA);
+    CSR_PKT_DATA,
+    historicalBare);
 }
 
 void
@@ -1522,7 +1621,10 @@ CsrHopLayer::SendPairwise32EncryptedData (CsrNodeId dst,
                                           Ptr<Packet> payload,
                                           bool ack)
 {
-  SendProtectedPairwiseData (
+  NS_ABORT_MSG_IF (
+    m_hopWireProfile == CsrHopWireProfile::HIST_ADB97C54_BARE,
+    "the adb97 historical HOP wire profile has no Pairwise32 DATA path");
+  SendDataFrame (
     dst,
     dscp,
     payload,
@@ -1530,18 +1632,20 @@ CsrHopLayer::SendPairwise32EncryptedData (CsrNodeId dst,
     CsrPairwiseSecurityMode::Pairwise32Encrypt,
     ack ? LEGACY_APP_DATA_PACKET_TYPE
         : LEGACY_APP_DATA_NO_ACK_PACKET_TYPE,
-    CSR_PKT_PAIRWISE32_DATA);
+    CSR_PKT_PAIRWISE32_DATA,
+    false);
 }
 
 void
-CsrHopLayer::SendProtectedPairwiseData (
+CsrHopLayer::SendDataFrame (
   CsrNodeId dst,
   uint8_t dscp,
   Ptr<Packet> payload,
   bool ack,
   CsrPairwiseSecurityMode mode,
   uint8_t legacyPacketType,
-  uint8_t packetType)
+  uint8_t packetType,
+  bool historicalBare)
 {
   NS_ASSERT (m_mac != nullptr);
 
@@ -1552,12 +1656,24 @@ CsrHopLayer::SendProtectedPairwiseData (
   CsrHeader hdr (m_nodeId, dst, seq, dscp, ack, false);
   hdr.SetType (packetType);
   hdr.SetDestType (CSR_DEST_UNICAST);
-  hdr.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
+  Ptr<Packet> frame;
+  if (historicalBare)
+    {
+      // The hash-bound executable has no packetTypes/hopSecLayer dispatcher:
+      // br_nwk wraps br_Network directly in br_Hop and br_hop wraps that
+      // directly in br_Mac.  Preserve the payload byte-for-byte and omit both
+      // the security-count field and Pairwise16 record.
+      frame = payload->Copy ();
+    }
+  else
+    {
+      hdr.SetSecurityCount (m_hopSecurity.GetOwnSecurityCount ());
+      frame = ProtectPairwisePayload (dst,
+                                      mode,
+                                      legacyPacketType,
+                                      payload);
+    }
   ApplyLinkControl (hdr, {dst});
-  Ptr<Packet> frame = ProtectPairwisePayload (dst,
-                                              mode,
-                                              legacyPacketType,
-                                              payload);
   frame->AddHeader (hdr);
 
   if (ack)
@@ -1675,14 +1791,20 @@ CsrHopLayer::SendProtectedPairwiseData (
 
   std::cout << "[HOP " << m_nodeId
             << "] TX "
-            << (mode == CsrPairwiseSecurityMode::Pairwise16
+            << (historicalBare
+                  ? "historical-bare"
+                  : mode == CsrPairwiseSecurityMode::Pairwise16
                   ? "Pairwise16"
                   : "Pairwise32Encrypt")
             << " DATA"
             << " neighbor=" << dst
-            << " hopSeq=" << seq
-            << " securityCount="
-            << m_hopSecurity.GetOwnSecurityCount ()
+            << " hopSeq=" << seq;
+  if (!historicalBare)
+    {
+      std::cout << " securityCount="
+                << m_hopSecurity.GetOwnSecurityCount ();
+    }
+  std::cout
             << std::endl;
 
   m_mac->EnqueueTxFrame (frame, dst, dscp, ack);
@@ -2435,6 +2557,29 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
   frame->RemoveHeader (hdr);
 
+  // Ordinary br_Hop DATA is a single-destination DATA envelope, never an ACK
+  // or DACK envelope.
+  // Reject impossible metadata before it can enter duplicate, feedback, or
+  // NWK custody state.  Link-control and security-count presence are handled
+  // separately because they are source-profile-dependent optional fields.
+  if (hdr.GetType () == CSR_PKT_DATA &&
+      (hdr.IsAck () ||
+       hdr.IsDack () ||
+       hdr.HasAckWindow () ||
+       hdr.HasDestinationSequences () ||
+       hdr.HasGroupSecurity () ||
+       hdr.GetDestType () != CSR_DEST_UNICAST ||
+       hdr.GetSrc () == CSR_BROADCAST_ID ||
+       hdr.GetDst () == CSR_BROADCAST_ID))
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop malformed ordinary DATA envelope"
+                << " from=" << hdr.GetSrc ()
+                << " destination=" << hdr.GetDst ()
+                << std::endl;
+      return;
+    }
+
   // br_hop forwards br_SNMP before update_neighbor().  Preserve that unusual
   // path: even an addressed SNMP packet does not refresh the HOP neighbor
   // table, and an overheard one is discarded without any link side effects.
@@ -3121,6 +3266,14 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
   if (hdr.GetType () == CSR_PKT_PAIRWISE32_DATA)
     {
+      if (m_hopWireProfile == CsrHopWireProfile::HIST_ADB97C54_BARE)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop protected DATA under historical bare profile"
+                    << " from=" << hdr.GetSrc ()
+                    << std::endl;
+          return;
+        }
       HandleProtectedPairwiseData (
         hdr,
         frame,
@@ -3132,12 +3285,30 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 
   if (hdr.GetType () == CSR_PKT_DATA && hdr.HasSecurityCount ())
     {
+      if (m_hopWireProfile == CsrHopWireProfile::HIST_ADB97C54_BARE)
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop Pairwise16 DATA under historical bare profile"
+                    << " from=" << hdr.GetSrc ()
+                    << std::endl;
+          return;
+        }
       HandleProtectedPairwiseData (
         hdr,
         frame,
         CsrPairwiseSecurityMode::Pairwise16,
         hdr.IsAckable () ? LEGACY_APP_DATA_PACKET_TYPE
                          : LEGACY_APP_DATA_NO_ACK_PACKET_TYPE);
+      return;
+    }
+
+  if (hdr.GetType () == CSR_PKT_DATA &&
+      m_hopWireProfile != CsrHopWireProfile::HIST_ADB97C54_BARE)
+    {
+      std::cout << "[HOP " << m_nodeId
+                << "] Drop bare DATA under production Pairwise16 profile"
+                << " from=" << hdr.GetSrc ()
+                << std::endl;
       return;
     }
 

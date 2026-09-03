@@ -63,6 +63,7 @@ main ()
 
   relayHop->SetNodeId (RELAY_NODE);
   relayHop->SetMac (&relayDevice->GetMac ());
+  relayHop->SetHopWireProfile (CsrHopWireProfile::HIST_ADB97C54_BARE);
   relayNwk->SetNodeId (RELAY_NODE);
   relayNwk->SetHop (relayHop);
   relayNwk->SetNodeType (CsrNodeType::Routable);

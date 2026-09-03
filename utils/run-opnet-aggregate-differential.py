@@ -41,6 +41,33 @@ MAC_PROFILES = {
     "hist-2014-next-tslot-modulo-probe",
     "unspecified",
 }
+HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16 = "production-pairwise16"
+HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE = "hist-adb97c54-bare"
+HOP_SECURITY_PROFILES = {
+    HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+    HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+    "unspecified",
+}
+HIST_ADB97C54_EXECUTABLE_SHA256 = (
+    "adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af"
+)
+
+# Backward-compatible test/import names for the deprecated CSV alias.
+ACK_ENVELOPE_PROFILE_PRODUCTION_PAIRWISE16 = (
+    HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
+)
+ACK_ENVELOPE_PROFILE_HIST_ADB97C54_BARE = (
+    HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+)
+ACK_ENVELOPE_PROFILES = HOP_SECURITY_PROFILES
+
+
+def _hop_security_behavior(profile: str) -> dict[str, str]:
+    if profile == HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16:
+        return {"ordinary_data": "pairwise16", "ack_dack": "pairwise16"}
+    if profile == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE:
+        return {"ordinary_data": "bare", "ack_dack": "bare"}
+    raise WorkflowError(f"unsupported effective HOP security profile {profile!r}")
 
 # These statistics are derived from the same application send/delivery events
 # and remain the canonical default surface.  Source-equivalent HOP/MAC queue
@@ -194,6 +221,92 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
             raise WorkflowError(
                 f"{path}:{row_number}: unsupported mac_profile {mac_profile!r}"
             )
+        hop_security_profile = (
+            row.get("hop_security_profile", "").strip() or "unspecified"
+        )
+        if hop_security_profile not in HOP_SECURITY_PROFILES:
+            raise WorkflowError(
+                f"{path}:{row_number}: unsupported hop_security_profile "
+                f"{hop_security_profile!r}"
+            )
+        ack_envelope_profile = (
+            row.get("ack_envelope_profile", "").strip() or "unspecified"
+        )
+        if ack_envelope_profile not in ACK_ENVELOPE_PROFILES:
+            raise WorkflowError(
+                f"{path}:{row_number}: unsupported ack_envelope_profile "
+                f"{ack_envelope_profile!r}"
+            )
+        if (
+            hop_security_profile != "unspecified"
+            and ack_envelope_profile != "unspecified"
+            and hop_security_profile != ack_envelope_profile
+        ):
+            raise WorkflowError(
+                f"{path}:{row_number}: hop_security_profile and deprecated "
+                "ack_envelope_profile disagree"
+            )
+        if hop_security_profile != "unspecified":
+            effective_hop_security_profile = hop_security_profile
+            hop_security_profile_origin = "explicit"
+        elif ack_envelope_profile != "unspecified":
+            effective_hop_security_profile = ack_envelope_profile
+            hop_security_profile_origin = "legacy_ack_alias"
+        else:
+            effective_hop_security_profile = (
+                HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
+            )
+            hop_security_profile_origin = "missing"
+
+        source_executable_sha256 = row.get(
+            "source_executable_sha256", ""
+        ).strip().lower()
+        if (
+            source_executable_sha256
+            and source_executable_sha256 != HIST_ADB97C54_EXECUTABLE_SHA256
+        ):
+            raise WorkflowError(
+                f"{path}:{row_number}: source_executable_sha256 is not the "
+                "adb97 executable digest"
+            )
+        if (
+            effective_hop_security_profile
+            == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+            and source_executable_sha256
+            != HIST_ADB97C54_EXECUTABLE_SHA256
+        ):
+            raise WorkflowError(
+                f"{path}:{row_number}: effective hist-adb97c54-bare requires "
+                "its full source_executable_sha256"
+            )
+        if (
+            effective_hop_security_profile
+            == HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
+            and source_executable_sha256
+        ):
+            raise WorkflowError(
+                f"{path}:{row_number}: effective production-pairwise16 cannot claim "
+                "an archived source executable"
+            )
+
+        selected_adb97_profile = (
+            effective_hop_security_profile
+            == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+        )
+        selected_adb97_application_and_mac = (
+            application_profile == "legacy-send-only-no-dscp"
+            and mac_profile == "hist-2014-next-tslot-modulo-probe"
+        )
+        if (
+            selected_adb97_profile != selected_adb97_application_and_mac
+        ):
+            raise WorkflowError(
+                f"{path}:{row_number}: "
+                "the adb97 executable tuple must select "
+                "hop_security_profile='hist-adb97c54-bare', "
+                "application_profile='legacy-send-only-no-dscp', and "
+                "mac_profile='hist-2014-next-tslot-modulo-probe' together"
+            )
         source_sha256 = row["source_sha256"].strip().lower()
         if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
             raise WorkflowError(
@@ -229,6 +342,13 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
             "scenario": scenario,
             "application_profile": application_profile,
             "mac_profile": mac_profile,
+            "hop_security_profile": effective_hop_security_profile,
+            "hop_security_profile_origin": hop_security_profile_origin,
+            "hop_security_behavior": _hop_security_behavior(
+                effective_hop_security_profile
+            ),
+            "ack_envelope_profile": ack_envelope_profile,
+            "source_executable_sha256": source_executable_sha256,
             "source_sha256": source_sha256,
             "duration_s": duration_s,
             "seed": int(seed_value),
@@ -1285,6 +1405,8 @@ def main(argv: list[str] | None = None) -> int:
         opnet_aggregates = arguments.output_dir / ARTIFACT_PATHS["opnet_aggregates"]
         extract_command = [
             sys.executable,
+            "-B",
+            "-I",
             str(extractor),
             str(arguments.opnet_ov),
             "--json",
@@ -1330,6 +1452,12 @@ def main(argv: list[str] | None = None) -> int:
         if scenario_run["mac_profile"] == "unspecified":
             profile = "diagnostic"
             noncertifying_overrides.append("mac_profile_unspecified")
+        if scenario_run["hop_security_profile_origin"] != "explicit":
+            profile = "diagnostic"
+            noncertifying_overrides.append(
+                "hop_security_profile_"
+                + scenario_run["hop_security_profile_origin"]
+            )
         manifest["profile"] = profile
         manifest["noncertifying_overrides"] = noncertifying_overrides
         _validate_probe_crosscheck(extract, scenario_run["scenario"], selected)
@@ -1355,6 +1483,21 @@ def main(argv: list[str] | None = None) -> int:
                     "scenario": scenario_run["scenario"],
                     "application_profile": scenario_run["application_profile"],
                     "mac_profile": scenario_run["mac_profile"],
+                    "hop_security_profile": scenario_run[
+                        "hop_security_profile"
+                    ],
+                    "hop_security_profile_origin": scenario_run[
+                        "hop_security_profile_origin"
+                    ],
+                    "hop_security_behavior": scenario_run[
+                        "hop_security_behavior"
+                    ],
+                    "ack_envelope_profile": scenario_run[
+                        "ack_envelope_profile"
+                    ],
+                    "source_executable_sha256": scenario_run[
+                        "source_executable_sha256"
+                    ],
                     "duration_s": scenario_run["duration_s"],
                     "seed": scenario_run["seed"],
                     "source_sha256": scenario_run["source_sha256"],
@@ -1381,6 +1524,19 @@ def main(argv: list[str] | None = None) -> int:
                 "opnet_app_gating": not arguments.no_opnet_app_gating,
                 "application_profile": scenario_run["application_profile"],
                 "mac_profile": scenario_run["mac_profile"],
+                "hop_security_profile": scenario_run[
+                    "hop_security_profile"
+                ],
+                "hop_security_profile_origin": scenario_run[
+                    "hop_security_profile_origin"
+                ],
+                "hop_security_behavior": scenario_run[
+                    "hop_security_behavior"
+                ],
+                "ack_envelope_profile": scenario_run["ack_envelope_profile"],
+                "source_executable_sha256": scenario_run[
+                    "source_executable_sha256"
+                ],
                 "aggregate_trace_only": True,
                 "quiet_model_logs": True,
                 "app_admission_diagnostics_schema": (
@@ -1445,6 +1601,8 @@ def main(argv: list[str] | None = None) -> int:
         ]
         aggregate_command = [
             sys.executable,
+            "-B",
+            "-I",
             str(aggregator),
             str(ns3_trace),
             str(ns3_aggregates),
@@ -1496,6 +1654,8 @@ def main(argv: list[str] | None = None) -> int:
         ]
         compare_command = [
             sys.executable,
+            "-B",
+            "-I",
             str(comparator),
             str(opnet_aggregates),
             str(ns3_aggregates),

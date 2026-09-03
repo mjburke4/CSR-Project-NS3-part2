@@ -304,6 +304,59 @@ CheckReceiverWindowProduction (bool retryAfterDack)
 }
 
 void
+CheckReceiverWindowBeyond64 ()
+{
+  Ptr<CsrNetDevice> producer = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrNetDevice> capture = CreateObject<CsrNetDevice> (2);
+  producer->AddPeer (capture);
+
+  CsrPerModelFn noErrors = [] (int, double, uint32_t) { return 0.0; };
+  producer->GetPhy ().SetPerModel (noErrors);
+  capture->GetPhy ().SetPerModel (noErrors);
+  producer->GetPhy ().SetLinkDistanceMeters (1, 2, 1.0);
+  capture->GetPhy ().SetLinkDistanceMeters (1, 2, 1.0);
+  capture->GetMac ().SetRxCallback (MakeCallback (&CaptureFeedback));
+
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  hop->SetNodeId (1);
+  hop->SetMac (&producer->GetMac ());
+  hop->SetRxFromHopCallback (MakeCallback (&NoteDataDelivery));
+  hop->SetRelayRouteAvailableCallback (
+    MakeCallback (&RelayRouteAvailable));
+
+  CsrHopSecurityState dataSender;
+  dataSender.SetNodeId (2);
+  g_capturedFeedback = nullptr;
+  g_dataDeliveries = 0;
+
+  for (uint32_t offset = 0; offset < 66; ++offset)
+    {
+      uint16_t sequence = static_cast<uint16_t> (0xfffeU + offset);
+      hop->ReceiveFromMac (
+        MakeProtectedData (dataSender, sequence),
+        90.0,
+        10.0);
+    }
+
+  Require (g_dataDeliveries == 66,
+           "receiver lost DATA while its cumulative sequence wrapped");
+  Require (producer->GetMac ().GetAckQueuedFrameCount () == 1,
+           "more than 64 DATA frames did not coalesce to one ACK entry");
+
+  Simulator::Stop (Seconds (4.0));
+  Simulator::Run ();
+
+  CsrHeader authenticated = AuthenticateCapturedFeedback ();
+  Require (authenticated.GetSeq () == 63,
+           "cumulative window did not advance through sequence wrap");
+  Require (authenticated.GetAckBitmap () == 0xffffffffffffffffULL &&
+             authenticated.GetDackBitmap () == 0,
+           "cumulative window did not retain exactly its newest 64 ACKs");
+
+  Simulator::Destroy ();
+}
+
+void
 CheckLocalDeliveryQueuesFeedbackFirst ()
 {
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
@@ -518,6 +571,7 @@ main ()
 
   CheckReceiverWindowProduction (false);
   CheckReceiverWindowProduction (true);
+  CheckReceiverWindowBeyond64 ();
   CheckLocalDeliveryQueuesFeedbackFirst ();
   CheckAckWinsOverlap ();
   CheckSenderCompletionOrder (false);

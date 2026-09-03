@@ -259,6 +259,80 @@ RunNoRouteHoldScenario ()
 }
 
 void
+RunRouteLossRecoveryMixedDscpScenario ()
+{
+  g_receivedSizes.clear ();
+
+  Ptr<CsrNetDevice> sourceDevice =
+    CreateObject<CsrNetDevice> (SOURCE_NODE);
+  Ptr<CsrNetDevice> destinationDevice =
+    CreateObject<CsrNetDevice> (DESTINATION_NODE);
+  Ptr<CsrHopLayer> sourceHop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrHopLayer> destinationHop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> sourceNwk = CreateObject<CsrNetLayer> ();
+  Ptr<CsrNetLayer> destinationNwk = CreateObject<CsrNetLayer> ();
+
+  sourceDevice->AddPeer (destinationDevice);
+  destinationDevice->AddPeer (sourceDevice);
+  ConfigureNoErrors (sourceDevice);
+  ConfigureNoErrors (destinationDevice);
+  ConnectStack (sourceDevice, sourceHop, sourceNwk, SOURCE_NODE);
+  ConnectStack (destinationDevice,
+                destinationHop,
+                destinationNwk,
+                DESTINATION_NODE);
+  sourceNwk->AddStaticRouteWithPathloss (
+    DESTINATION_NODE,
+    DESTINATION_NODE,
+    70.0,
+    true,
+    static_cast<uint8_t> (CsrNodeType::Routable));
+  destinationNwk->SetRxFromNetCallback (MakeCallback (&RecordPayload));
+
+  sourceNwk->Send (DESTINATION_NODE, 0, Create<Packet> (10), true);
+  sourceNwk->Send (DESTINATION_NODE, 5, Create<Packet> (30), true);
+  sourceNwk->Send (DESTINATION_NODE, 0, Create<Packet> (20), true);
+  sourceNwk->Send (DESTINATION_NODE, 5, Create<Packet> (40), true);
+
+  // Remove the route before the one-TIC queue check. All traffic remains in
+  // NWK until the selected route returns; the mixed-DSCP order must survive.
+  sourceNwk->ClearRoutes ();
+  Simulator::Schedule (MicroSeconds (1), [sourceNwk, sourceHop] () {
+    Require (sourceNwk->GetNwkQueueSize () == 4 &&
+               sourceHop->GetPendingDataCount () == 0,
+             "route loss did not hold mixed-DSCP traffic in NWK");
+  });
+  Simulator::Schedule (MicroSeconds (2), [sourceNwk] () {
+    sourceNwk->AddStaticRouteWithPathloss (
+      DESTINATION_NODE,
+      DESTINATION_NODE,
+      70.0,
+      true,
+      static_cast<uint8_t> (CsrNodeType::Routable));
+  });
+  // The next application arrival requests the same one-TIC NWK scan as
+  // br_nwk.proc_app_pk() and exposes the recovered route to every held entry.
+  Simulator::Schedule (MicroSeconds (3), [sourceNwk] () {
+    sourceNwk->Send (
+      DESTINATION_NODE,
+      0,
+      Create<Packet> (50),
+      true);
+  });
+
+  Simulator::Stop (Seconds (20.0));
+  Simulator::Run ();
+
+  const std::vector<uint32_t> expected {40, 30, 10, 20, 50};
+  Require (g_receivedSizes == expected,
+           "route recovery changed held mixed-DSCP service order");
+  Require (sourceNwk->GetNwkQueueSize () == 0,
+           "route recovery did not drain the held NWK queue");
+
+  Simulator::Destroy ();
+}
+
+void
 RunDirectCapabilityScenario ()
 {
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (SOURCE_NODE);
@@ -428,6 +502,7 @@ main ()
 
   RunQueueOrderingAndTicScenario ();
   RunNoRouteHoldScenario ();
+  RunRouteLossRecoveryMixedDscpScenario ();
   RunDirectCapabilityScenario ();
   RunMonotonicActiveNodeScenario ();
   RunLocalOnlyLinkCostScenario ();

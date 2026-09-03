@@ -5,27 +5,87 @@
 #include "csr-phy-model.h"
 
 #include <limits>
+#include <optional>
+
+#include "ns3/trace-source-accessor.h"
+#include "ns3/traced-callback.h"
 
 class CsrNetDevice : public Object
 {
 public:
-  CsrNetDevice () = default;
+  /** Trace callback for one source-style synchronization decision. */
+  typedef void (*SyncDecisionTracedCallback) (CsrNodeId transmitter,
+                                               uint16_t sequence,
+                                               double snrDb,
+                                               double thresholdDb,
+                                               bool accepted);
+
+  CsrNetDevice ()
+    : CsrNetDevice (0)
+  {
+  }
+
   CsrNetDevice (CsrNodeId id)
-    : m_id (id)
+    : m_id (id),
+      m_rng (CreateObject<UniformRandomVariable> ()),
+      m_syncThresholdRng (CreateObject<NormalRandomVariable> ())
   {
     NS_ABORT_MSG_IF (!CsrIsValidNodeId (id),
                      "CSR device node identifier exceeds 24 bits");
     m_mac.SetNodeId (id);
     m_mac.SetDevice (this);
-    m_rng = CreateObject<UniformRandomVariable> ();
   }
 
   static TypeId GetTypeId (void)
   {
     static TypeId tid = TypeId ("ns3::CsrNetDevice")
       .SetParent<Object> ()
-      .AddConstructor<CsrNetDevice> ();
+      .AddConstructor<CsrNetDevice> ()
+      .AddTraceSource (
+        "SyncDecision",
+        "A channel-matched SYNC attempt with its SNR, sampled threshold, "
+        "and acceptance decision.",
+        MakeTraceSourceAccessor (&CsrNetDevice::m_syncDecisionTrace),
+        "ns3::CsrNetDevice::SyncDecisionTracedCallback");
     return tid;
+  }
+
+  /**
+   * Assign deterministic streams to device-owned random variables.
+   *
+   * The first stream controls the existing device-uniform draws (PHY error
+   * realization and compatibility duty-cycle phase) and the second controls
+   * source-style synchronization thresholds.
+   *
+   * @param stream First stream index.
+   * @return Number of streams assigned.
+   */
+  int64_t AssignStreams (int64_t stream)
+  {
+    m_rng->SetStream (stream);
+    m_syncThresholdRng->SetStream (stream + 1);
+    return 2;
+  }
+
+  /**
+   * Force a deterministic synchronization threshold for controlled tests.
+   *
+   * This is an explicit compatibility/testing override. Source-exact runs
+   * leave it clear and sample the configured normal distribution.
+   *
+   * @param thresholdDb Threshold in dB.
+   */
+  void SetSyncSnrThresholdOverrideDb (double thresholdDb)
+  {
+    NS_ABORT_MSG_IF (!std::isfinite (thresholdDb),
+                     "CSR SYNC threshold override must be finite");
+    m_syncThresholdOverrideDb = thresholdDb;
+  }
+
+  /** Clear the deterministic synchronization-threshold override. */
+  void ClearSyncSnrThresholdOverride ()
+  {
+    m_syncThresholdOverrideDb.reset ();
   }
 
   void SetPeer (Ptr<CsrNetDevice> peer)
@@ -213,6 +273,12 @@ public:
     return m_hasLastRxDecision;
   }
 
+  /** Return whether source post-Tx WAIT_FOR_ACK currently owns Search. */
+  bool IsPostTxWaitActive () const
+  {
+    return m_postTxWaitActive;
+  }
+
   /** Return the most recent tracked receive decision and PHY diagnostics. */
   const CsrRxDecision &GetLastRxDecision () const
   {
@@ -303,16 +369,20 @@ private:
     bool sameRateInterference {false};
     bool preambleActive {true};
     bool rejected {false};
+    bool rejectedDuringTrack {false};
     bool tracked {false};
     bool collided {false};
     bool missedByState {false};
   };
 
   void BeginReceiveSignal (RxSignal signal);
+  double DrawSyncSnrThresholdDb ();
   void EndReceivePreamble (uint64_t signalId);
   void EndReceiveSignal (uint64_t signalId);
   void AcquireSignal ();
   void ScheduleAcquisition ();
+  void ReturnToSearchAfterReceive ();
+  void ReturnRejectedReceiveToSearch ();
   void ApplyTrackedInterference (RxSignal &interferer);
   void ApplyInterferencePair (RxSignal &first, RxSignal &second);
   void RemoveEndedInterference (const RxSignal &ended);
@@ -334,15 +404,19 @@ private:
   void ScheduleSignalWake ();
   void SchedulePendingTxWake ();
   void ScheduleOpnetPeriodicWake ();
+  void StartPostTxWait ();
+  void CancelPostTxWait ();
+  void PostTxWaitExpired ();
   bool IsPeriodicAwakeAt (double timeSec) const;
   double GetPeriodicWindowEnd (double timeSec) const;
   double GetNextPeriodicWake (double timeSec) const;
-  void OnMacTxFinished ();
+  void OnMacTxFinished (bool queuesEmpty);
 
   CsrNodeId                       m_id {0};
   CsrMacCore                     m_mac;
   std::vector< Ptr<CsrNetDevice> > m_peers;   // multiple peers on shared channel
   Ptr<UniformRandomVariable>     m_rng;
+  Ptr<NormalRandomVariable>      m_syncThresholdRng;
   CsrPhyModel                    m_phy;
   std::map<uint64_t, RxSignal>   m_rxSignals;
   uint64_t                       m_nextTxSignalId {0};
@@ -354,12 +428,20 @@ private:
   uint64_t                       m_rxEccDropCount {0};
   bool                           m_hasLastRxDecision {false};
   CsrRxDecision                  m_lastRxDecision;
+  std::optional<double>          m_syncThresholdOverrideDb;
+  TracedCallback<CsrNodeId,
+                 uint16_t,
+                 double,
+                 double,
+                 bool>           m_syncDecisionTrace;
   EventId                        m_acquisitionEvent;
   EventId                        m_signalWakeEvent;
   EventId                        m_pendingTxWakeEvent;
   EventId                        m_opnetPeriodicWakeEvent;
   EventId                        m_sleepEvent;
   EventId                        m_forceAwakeEndEvent;
+  EventId                        m_postTxWaitEvent;
+  EventId                        m_doneRxEvent;
 
   // --- Duty cycling (OPNET-inspired) ---
   bool   m_dutyCycleEnabled { false };
@@ -371,8 +453,10 @@ private:
   //   NO_SIG_SRH_TIME 0.0078 s
   double m_wakeCycleSec     { 0.988 };
   double m_awakeWindowSec   { 0.0011 + 0.0078 }; // ~0.0089 s
+  double m_noSignalSearchSec { 0.0078 };
   double m_wakePhaseSec     { 0.0 };             // randomized per node
   double m_forceAwakeUntilSec { 0.0 };
+  bool m_postTxWaitActive {false};
   double m_syncToTrackSec { 0.00663 };
   // Retained for explicit compatibility BER hooks.  The production path uses
   // the source-derived JSR buckets, BER tables, interval errors, and ECC gate.
@@ -614,21 +698,6 @@ CsrNetDevice::SendFramesToPeers (
                   + payloadAndFcsBits / rbps;
 
   double txTime = Simulator::Now ().GetSeconds ();
-  double maxPropagationDelaySec = 0.0;
-  for (const auto &peer : m_peers)
-    {
-      if (peer == nullptr || peer->GetId () == m_id)
-        {
-          continue;
-        }
-      double distanceMeters = peer->m_phy.GetDistanceMeters (
-        m_id,
-        peer->GetId ());
-      maxPropagationDelaySec = std::max (
-        maxPropagationDelaySec,
-        distanceMeters /
-          CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
-    }
 
   // For log: peek header
   CsrHeader hdr;
@@ -648,22 +717,6 @@ CsrNetDevice::SendFramesToPeers (
               << " preamble " << (preamble == PREAMBLE_LONG ? "LONG" : "SHORT")
               << " duration " << duration << " s"
               << std::endl;
-
-  // OPNET br_mac.post_tx(): after the last transmission, MAC remains in
-  // receive/search for POST_TX_WAIT_TIME. This is not limited to ACKable data;
-  // HELLO/control transmissions also keep the node awake long enough to hear
-  // follow-on traffic.
-  double postTxWaitSec = GetPostTxWaitSeconds ();
-  this->ForceAwakeFor (duration +
-                       maxPropagationDelaySec +
-                       postTxWaitSec);
-
-  std::cout << "[MAC " << m_id
-            << "] Post-TX force-awake for "
-            << (duration + maxPropagationDelaySec + postTxWaitSec)
-            << " s"
-            << " (POST_TX_WAIT=" << postTxWaitSec << " s)"
-            << std::endl;
 
   // Peek header once to know src/dst/seq
   CsrHeader hdrOnTx;
@@ -834,7 +887,15 @@ CsrNetDevice::RefreshDutyState ()
   bool preparationKeepsSearch =
     state == CsrMacCore::State::SEARCH &&
     m_mac.IsTxPreparationActive ();
+  // A pending SLEEP interrupt is the source-owned no-signal Search window.
+  // Keep that state through its exact deadline so a new SYNC can acquire and
+  // cancel the event on entry to Track.
+  bool noSignalSearchActive =
+    state == CsrMacCore::State::SEARCH &&
+    m_sleepEvent.IsPending ();
   bool shouldSearch = preparationKeepsSearch ||
+                      noSignalSearchActive ||
+                      m_postTxWaitActive ||
                       m_forceAwakeUntilSec > now ||
                       IsPeriodicAwakeAt (now);
   m_mac.SetReceiveState (shouldSearch
@@ -866,7 +927,9 @@ CsrNetDevice::SleepReceiver ()
   bool preparationKeepsSearch =
     state == CsrMacCore::State::SEARCH &&
     m_mac.IsTxPreparationActive ();
-  if (preparationKeepsSearch || m_forceAwakeUntilSec > now)
+  if (preparationKeepsSearch ||
+      m_postTxWaitActive ||
+      m_forceAwakeUntilSec > now)
     {
       return;
     }
@@ -993,6 +1056,69 @@ CsrNetDevice::ScheduleOpnetPeriodicWake ()
 }
 
 void
+CsrNetDevice::StartPostTxWait ()
+{
+  CancelPostTxWait ();
+  m_postTxWaitActive = true;
+  double waitSeconds = GetPostTxWaitSeconds ();
+  m_postTxWaitEvent = Simulator::Schedule (
+    Seconds (waitSeconds),
+    &CsrNetDevice::PostTxWaitExpired,
+    this);
+
+  std::cout << "[MAC " << m_id
+            << "] post-TX WAIT_FOR_ACK until "
+            << (Simulator::Now ().GetSeconds () + waitSeconds)
+            << " (POST_TX_WAIT=" << waitSeconds << " s)"
+            << std::endl;
+}
+
+void
+CsrNetDevice::CancelPostTxWait ()
+{
+  if (m_postTxWaitEvent.IsPending ())
+    {
+      Simulator::Cancel (m_postTxWaitEvent);
+    }
+  m_postTxWaitActive = false;
+}
+
+void
+CsrNetDevice::PostTxWaitExpired ()
+{
+  m_postTxWaitActive = false;
+
+  CsrMacCore::State state = m_mac.GetState ();
+  if (state == CsrMacCore::State::TRACK ||
+      state == CsrMacCore::State::TX)
+    {
+      // br_mac Track consumes POST_TX_WAIT by clearing WAIT_FOR_ACK only.
+      // If the tracked packet later completes with no queued work,
+      // back2search() owns a fresh 7.8-ms no-signal Search.
+      return;
+    }
+
+  if (!m_dutyCycleEnabled)
+    {
+      RefreshDutyState ();
+      return;
+    }
+
+  // Search consumes POST_TX_WAIT through the same dsp_off() transition as a
+  // SLEEP interrupt.  This is event-owned and does not depend on the current
+  // periodic wake phase.
+  if (m_sleepEvent.IsPending ())
+    {
+      Simulator::Cancel (m_sleepEvent);
+    }
+  if (m_acquisitionEvent.IsPending ())
+    {
+      Simulator::Cancel (m_acquisitionEvent);
+    }
+  m_mac.SetReceiveState (CsrMacCore::State::IDLE);
+}
+
+void
 CsrNetDevice::ScheduleSignalWake ()
 {
   if (!m_dutyCycleEnabled ||
@@ -1081,6 +1207,69 @@ CsrNetDevice::ScheduleAcquisition ()
   m_acquisitionEvent = Simulator::Schedule (Seconds (m_syncToTrackSec),
                                              &CsrNetDevice::AcquireSignal,
                                              this);
+}
+
+void
+CsrNetDevice::ReturnToSearchAfterReceive ()
+{
+  // br_mac's Track --DONE_RX_PK--> Search transition runs back2search().
+  // Unlike start_search(), this path does not include DSP_RX_BOOTTIME.  When
+  // no ACK/Tx preparation or post-Tx ACK wait owns the receiver, it schedules
+  // SLEEP after exactly NO_SIG_SRH_TIME (7.8 ms).  A subsequent acquisition
+  // cancels that event when it enters Track.
+  // A preamble admitted during Track is rejected for that Track epoch, but it
+  // stays in the source SYNC table.  On back2search(), a surviving SYNC gets a
+  // fresh acquisition and start_track() may explicitly accept it again.
+  double now = Simulator::Now ().GetSeconds ();
+  for (auto &[id, signal] : m_rxSignals)
+    {
+      (void) id;
+      if (signal.rejectedDuringTrack &&
+          signal.syncEligible &&
+          signal.preambleActive &&
+          signal.endSec > now)
+        {
+          signal.rejected = false;
+          signal.rejectedDuringTrack = false;
+        }
+    }
+
+  m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
+  ScheduleAcquisition ();
+
+  if (m_sleepEvent.IsPending ())
+    {
+      Simulator::Cancel (m_sleepEvent);
+    }
+
+  if (!m_dutyCycleEnabled)
+    {
+      return;
+    }
+
+  bool preparationKeepsSearch = m_mac.IsTxPreparationActive ();
+  bool waitingForAck = m_postTxWaitActive;
+  if (preparationKeepsSearch || waitingForAck ||
+      m_mac.GetState () != CsrMacCore::State::SEARCH)
+    {
+      return;
+    }
+
+  m_sleepEvent = Simulator::Schedule (
+    Seconds (m_noSignalSearchSec),
+    &CsrNetDevice::SleepReceiver,
+    this);
+}
+
+void
+CsrNetDevice::ReturnRejectedReceiveToSearch ()
+{
+  if (m_mac.GetState () == CsrMacCore::State::TRACK)
+    {
+      ReturnToSearchAfterReceive ();
+      return;
+    }
+  RefreshDutyState ();
 }
 
 void
@@ -1303,6 +1492,7 @@ CsrNetDevice::ApplyTrackedInterference (RxSignal &interferer)
 
   RxSignal &tracked = trackedIt->second;
   interferer.rejected = true;
+  interferer.rejectedDuringTrack = true;
   if (!interferer.frontEnd.channelMatched ||
       tracked.rateKbps != interferer.rateKbps)
     {
@@ -1318,6 +1508,31 @@ CsrNetDevice::ApplyTrackedInterference (RxSignal &interferer)
     {
       tracked.collided = true;
     }
+}
+
+double
+CsrNetDevice::DrawSyncSnrThresholdDb ()
+{
+  if (m_syncThresholdOverrideDb.has_value ())
+    {
+      return *m_syncThresholdOverrideDb;
+    }
+
+  const CsrPhyProfile &profile = m_phy.profile;
+  NS_ABORT_MSG_IF (!std::isfinite (profile.syncSnrThresholdDb) ||
+                   !std::isfinite (
+                     profile.syncSnrThresholdVarianceDb2) ||
+                   profile.syncSnrThresholdVarianceDb2 < 0.0,
+                   "CSR SYNC threshold distribution is invalid");
+  if (!profile.stochasticSyncThreshold ||
+      profile.syncSnrThresholdVarianceDb2 == 0.0)
+    {
+      return profile.syncSnrThresholdDb;
+    }
+
+  return m_syncThresholdRng->GetValue (
+    profile.syncSnrThresholdDb,
+    profile.syncSnrThresholdVarianceDb2);
 }
 
 void
@@ -1349,8 +1564,16 @@ CsrNetDevice::BeginReceiveSignal (RxSignal signal)
         }
     }
   StartAllSignalIntervals (now);
-  incoming.syncEligible = incoming.frontEnd.channelMatched &&
-    incoming.snrDb >= m_phy.profile.syncSnrThresholdDb;
+  if (incoming.frontEnd.channelMatched)
+    {
+      double syncThresholdDb = DrawSyncSnrThresholdDb ();
+      incoming.syncEligible = incoming.snrDb >= syncThresholdDb;
+      m_syncDecisionTrace (incoming.txId,
+                           incoming.sequence,
+                           incoming.snrDb,
+                           syncThresholdDb,
+                           incoming.syncEligible);
+    }
 
   Simulator::Schedule (
     Seconds (std::max (0.0, incoming.preambleEndSec - now)),
@@ -1498,6 +1721,7 @@ CsrNetDevice::AcquireSignal ()
       if (other.syncEligible && other.preambleActive)
         {
           other.rejected = true;
+          other.rejectedDuringTrack = true;
         }
       if (other.rateKbps == selected->rateKbps &&
           other.frontEnd.channelMatched)
@@ -1540,7 +1764,6 @@ CsrNetDevice::DeliverTrackedSignal (const RxSignal &signal,
                                     const CsrRxDecision &decision)
 {
   bool addressedFrame = false;
-  bool ackableForPeer = false;
   for (const auto &segment : signal.frames)
     {
       CsrHeader header;
@@ -1548,7 +1771,6 @@ CsrNetDevice::DeliverTrackedSignal (const RxSignal &signal,
       if (header.IsForDestination (m_id))
         {
           addressedFrame = true;
-          ackableForPeer = ackableForPeer || header.IsAckable ();
         }
     }
 
@@ -1568,11 +1790,6 @@ CsrNetDevice::DeliverTrackedSignal (const RxSignal &signal,
             << ", len " << signal.payloadBytes << "B"
             << ", ackable=" << (signal.ackable ? 1 : 0) << ")"
             << std::endl;
-
-  if (ackableForPeer)
-    {
-      ForceAwakeFor (0.35);
-    }
 
   m_mac.NoteHeardFrom (signal.txId, now);
   m_mac.SetNeighborPathloss (signal.txId, decision.pathlossDb);
@@ -1605,6 +1822,7 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
   CloseAllSignalIntervals (now);
   RxSignal signal = it->second;
   bool wasTracked = signalId == m_trackedSignalId;
+  bool pipelineRejectedTracked = false;
   if (wasTracked)
     {
       uint32_t preambleBits = signal.preamble == PREAMBLE_LONG
@@ -1631,6 +1849,7 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
         }
       m_lastRxDecision = decision;
       m_hasLastRxDecision = true;
+      pipelineRejectedTracked = !decision.success;
       if (decision.eccDropped)
         {
           m_rxEccDropCount++;
@@ -1721,9 +1940,12 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
 
       m_trackedSignalId = 0;
     }
-  else if (signal.missedByState)
+  else
     {
-      m_rxMissCount++;
+      if (signal.missedByState)
+        {
+          m_rxMissCount++;
+        }
       CsrHeader traceHeader;
       signal.frames.front ()->PeekHeader (traceHeader);
       CsrDifferentialTraceEvent missEvent;
@@ -1737,42 +1959,38 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
       missEvent.rateKbps = CsrTraceSignedInteger (signal.rateKbps);
       missEvent.sizeBytes = CsrTraceInteger (signal.payloadBytes);
       missEvent.success = "0";
-      missEvent.reason = "state";
+      // br_mac clears PK_ACCEPT for a signal that expires outside Track,
+      // loses acquisition, or arrives while another signal is tracked.
+      // br_ecc excludes those prior-stage rejections from its drop statistic.
+      // A receiver still in Tx is instead rejected by signal_lock.
+      missEvent.reason = m_mac.GetState () == CsrMacCore::State::TX
+        ? "half_duplex"
+        : "prior_stage";
+      missEvent.pathlossDb = CsrTraceDouble (signal.pathlossDb);
+      missEvent.rxPowerDbm = CsrTraceDouble (signal.rxPowerDbm);
+      missEvent.noiseDbm = CsrTraceDouble (
+        CsrPhyModel::WattsToDbm (
+          signal.errorAllocation.peakNoisePowerWatts));
+      missEvent.snrDb = CsrTraceDouble (
+        signal.errorAllocation.minimumSnrDb);
+      missEvent.jsrDb = CsrTraceDouble (signal.jsrDb);
+      missEvent.headerErrors = CsrTraceInteger (
+        signal.errorAllocation.headerErrors);
+      missEvent.payloadErrors = CsrTraceInteger (
+        signal.errorAllocation.payloadErrors);
+      missEvent.totalErrors = CsrTraceInteger (
+        signal.errorAllocation.totalErrors);
       missEvent.detail = "collisions=" + CsrTraceInteger (
         signal.collisionCount);
       WriteDifferentialTrace (missEvent);
-      std::cout << "[t=" << Simulator::Now ().GetSeconds ()
-                << "] RX MISS at node " << m_id
-                << " from node " << signal.txId
-                << " seq " << signal.sequence
-                << std::endl;
-    }
-  else if (signal.collisionCount > 0)
-    {
-      // Modeler's receiver pipeline still produces a rejected ECC outcome for
-      // the colliding signal that did not win acquisition. Record the same
-      // prior-stage outcome without changing ns-3 delivery behavior.
-      CsrHeader traceHeader;
-      signal.frames.front ()->PeekHeader (traceHeader);
-      CsrDifferentialTraceEvent collisionEvent;
-      collisionEvent.event = "rx_drop";
-      collisionEvent.node = CsrTraceInteger (m_id);
-      collisionEvent.peer = CsrTraceInteger (signal.txId);
-      collisionEvent.packetType = CsrPacketTypeName (traceHeader.GetType ());
-      collisionEvent.source = CsrTraceInteger (traceHeader.GetSrc ());
-      collisionEvent.destination = CsrTraceInteger (traceHeader.GetDst ());
-      collisionEvent.sequence = CsrTraceInteger (signal.sequence);
-      collisionEvent.rateKbps = CsrTraceSignedInteger (signal.rateKbps);
-      collisionEvent.sizeBytes = CsrTraceInteger (signal.payloadBytes);
-      collisionEvent.success = "0";
-      collisionEvent.reason = "prior_stage";
-      collisionEvent.pathlossDb = CsrTraceDouble (signal.pathlossDb);
-      collisionEvent.rxPowerDbm = CsrTraceDouble (signal.rxPowerDbm);
-      collisionEvent.snrDb = CsrTraceDouble (signal.snrDb);
-      collisionEvent.jsrDb = CsrTraceDouble (signal.jsrDb);
-      collisionEvent.detail = "collisions=" + CsrTraceInteger (
-        signal.collisionCount);
-      WriteDifferentialTrace (collisionEvent);
+      if (signal.missedByState)
+        {
+          std::cout << "[t=" << Simulator::Now ().GetSeconds ()
+                    << "] RX MISS at node " << m_id
+                    << " from node " << signal.txId
+                    << " seq " << signal.sequence
+                    << std::endl;
+        }
     }
 
   RemoveEndedInterference (signal);
@@ -1783,16 +2001,35 @@ CsrNetDevice::EndReceiveSignal (uint64_t signalId)
 
   if (wasTracked && m_mac.GetState () != CsrMacCore::State::TX)
     {
-      m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
-      ScheduleAcquisition ();
+      if (pipelineRejectedTracked)
+        {
+          // start_track() installs a fallback DONE_RX_PK at END_RX + TIC for
+          // packets suppressed by the receiver pipeline.  A delivered packet
+          // instead runs proc_rx_pk() and returns immediately at END_RX.
+          m_doneRxEvent = Simulator::Schedule (
+            CsrOpnetTic (),
+            &CsrNetDevice::ReturnRejectedReceiveToSearch,
+            this);
+        }
+      else
+        {
+          ReturnToSearchAfterReceive ();
+        }
     }
-  RefreshDutyState ();
+  else
+    {
+      RefreshDutyState ();
+    }
 }
 
 void
-CsrNetDevice::OnMacTxFinished ()
+CsrNetDevice::OnMacTxFinished (bool queuesEmpty)
 {
   UpdateSyncPresence ();
+  if (queuesEmpty)
+    {
+      StartPostTxWait ();
+    }
   ScheduleAcquisition ();
   RefreshDutyState ();
 }
@@ -2208,13 +2445,20 @@ CsrMacCore::TxHoldoffExpired ()
 }
 
 void
-CsrMacCore::ActivateTxPreparation (bool redrawZero)
+CsrMacCore::ActivateTxPreparation (bool redrawZero,
+                                   bool cancelPostTxWait)
 {
   if (m_txPreparationActive || !HasPendingFrame ())
     {
       return;
     }
 
+  if (cancelPostTxWait && m_dev != nullptr)
+    {
+      // tslot_tasks() cancels an outstanding post-Tx wait when queued work
+      // turns PREP_TX back on.
+      m_dev->CancelPostTxWait ();
+    }
   m_txPreparationActive = true;
 
   bool selectedNewSlot = m_txCountdownCounter < 0 ||
@@ -2285,6 +2529,12 @@ CsrMacCore::ActivateTxPreparation (bool redrawZero)
 void
 CsrMacCore::NotifyPhyTxStart (Time duration)
 {
+  if (m_dev != nullptr)
+    {
+      // send_pk() cancels a previous post-Tx wait when a new transmission
+      // actually starts, including a direct-device transmission.
+      m_dev->CancelPostTxWait ();
+    }
   m_txInProgress = true;
   m_state = State::TX;
 
@@ -2315,16 +2565,18 @@ CsrMacCore::FinishTx ()
   event.detail = StateName (State::SEARCH);
   WriteDifferentialTrace (event);
 
-  if (m_dev != nullptr)
-    {
-      m_dev->OnMacTxFinished ();
-    }
-
   if (HasPendingFrame ())
     {
       // post_tx() enables PREP_TX immediately for frames that arrived or
       // remained during Tx, reusing the slot advertised by this frame.
       ActivateTxPreparation ();
+    }
+
+  if (m_dev != nullptr)
+    {
+      // Source post_tx() starts WAIT_FOR_ACK only after DONE_TX and only when
+      // both ACK and data queues are empty.
+      m_dev->OnMacTxFinished (!HasPendingFrame ());
     }
 }
 

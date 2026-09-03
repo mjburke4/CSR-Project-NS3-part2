@@ -289,7 +289,14 @@ TestSameRateJsrAndTimeOffset ()
   receiver->GetPhy ().SetLinkDistanceMeters (2, 3, 100.0);
   receiver->GetMac ().SetRxCallback (MakeCallback (&RecordReception));
 
-  SendFrame (desired, 3, 110, 128, 0.0);
+  Time firstDuration = desired->SendToPeer (
+    BuildFrame (desired->GetId (), 3, 110, 128),
+    3,
+    128,
+    0.0,
+    PREAMBLE_LONG,
+    3,
+    false);
   Simulator::Schedule (MilliSeconds (20),
                        &SendFrame,
                        jammer,
@@ -297,28 +304,61 @@ TestSameRateJsrAndTimeOffset ()
                        111,
                        128,
                        -6.0);
+
+  Time propagation = Seconds (
+    100.0 / CsrPhyModel::SPEED_OF_LIGHT_METERS_PER_SECOND);
+  Time firstCompletion = propagation + firstDuration;
+  Time backToSearch = firstCompletion + CsrOpnetTic ();
+  Time replacementAcquisition = backToSearch + Seconds (0.00663);
+  bool firstCollisionChecked = false;
+
+  Simulator::Schedule (
+    firstCompletion + NanoSeconds (1),
+    [receiver, &firstCollisionChecked] () {
+      Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+               "pipeline collision returned before END_RX plus TIC");
+      Require (receiver->HasLastRxDecision (),
+               "same-rate collision produced no PHY diagnostics");
+      const CsrRxDecision &decision = receiver->GetLastRxDecision ();
+      Require (!decision.success,
+               "temporary same-rate collision accepted the first frame");
+      Require (decision.sameRateInterference,
+               "same-rate jammer did not enter the modulation-table path");
+      RequireNear (decision.jsrDb,
+                   -6.0,
+                   1.0e-9,
+                   "same-rate JSR differs from br_inoise");
+      RequireNear (decision.timeOffsetSeconds,
+                   0.02,
+                   1.0e-9,
+                   "same-rate time offset differs from br_inoise");
+      RequireNear (decision.noisePowerDbm,
+                   -106.975,
+                   1.0e-9,
+                   "same-rate jammer incorrectly entered additive noise");
+      firstCollisionChecked = true;
+    });
+  Simulator::Schedule (
+    replacementAcquisition - NanoSeconds (1),
+    [receiver] () {
+      Require (receiver->GetMacState () == CsrMacCore::State::SEARCH,
+               "surviving preamble reacquired before fresh 6.63-ms delay");
+    });
+  Simulator::Schedule (
+    replacementAcquisition + NanoSeconds (1),
+    [receiver] () {
+      Require (receiver->GetMacState () == CsrMacCore::State::TRACK,
+               "surviving preamble was not reacquired after 6.63 ms");
+    });
   Simulator::Stop (Seconds (1.2));
   Simulator::Run ();
 
-  Require (g_receiveCount == 0,
-           "temporary same-rate collision boundary did not reject frame");
-  Require (receiver->HasLastRxDecision (),
-           "same-rate collision produced no PHY diagnostics");
-  const CsrRxDecision &decision = receiver->GetLastRxDecision ();
-  Require (decision.sameRateInterference,
-           "same-rate jammer did not enter the modulation-table path");
-  RequireNear (decision.jsrDb,
-               -6.0,
-               1.0e-9,
-               "same-rate JSR differs from br_inoise");
-  RequireNear (decision.timeOffsetSeconds,
-               0.02,
-               1.0e-9,
-               "same-rate time offset differs from br_inoise");
-  RequireNear (decision.noisePowerDbm,
-               -106.975,
-               1.0e-9,
-               "same-rate jammer incorrectly entered additive noise");
+  Require (firstCollisionChecked,
+           "same-rate first-packet decision checkpoint did not run");
+  Require (g_receiveCount == 1,
+           "surviving same-rate preamble was not delivered after reacquisition");
+  Require (receiver->GetLastRxDecision ().success,
+           "reacquired replacement failed final PHY delivery");
   Simulator::Destroy ();
 }
 

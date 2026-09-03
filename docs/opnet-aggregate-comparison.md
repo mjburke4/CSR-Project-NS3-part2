@@ -216,10 +216,13 @@ OPNET parity. `evidence_scope` is
 `historical_bucket_aggregates_not_event_parity`. Exact tolerances, the full core
 statistic set, the full time window, normal OPNET behavior flags, and no legacy
 size adjustment form the `canonical` profile; any supported override is listed
-and marks the run `diagnostic`. The default statistic set intentionally
-excludes an unproven mapping of OPNET ECC drops to ns-3 `reason=ecc`: earlier
-ns-3 receive stages can also account for collision loss, so those counters
-must be reconciled before they are called equivalent.
+and marks the run `diagnostic`. The default statistic set excludes ECC drops
+because that vector is absent from some historical results. Direct inspection
+of `br_mac` and `br_ecc` proves the event identity: only a packet that remains
+selected and exceeds the inclusive ECC threshold increments the statistic.
+Signals rejected during synchronization/acquisition are `prior_stage`, while
+a locked transmitter is `half_duplex`; neither contributes. The ECC series
+therefore remains an explicit diagnostic selection where Modeler recorded it.
 
 ## Direct comparator usage
 
@@ -310,8 +313,11 @@ attempts, 10,405 admissions, 34,595 source-exact NSDP blocks, 10,395 matched
 deliveries, no unmatched delivery, and no packet-size mismatch. Thus the close
 headline means are aggregate evidence, not an exact bucket-level parity claim.
 
-These runs use the hash-bound historical application and MAC profiles, FIFO
-DSCP 0, source-ordered generator gates, and the common 0.988-second wake
+These retained runs use the hash-bound historical application and MAC
+profiles but predate the source-backed 217-byte bare-DATA correction. They are
+not release-candidate evidence until regenerated with explicit
+`hop_security_profile=hist-adb97c54-bare` and the full executable digest. They
+otherwise use FIFO DSCP 0, source-ordered generator gates, and the common 0.988-second wake
 phase. The two-node and hidden-node headline means are now close without a
 tolerance adjustment. Multihop remains materially high in traffic and low in
 delay, so the four recovered HOP/MAC queue vectors were compared next rather
@@ -606,11 +612,12 @@ themselves. Exact packet size in all three cases validates the vector decoder
 and source-level modeled size, but it does not validate traffic generation,
 reservation/ACK timing, routing, delay, or collision behavior.
 
-The hidden-node run also confirms why ECC drop accounting is excluded from the
-default set. Modeler's `ECC.Traffic Dropped (packets/sec)` mean is 10.84105,
-while the narrow ns-3 `rx_drop` `reason=ecc` mean is 0.6195167.
-The ns-3 trace separately records 487,751 `prior_stage` and 223,477 `state`
-drops. That is an unresolved event-identity mapping, not a tolerable numeric
-offset; prior-stage collision rejections must be mapped from source semantics
-before the counters can be called equivalent. Tolerances were not widened to
-turn any of these measured differences into a pass.
+The hidden-node run also shows a substantive ECC-behavior mismatch. Modeler's
+`ECC.Traffic Dropped (packets/sec)` mean is 10.84105, while ns-3's
+source-equivalent `rx_drop` `reason=ecc` mean is 0.6195167. Direct source
+inspection rules out synchronization/acquisition and half-duplex drops: the
+former enter `br_ecc` with `PK_ACCEPT=false`, and the latter encounters
+`signal_lock=true`; neither increments the OPNET statistic. The large gap is
+therefore a PHY/MAC behavior result to investigate, not an event-taxonomy
+ambiguity or a tolerable numeric offset. Tolerances were not widened to turn
+the measured difference into a pass.

@@ -139,7 +139,6 @@ receiver-drop vectors rather than these per-packet PHY intermediates.
 
 ## Remaining PHY boundary
 
-- Reproduce the normal synchronization-threshold variance around -11 dB.
 - Probe the opaque OPNET off-grid BER-table interpolation behavior.
 - Supply exact external spherical-Earth/TMM closure when available.
 - Apply the promoted Min/Max Power, Link Margin, and ECC threshold through a

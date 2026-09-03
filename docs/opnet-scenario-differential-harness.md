@@ -84,8 +84,9 @@ required for event-by-event certification.
 Every row uses schema `csr-opnet-scenario-v1` and one of three record types:
 
 - `run`: scenario digest, duration, seed, TMM flag, coordinate scale,
-  executable-backed application and MAC profiles, and an optional
-  reservation-control activation time.
+  executable-backed application, MAC, and atomic HOP-security profiles, the
+  optional source-executable SHA-256, and an optional reservation-control
+  activation time.
 - `node`: one imported CSR node, all calibrated radio/link attributes, and an
   optional controlled reservation slot.
 - `flow`: one application generator, including fixed or live
@@ -142,8 +143,10 @@ Only the newer current profile treats DSCP as a deterministic modeling choice.
 The supplied newer `br_app` uses process-level `DSCP` and `DSCP_pct` inputs to
 choose between that DSCP and zero probabilistically; the importer retains the
 previous fixed default of 5 for backward compatibility and records it in every
-flow row. It never substitutes that assumption into either historical
-no-DSCP profile.
+flow row. None of the recovered scenario inputs supplies `DSCP_pct`, and no
+authoritative OPNET-to-ns-3 RNG-stream mapping is available, so the current
+runner does not claim percentage-mixture parity. It never substitutes the
+fixed-DSCP assumption into either historical no-DSCP profile.
 
 ### Executable-bound MAC profiles
 
@@ -213,6 +216,38 @@ and defects:
   array. If every slot in `0..R-1` is occupied, the historical loop never
   terminates even when `R` is free; this profile detects a complete modulo
   cycle and aborts explicitly instead of hanging.
+- The same `adb97c54...` executable binds the range input to direct-link
+  population. Its DWARF state lists `active_nodes` at `br_mac.pr.c:185`
+  (offset 228) and `txslot` at line 186 (offset 232), but no
+  `max_reported_active_nodes`; `get_slot@0x1f27e` has the single formal
+  `nodes` at line 1513. All five call sites reload `nwk_IFptr->int_1` and pass
+  that local value (`back2search@0x1d264/0x1d3a9`,
+  `tslot_tasks@0x1f08a`, `prep_tx@0x1f6e2`, and
+  `post_tx@0x2226f`). In the same executable,
+  `proc_hello@0x2ff21..0x300ec` looks up or adds only the received packet
+  source, raises `active_nodes` from that neighbor-list size plus one, and
+  publishes it before route-payload processing begins at `0x300ee`
+  (`br_nwk.pr.c:925-956`). Thus advertised transit path nodes remain routing
+  records but cannot enlarge this MAC slot range. The supplied later source
+  corroborates the direct-source/list-size sequence at `br_nwk.pr.c:936-965`
+  and acquisition of the shared HOP `neighbor_lptr` at line 2071. That later
+  `br_mac.pr.c` is a separate provenance boundary: its state does contain
+  `max_reported_active_nodes`, and its call sites explicitly pass
+  `max(local, reported)` (for example lines 1147-1150 and 2810-2814). Profiles
+  representing the supplied later source retain that behavior. The hash-bound
+  `hist-2014-next-tslot-modulo-probe` run uses the adb97 local-only input; the
+  coarse-inclusive profile's separate local-only rule remains bound to its own
+  recovered executable evidence above.
+
+`csr-mac-slot-parity-smoke.cc` pins this provenance boundary with the campus
+node-5 fixture: direct peers 1/3/4 plus self select `N=4`, `R=31`; transit-only
+route records 2/7/8 remain stored but do not turn it into `N=7`, `R=63`. A
+fourth directly heard peer deliberately crosses the coarse threshold to
+`N=5`, `R=63`. It also verifies that unrelated executable profiles retain
+their previous max-reported-population input. At the 13-ms slot period, the
+incorrect `0..63` uniform draw has a 409.5-ms mean countdown, versus 201.5 ms
+for the source-exact `0..31` draw: an avoidable 208-ms mean delay before each
+new transmit opportunity.
 
 For example, a hash-matched two-node import records both executable-era
 choices:
@@ -225,6 +260,41 @@ python3 utils/import-opnet-scenario.py \
   --application-profile legacy-send-to-from-no-dscp \
   --mac-profile hist-2014-zero-based-rebuild-list
 ```
+
+### Executable-bound HOP-security profiles
+
+The run row's `hop_security_profile` is one atomic ordinary-DATA and ACK/DACK
+selector. It prevents either half of the HOP wire contract from being silently
+mixed into an archived-executable aggregate comparison. The importer writes
+the selection and, for the archived profile, the full
+`source_executable_sha256`; the aggregate workflow records both plus an
+explicit DATA/ACK behavior projection.
+
+| HOP-security profile | Evidence binding | Exact behavior |
+| --- | --- | --- |
+| `production-pairwise16` | Supplied production `packetTypes.c` maps AppData/AppDataNoAck and common `AckMsg` to Pairwise16 | A 192-byte network packet is 222 bytes on the OPNET wire; exact ACK is 30 bytes and cumulative ACK/DACK is 46 bytes. Authentication precedes state changes. |
+| `hist-adb97c54-bare` | Archived campus-multihop executable SHA-256 `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` | `br_Network -> br_Hop -> br_Mac` is direct and bare, producing 217 bytes for a 192-byte network packet. All five compiled ACK callers select both cumulative registers, producing bare 41-byte ACK/DACK. The 25-byte exact form is receive compatibility, not an observed archived transmit path. |
+
+Select the historical boundary explicitly when importing that executable's
+aggregate scenario:
+
+```bash
+python3 utils/import-opnet-scenario.py \
+  historical-campus.zip imported-multihop.csv \
+  --scenario blue_radio_campus-multihop.nt.m \
+  --infer-gateway-flows \
+  --application-profile legacy-send-only-no-dscp \
+  --mac-profile hist-2014-next-tslot-modulo-probe \
+  --hop-security-profile hist-adb97c54-bare
+```
+
+Omitting `--hop-security-profile` selects `production-pairwise16`. The exact
+archived application/MAC tuple and historical HOP profile must be selected
+together. Older CSVs may use `ack_envelope_profile` as a deprecated input
+alias, but alias-only or missing-profile runs are diagnostic and cannot become
+a final certificate. An alias-resolved historical run still requires the full
+adb97 digest. Conflicting fields, any effective historical selection without
+that digest, and any effective production selection claiming it fail closed.
 
 `--infer-ring-flows` remains a deterministic smoke-test surrogate. It is not
 source-exact for these runs because the OPNET application obtains destinations
@@ -271,9 +341,15 @@ exact header width or an unchanged event set must account for those additions.
 
 ### Packet-path and NWK-residence ledger
 
-`analyze-ns3-packet-paths.py` consumes either the full or compact v1 header and
-correlates exact `(src,dst,sequence)` lifecycles. For a delivered packet it
-requires:
+`analyze-ns3-packet-paths.py` consumes either the full or compact v1 trace
+header and emits a v2 path report. A strict branch-safe run must also enable
+`--admissionTrace=1`: aggregate-only output without that surface has no tagged
+`hop_admission` rows. Such a compact trace remains sufficient for ordinary
+one-copy paths, but the analyzer rejects it as ineligible if repeated relay or
+delivery observations require exact HOP-identity branch splitting. It never
+infers that identity from FIFO order. The analyzer correlates ordinary
+`(src,dst,sequence)` lifecycles and splits only source-proved repeated-DACK
+copies. For a delivered copy it requires:
 
 ```text
 app_send,(nwk_enqueue,nwk_forward)+,nwk_delivery
@@ -299,9 +375,12 @@ The JSON report contains overall and post-startup cohorts, flow/path
 distributions, per-node NWK residence, route-context checks, exact 60-second
 end-to-end buckets, and input/output hashes. The packet CSV contains the
 complete path, each per-node residence, each forward-to-arrival leg, and the
-exact end-to-end decomposition. HOP resend lifetime is deliberately not added
-as another component because it overlaps MAC queuing, transmission, and ACK
-service.
+exact end-to-end decomposition. Its `copy_index` distinguishes byte-identical
+application copies, and reconstructed repeated-DACK rows use
+`hop_lineage_json` to record every exact
+`(src,dst,sequence,from,to,hop_sequence)` edge. HOP resend lifetime is
+deliberately not added as another component because it overlaps MAC queuing,
+transmission, and ACK service.
 
 On the retained pre-fix canonical 6,000-second multihop run, strict analysis
 accepted all 13,740 delivered lifecycles with zero invalid packets and
@@ -352,9 +431,30 @@ and duplicates without feedback remain strict failures.
 The admission-ledger analyzer binds concurrent same-packet/node legs by full
 packet and directed-HOP identity, so completions and deferred DACK releases do
 not overwrite another active leg. It still reports packet-identity
-`duplicate_delivery`. The packet-path analyzer also keeps duplicate delivery
-fatal because it cannot yet bind each proven copy to a complete ordered
-relay-to-destination suffix; a packet-wide budget is not sufficient evidence.
+`duplicate_delivery`. The packet-path analyzer now expands a repeated-DACK
+fork only after each admission and feedback joins on exact
+`(src,dst,sequence,from,to,hop_sequence)` identity, each extra reception passes
+the source-exact pre/post-NSDP proof, every relay enqueue and delivery is
+covered, and every enqueue-to-forward edge agrees within 1 ns with the direct
+`NWK.Network Queuing Delay (sec)` sample on the immediately preceding CSV row.
+That sample must also have the consecutive event index and the same node and
+timestamp as the forward. The resulting queue-copy graph must have exactly one
+complete matching: the analyzer removes each selected edge and rematches to reject any
+alternate saturation. This is not FIFO, and reversing candidate enumeration is
+pinned to the same output for the observed case in which HOP sequence 990 is
+acknowledged before 989. Missing, displaced, wrong-node, or inconsistent delay
+evidence, non-unique matching, ordinary repeated ACKs, changed HOP identity,
+malformed NSDP transitions, orphan suffix rows, and incomplete graph coverage
+remain strict failures.
+
+Replaying the frozen release trace with SHA-256
+`1f18699e67cb3d57906c04f29cb305e6fd7aa10913aa00f74fb97aef05e98863`
+now passes strict packet-path analysis. It retains 9,158 application packet
+keys, expands the eight proved DACK forks into 9,166 lifecycle copies, closes
+all 8,733 deliveries, and classifies 433 end-of-run copies as valid incomplete
+prefixes, with zero invalid copies or route-context mismatches. All 100
+end-to-end buckets are exactly equal to the aggregate builder, including the
+seven extra delivered copies; the eighth fork remains queued at the stop.
 
 Run the imported scenario with the opt-in surface:
 
@@ -368,6 +468,14 @@ Run the imported scenario with the opt-in surface:
   --admissionTrace=1 \
   --quietModelLogs=1
 ```
+
+The runner defaults to the source-declared `normal(-11, 0.25)`
+synchronization threshold, where 0.25 is variance in dB squared. The optional
+`--stochasticSyncThreshold=0` switch is a deterministic-mean compatibility
+mode for replaying pre-variance checkpoints; it is not the source-exact
+default. Devices receive consecutive two-stream blocks in imported node order,
+keeping the duty-phase and synchronization sequences reproducible under the
+scenario seed and ns-3 run number.
 
 Then validate and summarize the ledger:
 
@@ -534,8 +642,11 @@ custody entries, distinct onward HOP sequences, and two destination APP
 callbacks. The aggregate analyzer accepts the extra delivery only with the
 complete enqueue/feedback proof described above. Admission-ledger analysis now
 binds distinct overlapping HOP legs but still reports the packet-identity
-duplicate delivery. Packet-path analysis remains unable to validate each
-duplicate's complete downstream suffix and keeps the duplicate fatal.
+duplicate delivery. Packet-path analysis binds each proved copy to its exact
+directed-HOP suffix and treats the eight recovered forks as two valid lifecycle
+copies apiece. It does not generalize that exception to a packet-wide duplicate
+budget: a duplicate without complete HOP/enqueue/feedback coverage remains
+fatal.
 Reaccepting a Pairwise16-authenticated retry from the DACK bitmap is inferred
 cross-source integration; the downstream lost-DACK delivery fork itself is
 source-exact.

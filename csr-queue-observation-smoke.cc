@@ -757,6 +757,7 @@ RunRelayFeedbackBoundary (uint32_t nsdpBefore,
   Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
   Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
   ConnectNwkStack (device, hop, nwk, relay);
+  hop->SetHopWireProfile (CsrHopWireProfile::HIST_ADB97C54_BARE);
   nwk->SetNodeType (CsrNodeType::Routable);
 
   // Seed relay custody without an onward route.  ReceiveFromHop performs the

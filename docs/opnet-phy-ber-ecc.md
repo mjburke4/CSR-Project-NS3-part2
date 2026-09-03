@@ -272,7 +272,6 @@ the imported-scenario runner is the thirty-eighth executable target.
 
 ## Remaining PHY boundary
 
-- Source-distributed synchronization-threshold variance around -11 dB.
 - An authoritative probe of OPNET's off-grid `op_tbl_mod_ber()` interpolation.
 - Exact external spherical-Earth/TMM closure if those support libraries or
   captured decisions become available.

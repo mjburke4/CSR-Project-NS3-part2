@@ -18,8 +18,11 @@ from typing import Iterable
 
 
 TRACE_SCHEMA = "csr-differential-trace-v1"
-REPORT_SCHEMA = "csr-packet-path-analysis-v1"
+REPORT_SCHEMA = "csr-packet-path-analysis-v2"
 PACKET_EVENTS = {"app_send", "nwk_enqueue", "nwk_forward", "nwk_delivery"}
+HOP_EVIDENCE_EVENTS = {"hop_admission", "hop_feedback"}
+NWK_QUEUE_DELAY_STATISTIC = "NWK.Network Queuing Delay (sec)"
+QUEUE_DELAY_MATCH_ABS_TOLERANCE_S = 1.0e-9
 REQUIRED_COLUMNS = {
     "schema",
     "event_index",
@@ -35,6 +38,7 @@ PACKET_CSV_COLUMNS = (
     "src",
     "dst",
     "sequence",
+    "copy_index",
     "status",
     "valid",
     "complete",
@@ -57,6 +61,7 @@ PACKET_CSV_COLUMNS = (
     "route_context_mismatch_count",
     "issue_count",
     "issues_json",
+    "hop_lineage_json",
 )
 
 
@@ -82,8 +87,49 @@ class TraceEvent:
     event: str
     node: int
     key: PacketKey
+    peer: int | None
     next_hop: int | None
+    reason: str
     detail: str
+    input_row: int
+
+
+@dataclass(frozen=True, order=True)
+class HopLegKey:
+    """Exact directed HOP identity carried by admission and feedback rows."""
+
+    packet: PacketKey
+    from_node: int
+    to_node: int
+    hop_sequence: int
+
+
+@dataclass(frozen=True)
+class HopEvidence:
+    """One source-ordered HOP admission or feedback observation."""
+
+    event_index: int
+    time_s: float
+    event: str
+    key: PacketKey
+    node: int
+    peer: int
+    next_hop: int | None
+    hop_sequence: int
+    success: str
+    reason: str
+    detail: dict[str, str]
+    input_row: int
+
+
+@dataclass(frozen=True)
+class QueueDelayEvidence:
+    """One directly preceding NWK queue-delay statistic observation."""
+
+    event_index: int
+    time_s: float
+    node: int
+    delay_s: float
     input_row: int
 
 
@@ -105,6 +151,8 @@ class LoadedTrace:
     """Validated trace rows needed by the path analysis."""
 
     packets: dict[PacketKey, list[TraceEvent]]
+    hop_evidence: dict[PacketKey, list[HopEvidence]]
+    queue_delay_by_forward: dict[int, QueueDelayEvidence]
     route_changes: dict[tuple[int, int], list[RouteChange]]
     row_count: int
     event_counts: Counter[str]
@@ -115,6 +163,7 @@ class PacketAnalysis:
     """One reconstructed packet lifecycle."""
 
     key: PacketKey
+    copy_index: int
     first_event_index: int
     valid: bool
     complete: bool
@@ -134,7 +183,51 @@ class PacketAnalysis:
     decomposition_error_s: float | None
     route_change_count: int
     route_context_mismatch_count: int
+    hop_lineage: list[HopLegKey]
     issues: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class QueueCopy:
+    """One observable NWK queue copy, identified without FIFO assumptions."""
+
+    event: TraceEvent
+    incoming_leg: HopLegKey | None
+    feedback_event_index: int | None
+
+
+@dataclass
+class HopLegObservation:
+    """One admitted HOP leg and its exact first-reception observations."""
+
+    identity: HopLegKey
+    forward: TraceEvent
+    admission: HopEvidence
+    receptions: list[tuple[HopEvidence, TraceEvent]]
+
+
+@dataclass(frozen=True)
+class ReconstructedLifecycle:
+    """One complete or end-of-trace branch of a repeated-DACK packet."""
+
+    events: list[TraceEvent]
+    hop_lineage: list[HopLegKey]
+
+
+@dataclass(frozen=True)
+class BranchReconstruction:
+    """Validated repeated-DACK branch expansion for one application packet."""
+
+    lifecycles: list[ReconstructedLifecycle]
+    repeated_dack_forks: int
+
+
+@dataclass(frozen=True)
+class AmbiguousBranchReconstruction:
+    """Marker for a complete but non-unique repeated-DACK queue matching."""
+
+
+AMBIGUOUS_BRANCH_RECONSTRUCTION = AmbiguousBranchReconstruction()
 
 
 def _paths_alias(first: Path, second: Path) -> bool:
@@ -177,6 +270,23 @@ def _parse_time(value: str | None, row: int) -> float:
     return parsed
 
 
+def _parse_nonnegative_float(
+    value: str | None, label: str, row: int
+) -> float:
+    text = (value or "").strip()
+    try:
+        parsed = float(text)
+    except ValueError as error:
+        raise PathAnalysisError(
+            f"row {row}: {label} is not numeric: {text!r}"
+        ) from error
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise PathAnalysisError(
+            f"row {row}: {label} must be finite and non-negative"
+        )
+    return parsed
+
+
 def _parse_route_selected(value: str | None, next_hop: int | None, row: int) -> bool:
     text = (value or "").strip().lower()
     if text in {"1", "true", "yes", "selected", "available"}:
@@ -188,6 +298,47 @@ def _parse_route_selected(value: str | None, next_hop: int | None, row: int) -> 
     raise PathAnalysisError(f"row {row}: invalid route_change success value {text!r}")
 
 
+def _detail_fields(text: str, row: int) -> dict[str, str]:
+    """Parse one fail-closed semicolon-delimited trace detail field."""
+
+    fields: dict[str, str] = {}
+    for token in text.strip().split(";"):
+        if not token or "=" not in token:
+            raise PathAnalysisError(
+                f"row {row}: detail must contain semicolon-separated key=value pairs"
+            )
+        key, value = (part.strip() for part in token.split("=", 1))
+        if not key or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
+            raise PathAnalysisError(f"row {row}: invalid detail key {key!r}")
+        if key in fields:
+            raise PathAnalysisError(f"row {row}: duplicate detail key {key!r}")
+        if not value:
+            raise PathAnalysisError(
+                f"row {row}: detail value for {key!r} is empty"
+            )
+        fields[key] = value
+    return fields
+
+
+def _optional_tagged_packet_key(
+    row: dict[str, str], input_row: int
+) -> PacketKey | None:
+    """Return a packet key only when a HOP evidence row carries all tag fields."""
+
+    values = [(row.get(name) or "").strip() for name in ("src", "dst", "sequence")]
+    if not any(values):
+        return None
+    if not all(values):
+        raise PathAnalysisError(
+            f"row {input_row}: tagged HOP evidence requires src, dst, and sequence"
+        )
+    return PacketKey(
+        _parse_nonnegative_integer(values[0], "src", input_row),
+        _parse_nonnegative_integer(values[1], "dst", input_row),
+        _parse_nonnegative_integer(values[2], "sequence", input_row),
+    )
+
+
 def load_trace(path: Path) -> LoadedTrace:
     """Load a canonical trace and validate its global source order."""
 
@@ -197,10 +348,13 @@ def load_trace(path: Path) -> LoadedTrace:
         raise PathAnalysisError(str(error)) from error
 
     packets: dict[PacketKey, list[TraceEvent]] = defaultdict(list)
+    hop_evidence: dict[PacketKey, list[HopEvidence]] = defaultdict(list)
+    queue_delay_by_forward: dict[int, QueueDelayEvidence] = {}
     route_changes: dict[tuple[int, int], list[RouteChange]] = defaultdict(list)
     event_counts: Counter[str] = Counter()
     previous_index: int | None = None
     previous_time: float | None = None
+    preceding_queue_delay: QueueDelayEvidence | None = None
     row_count = 0
 
     with stream:
@@ -221,6 +375,8 @@ def load_trace(path: Path) -> LoadedTrace:
             )
 
         for input_row, row in enumerate(reader, start=2):
+            adjacent_queue_delay = preceding_queue_delay
+            preceding_queue_delay = None
             row_count += 1
             if None in row:
                 raise PathAnalysisError(f"row {input_row}: too many CSV fields")
@@ -251,7 +407,28 @@ def load_trace(path: Path) -> LoadedTrace:
             if not event:
                 raise PathAnalysisError(f"row {input_row}: event is empty")
             event_counts[event] += 1
-            if event not in PACKET_EVENTS and event != "route_change":
+            if (
+                event == "statistic_sample"
+                and (row.get("statistic") or "").strip()
+                == NWK_QUEUE_DELAY_STATISTIC
+            ):
+                preceding_queue_delay = QueueDelayEvidence(
+                    event_index=event_index,
+                    time_s=time_s,
+                    node=_parse_nonnegative_integer(
+                        row.get("node"), "node", input_row
+                    ),
+                    delay_s=_parse_nonnegative_float(
+                        row.get("value"), "queue-delay statistic value", input_row
+                    ),
+                    input_row=input_row,
+                )
+                continue
+            if (
+                event not in PACKET_EVENTS
+                and event not in HOP_EVIDENCE_EVENTS
+                and event != "route_change"
+            ):
                 continue
 
             if event == "route_change":
@@ -285,12 +462,61 @@ def load_trace(path: Path) -> LoadedTrace:
                 )
                 continue
 
+            if event in HOP_EVIDENCE_EVENTS:
+                key = _optional_tagged_packet_key(row, input_row)
+                if key is None:
+                    continue
+                for column in ("node", "peer", "detail", "reason"):
+                    if column not in row:
+                        raise PathAnalysisError(
+                            f"row {input_row}: tagged {event} requires {column} column"
+                        )
+                node = _parse_nonnegative_integer(row.get("node"), "node", input_row)
+                peer = _parse_nonnegative_integer(row.get("peer"), "peer", input_row)
+                detail = _detail_fields((row.get("detail") or "").strip(), input_row)
+                if "hop_sequence" not in detail:
+                    raise PathAnalysisError(
+                        f"row {input_row}: tagged {event} detail omits hop_sequence"
+                    )
+                hop_sequence = _parse_nonnegative_integer(
+                    detail["hop_sequence"], "hop_sequence", input_row
+                )
+                next_hop_text = (row.get("next_hop") or "").strip()
+                next_hop = (
+                    _parse_nonnegative_integer(next_hop_text, "next_hop", input_row)
+                    if next_hop_text
+                    else None
+                )
+                hop_evidence[key].append(
+                    HopEvidence(
+                        event_index=event_index,
+                        time_s=time_s,
+                        event=event,
+                        key=key,
+                        node=node,
+                        peer=peer,
+                        next_hop=next_hop,
+                        hop_sequence=hop_sequence,
+                        success=(row.get("success") or "").strip(),
+                        reason=(row.get("reason") or "").strip().lower(),
+                        detail=detail,
+                        input_row=input_row,
+                    )
+                )
+                continue
+
             source = _parse_nonnegative_integer(row.get("src"), "src", input_row)
             destination = _parse_nonnegative_integer(row.get("dst"), "dst", input_row)
             sequence = _parse_nonnegative_integer(
                 row.get("sequence"), "sequence", input_row
             )
             node = _parse_nonnegative_integer(row.get("node"), "node", input_row)
+            peer_text = (row.get("peer") or "").strip()
+            peer = (
+                _parse_nonnegative_integer(peer_text, "peer", input_row)
+                if peer_text
+                else None
+            )
             next_hop_text = (row.get("next_hop") or "").strip()
             next_hop = (
                 _parse_nonnegative_integer(next_hop_text, "next_hop", input_row)
@@ -301,6 +527,15 @@ def load_trace(path: Path) -> LoadedTrace:
                 raise PathAnalysisError(
                     f"row {input_row}: nwk_forward requires next_hop"
                 )
+            if (
+                event == "nwk_forward"
+                and adjacent_queue_delay is not None
+                and adjacent_queue_delay.input_row + 1 == input_row
+                and adjacent_queue_delay.event_index + 1 == event_index
+                and adjacent_queue_delay.time_s == time_s
+                and adjacent_queue_delay.node == node
+            ):
+                queue_delay_by_forward[event_index] = adjacent_queue_delay
             key = PacketKey(source, destination, sequence)
             packets[key].append(
                 TraceEvent(
@@ -309,7 +544,9 @@ def load_trace(path: Path) -> LoadedTrace:
                     event=event,
                     node=node,
                     key=key,
+                    peer=peer,
                     next_hop=next_hop,
+                    reason=(row.get("reason") or "").strip().lower(),
                     detail=(row.get("detail") or "").strip(),
                     input_row=input_row,
                 )
@@ -319,7 +556,14 @@ def load_trace(path: Path) -> LoadedTrace:
         raise PathAnalysisError(f"{path}: trace has no data rows")
     if not packets:
         raise PathAnalysisError(f"{path}: trace has no packet lifecycle events")
-    return LoadedTrace(dict(packets), dict(route_changes), row_count, event_counts)
+    return LoadedTrace(
+        dict(packets),
+        dict(hop_evidence),
+        queue_delay_by_forward,
+        dict(route_changes),
+        row_count,
+        event_counts,
+    )
 
 
 def _issue(
@@ -374,11 +618,437 @@ def _route_state_before(
     return changes[position] if position >= 0 else None
 
 
+def _hop_detail_bool(evidence: HopEvidence, name: str) -> bool:
+    value = evidence.detail.get(name)
+    if value not in {"0", "1"}:
+        raise PathAnalysisError(
+            f"row {evidence.input_row}: {evidence.event} detail {name} must be 0 or 1"
+        )
+    return value == "1"
+
+
+def _hop_detail_integer(evidence: HopEvidence, name: str) -> int:
+    value = evidence.detail.get(name)
+    if value is None:
+        raise PathAnalysisError(
+            f"row {evidence.input_row}: {evidence.event} detail omits {name}"
+        )
+    return _parse_nonnegative_integer(value, name, evidence.input_row)
+
+
+def _source_exact_relay_feedback(evidence: HopEvidence) -> bool:
+    """Return whether a relay ACK/DACK row proves the source receive fork."""
+
+    if evidence.reason not in {"ack", "dack"}:
+        return False
+    if evidence.success not in {"", "1"}:
+        return False
+    if not _hop_detail_bool(evidence, "first_reception"):
+        return False
+    if not _hop_detail_bool(evidence, "ackable"):
+        return False
+    if not _hop_detail_bool(evidence, "nsdp_state_valid"):
+        return False
+    before = _hop_detail_integer(evidence, "nsdp_count_before")
+    after = _hop_detail_integer(evidence, "nsdp_count_after")
+    limit = _hop_detail_integer(evidence, "nsdp_limit")
+    if limit != 16 or after != before + 1:
+        return False
+    if evidence.reason == "dack":
+        return before >= limit
+    return before < limit
+
+
+def _queue_identity(queue: QueueCopy) -> tuple[int, int, int, int, int, int]:
+    """Stable exact-identity order for graph matching; intentionally not FIFO."""
+
+    if queue.incoming_leg is None:
+        return (-1, -1, -1, -1, -1, queue.event.event_index)
+    leg = queue.incoming_leg
+    return (
+        leg.from_node,
+        leg.to_node,
+        leg.hop_sequence,
+        queue.feedback_event_index or -1,
+        queue.event.peer if queue.event.peer is not None else -1,
+        queue.event.event_index,
+    )
+
+
+def _complete_queue_matching(
+    candidate_queues: dict[int, list[QueueCopy]],
+    forward_order: list[int],
+    *,
+    forbidden_edge: tuple[int, QueueCopy] | None = None,
+    reverse_candidates: bool = False,
+) -> dict[QueueCopy, int] | None:
+    """Return one forward-saturating queue match, if one exists."""
+
+    queue_to_forward: dict[QueueCopy, int] = {}
+
+    def augment(forward_index: int, seen: set[QueueCopy]) -> bool:
+        candidates = candidate_queues[forward_index]
+        ordered_candidates = reversed(candidates) if reverse_candidates else candidates
+        for queue in ordered_candidates:
+            if forbidden_edge == (forward_index, queue) or queue in seen:
+                continue
+            seen.add(queue)
+            prior = queue_to_forward.get(queue)
+            if prior is None or augment(prior, seen):
+                queue_to_forward[queue] = forward_index
+                return True
+        return False
+
+    if any(not augment(forward_index, set()) for forward_index in forward_order):
+        return None
+    if len(queue_to_forward) != len(forward_order):
+        return None
+    return queue_to_forward
+
+
+def _reconstruct_repeated_dack_branches(
+    key: PacketKey,
+    events: list[TraceEvent],
+    hop_evidence: list[HopEvidence],
+    queue_delay_by_forward: dict[int, QueueDelayEvidence],
+    *,
+    reverse_candidate_order: bool = False,
+) -> BranchReconstruction | AmbiguousBranchReconstruction | None:
+    """Split a repeated-DACK packet into exact directed-HOP suffix branches.
+
+    Every HOP edge is joined by
+    ``(src,dst,app-sequence,from,to,hop-sequence)``.  Queue copies that are
+    byte-identical after the legacy DACK retry are connected to later exact
+    HOP edges only when the directly preceding, node-consistent queue-delay
+    sample agrees with that enqueue-to-forward edge.  The complete bipartite
+    match must also be unique, independent of candidate order.  Reconstruction
+    succeeds only when every packet event is covered and each extra reception
+    has the source-exact DACK proof.
+    """
+
+    sends = [event for event in events if event.event == "app_send"]
+    enqueues = [event for event in events if event.event == "nwk_enqueue"]
+    forwards = [event for event in events if event.event == "nwk_forward"]
+    deliveries = [event for event in events if event.event == "nwk_delivery"]
+    local_enqueues = [
+        event
+        for event in enqueues
+        if event.node == key.source and event.reason == "local"
+    ]
+    if len(sends) != 1 or len(local_enqueues) != 1 or not forwards:
+        return None
+    if not _has_repeated_branch_shape(events):
+        return None
+
+    relevant_indexes = sorted(
+        [event.event_index for event in events]
+        + [evidence.event_index for evidence in hop_evidence]
+    )
+
+    def adjacent_index(index: int, direction: int) -> int | None:
+        position = bisect_left(relevant_indexes, index)
+        adjacent_position = position - 1 if direction < 0 else position + 1
+        if adjacent_position < 0 or adjacent_position >= len(relevant_indexes):
+            return None
+        return relevant_indexes[adjacent_position]
+
+    admissions = sorted(
+        (
+            evidence
+            for evidence in hop_evidence
+            if evidence.event == "hop_admission" and evidence.reason == "admitted"
+        ),
+        key=lambda evidence: evidence.event_index,
+    )
+    if len(admissions) != len(forwards):
+        return None
+
+    unused_forwards = {event.event_index: event for event in forwards}
+    legs_by_identity: dict[HopLegKey, HopLegObservation] = {}
+    for admission in admissions:
+        if admission.next_hop != admission.peer:
+            return None
+        candidates = [
+            forward
+            for forward in unused_forwards.values()
+            if forward.node == admission.node
+            and forward.next_hop == admission.peer
+            and forward.time_s == admission.time_s
+            and forward.event_index < admission.event_index
+        ]
+        if not candidates:
+            return None
+        # HOP admission is emitted synchronously after its NWK forward.  The
+        # nearest preceding matching row disambiguates multiple same-time
+        # forwards without relating feedback by arrival order.
+        forward = max(candidates, key=lambda event: event.event_index)
+        if adjacent_index(admission.event_index, -1) != forward.event_index:
+            return None
+        del unused_forwards[forward.event_index]
+        identity = HopLegKey(key, admission.node, admission.peer, admission.hop_sequence)
+        if identity in legs_by_identity:
+            return None
+        legs_by_identity[identity] = HopLegObservation(
+            identity=identity,
+            forward=forward,
+            admission=admission,
+            receptions=[],
+        )
+    if unused_forwards:
+        return None
+
+    unused_enqueues = {event.event_index: event for event in enqueues}
+    del unused_enqueues[local_enqueues[0].event_index]
+    unused_deliveries = {event.event_index: event for event in deliveries}
+    reception_parent: dict[int, tuple[HopLegKey, int]] = {}
+    first_reception_feedback = sorted(
+        (
+            evidence
+            for evidence in hop_evidence
+            if evidence.event == "hop_feedback"
+            and evidence.reason in {"ack", "dack"}
+            and evidence.success in {"", "1"}
+            and _hop_detail_bool(evidence, "first_reception")
+        ),
+        key=lambda evidence: evidence.event_index,
+    )
+    for feedback in first_reception_feedback:
+        identity = HopLegKey(
+            key,
+            feedback.peer,
+            feedback.node,
+            feedback.hop_sequence,
+        )
+        leg = legs_by_identity.get(identity)
+        if leg is None or feedback.event_index <= leg.admission.event_index:
+            return None
+        if feedback.node == key.destination:
+            candidates = [
+                delivery
+                for delivery in unused_deliveries.values()
+                if delivery.node == feedback.node
+                and delivery.peer == feedback.peer
+                and delivery.time_s == feedback.time_s
+                and delivery.event_index > feedback.event_index
+            ]
+            if len(candidates) != 1:
+                return None
+            reception = candidates[0]
+            if adjacent_index(feedback.event_index, 1) != reception.event_index:
+                return None
+            del unused_deliveries[reception.event_index]
+        else:
+            candidates = [
+                enqueue
+                for enqueue in unused_enqueues.values()
+                if enqueue.node == feedback.node
+                and enqueue.peer == feedback.peer
+                and enqueue.reason == "relay"
+                and enqueue.time_s == feedback.time_s
+                and enqueue.event_index < feedback.event_index
+            ]
+            if len(candidates) != 1:
+                return None
+            reception = candidates[0]
+            if adjacent_index(feedback.event_index, -1) != reception.event_index:
+                return None
+            del unused_enqueues[reception.event_index]
+        leg.receptions.append((feedback, reception))
+        reception_parent[reception.event_index] = (identity, feedback.event_index)
+
+    # Any unbound queue admission or delivery would make a graph look complete
+    # only by guessing a HOP identity.  Keep that case as the original strict
+    # failure instead.
+    if unused_enqueues or unused_deliveries:
+        return None
+
+    repeated_dack_forks = 0
+    for leg in legs_by_identity.values():
+        leg.receptions.sort(key=lambda item: item[0].event_index)
+        if len(leg.receptions) <= 1:
+            continue
+        feedbacks = [item[0] for item in leg.receptions]
+        if not _source_exact_relay_feedback(feedbacks[0]):
+            return None
+        dack_open = feedbacks[0].reason == "dack"
+        for feedback in feedbacks[1:]:
+            if not dack_open or not _source_exact_relay_feedback(feedback):
+                return None
+            repeated_dack_forks += 1
+            dack_open = feedback.reason == "dack"
+    if repeated_dack_forks == 0:
+        return None
+
+    queue_by_event_index: dict[int, QueueCopy] = {}
+    for enqueue in enqueues:
+        parent = reception_parent.get(enqueue.event_index)
+        queue = QueueCopy(
+            event=enqueue,
+            incoming_leg=parent[0] if parent is not None else None,
+            feedback_event_index=parent[1] if parent is not None else None,
+        )
+        if (
+            queue.incoming_leg is None
+            and enqueue.event_index != local_enqueues[0].event_index
+        ):
+            return None
+        queue_by_event_index[enqueue.event_index] = queue
+
+    legs_by_forward = {
+        leg.forward.event_index: leg for leg in legs_by_identity.values()
+    }
+    candidate_queues: dict[int, list[QueueCopy]] = {}
+    for forward_index, leg in legs_by_forward.items():
+        queue_delay = queue_delay_by_forward.get(forward_index)
+        if queue_delay is None:
+            return None
+        candidates = []
+        for queue in queue_by_event_index.values():
+            if queue.event.node != leg.forward.node:
+                continue
+            if queue.event.event_index >= leg.forward.event_index:
+                continue
+            if queue.event.reason != leg.forward.reason:
+                continue
+            if (
+                queue.event.peer is not None
+                and leg.forward.peer is not None
+                and queue.event.peer != leg.forward.peer
+            ):
+                continue
+            residence_s = leg.forward.time_s - queue.event.time_s
+            if not math.isclose(
+                residence_s,
+                queue_delay.delay_s,
+                rel_tol=0.0,
+                abs_tol=QUEUE_DELAY_MATCH_ABS_TOLERANCE_S,
+            ):
+                continue
+            candidates.append(queue)
+        candidate_queues[forward_index] = sorted(candidates, key=_queue_identity)
+        if not candidates:
+            return None
+
+    forward_order = sorted(
+        legs_by_forward,
+        key=lambda index: (
+            legs_by_forward[index].identity.from_node,
+            legs_by_forward[index].identity.to_node,
+            legs_by_forward[index].identity.hop_sequence,
+            index,
+        ),
+    )
+    # First saturate every forward with a distinct queue copy.  Then remove
+    # each selected edge in turn and rematch.  Any successful rematch proves
+    # that residence attribution is non-unique, so strict reconstruction must
+    # fail closed rather than bless a candidate-order-dependent answer.
+    queue_to_forward = _complete_queue_matching(
+        candidate_queues,
+        forward_order,
+        reverse_candidates=reverse_candidate_order,
+    )
+    if queue_to_forward is None:
+        return None
+    for queue, forward_index in queue_to_forward.items():
+        alternate = _complete_queue_matching(
+            candidate_queues,
+            forward_order,
+            forbidden_edge=(forward_index, queue),
+            reverse_candidates=reverse_candidate_order,
+        )
+        if alternate is not None:
+            return AMBIGUOUS_BRANCH_RECONSTRUCTION
+
+    outgoing_by_queue = {
+        queue.event.event_index: legs_by_forward[forward_index]
+        for queue, forward_index in queue_to_forward.items()
+    }
+    root = queue_by_event_index[local_enqueues[0].event_index]
+    visited_queues: set[int] = set()
+    visited_forwards: set[int] = set()
+
+    def walk(
+        queue: QueueCopy,
+        prefix: list[TraceEvent],
+        lineage: list[HopLegKey],
+    ) -> list[ReconstructedLifecycle]:
+        if queue.event.event_index in visited_queues:
+            raise PathAnalysisError(
+                "repeated-DACK graph reuses one NWK queue copy"
+            )
+        visited_queues.add(queue.event.event_index)
+        branch_events = prefix + [queue.event]
+        leg = outgoing_by_queue.get(queue.event.event_index)
+        if leg is None:
+            return [ReconstructedLifecycle(branch_events, list(lineage))]
+        if leg.forward.event_index in visited_forwards:
+            raise PathAnalysisError("repeated-DACK graph reuses one HOP forward")
+        visited_forwards.add(leg.forward.event_index)
+        branch_events.append(leg.forward)
+        branch_lineage = lineage + [leg.identity]
+        if not leg.receptions:
+            return [ReconstructedLifecycle(branch_events, branch_lineage)]
+        results: list[ReconstructedLifecycle] = []
+        for _, reception in leg.receptions:
+            if reception.event == "nwk_delivery":
+                results.append(
+                    ReconstructedLifecycle(branch_events + [reception], branch_lineage)
+                )
+            else:
+                results.extend(
+                    walk(
+                        queue_by_event_index[reception.event_index],
+                        list(branch_events),
+                        list(branch_lineage),
+                    )
+                )
+        return results
+
+    lifecycles = walk(root, [sends[0]], [])
+    if visited_queues != set(queue_by_event_index):
+        return None
+    if visited_forwards != set(legs_by_forward):
+        return None
+    covered_events = {
+        event.event_index
+        for lifecycle in lifecycles
+        for event in lifecycle.events
+    }
+    if covered_events != {event.event_index for event in events}:
+        return None
+    lifecycles.sort(
+        key=lambda lifecycle: (
+            lifecycle.events[-1].event_index,
+            tuple(
+                (leg.from_node, leg.to_node, leg.hop_sequence)
+                for leg in lifecycle.hop_lineage
+            ),
+        )
+    )
+    return BranchReconstruction(lifecycles, repeated_dack_forks)
+
+
+def _has_repeated_branch_shape(events: list[TraceEvent]) -> bool:
+    """Return whether one packet key needs source-proved branch splitting."""
+
+    delivery_count = sum(event.event == "nwk_delivery" for event in events)
+    relay_arrivals = Counter(
+        (event.node, event.peer)
+        for event in events
+        if event.event == "nwk_enqueue" and event.reason == "relay"
+    )
+    return delivery_count > 1 or any(
+        count > 1 for count in relay_arrivals.values()
+    )
+
+
 def analyze_packet(
     key: PacketKey,
     events: list[TraceEvent],
     route_changes: dict[tuple[int, int], list[RouteChange]],
     tolerance_s: float,
+    copy_index: int = 0,
+    hop_lineage: list[HopLegKey] | None = None,
 ) -> PacketAnalysis:
     """Validate and reconstruct one exact packet lifecycle."""
 
@@ -760,6 +1430,7 @@ def analyze_packet(
     )
     return PacketAnalysis(
         key=key,
+        copy_index=copy_index,
         first_event_index=first_index,
         valid=not has_validation_error,
         complete=complete,
@@ -779,6 +1450,7 @@ def analyze_packet(
         decomposition_error_s=decomposition_error_s,
         route_change_count=route_change_count,
         route_context_mismatch_count=route_context_mismatch_count,
+        hop_lineage=list(hop_lineage or []),
         issues=issues,
     )
 
@@ -849,11 +1521,13 @@ def _cohort_summary(packets: list[PacketAnalysis]) -> dict[str, object]:
 
 
 def _path_distribution(
-    packets: list[PacketAnalysis], post_startup: set[PacketKey]
+    packets: list[PacketAnalysis], post_startup: set[tuple[PacketKey, int]]
 ) -> list[dict[str, object]]:
     counts: Counter[tuple[int, ...]] = Counter(tuple(packet.path) for packet in packets)
     post_counts: Counter[tuple[int, ...]] = Counter(
-        tuple(packet.path) for packet in packets if packet.key in post_startup
+        tuple(packet.path)
+        for packet in packets
+        if (packet.key, packet.copy_index) in post_startup
     )
     return [
         {
@@ -867,14 +1541,18 @@ def _path_distribution(
 
 
 def _flow_distribution(
-    packets: list[PacketAnalysis], post_startup: set[PacketKey]
+    packets: list[PacketAnalysis], post_startup: set[tuple[PacketKey, int]]
 ) -> list[dict[str, object]]:
     flows: dict[tuple[int, int], list[PacketAnalysis]] = defaultdict(list)
     for packet in packets:
         flows[(packet.key.source, packet.key.destination)].append(packet)
     rows: list[dict[str, object]] = []
     for (source, destination), flow_packets in sorted(flows.items()):
-        flow_post = [packet for packet in flow_packets if packet.key in post_startup]
+        flow_post = [
+            packet
+            for packet in flow_packets
+            if (packet.key, packet.copy_index) in post_startup
+        ]
         rows.append(
             {
                 "src": source,
@@ -968,11 +1646,64 @@ def analyze_trace(
             )
 
     loaded = load_trace(trace_path)
-    packets = [
-        analyze_packet(key, events, loaded.route_changes, tolerance_s)
+    repeated_branch_keys_without_admissions = sorted(
+        key
         for key, events in loaded.packets.items()
-    ]
-    packets.sort(key=lambda packet: (packet.first_event_index, packet.key))
+        if _has_repeated_branch_shape(events)
+        and not any(
+            evidence.event == "hop_admission"
+            for evidence in loaded.hop_evidence.get(key, [])
+        )
+    )
+    if repeated_branch_keys_without_admissions:
+        examples = ", ".join(
+            f"({key.source},{key.destination},{key.sequence})"
+            for key in repeated_branch_keys_without_admissions[:3]
+        )
+        count = len(repeated_branch_keys_without_admissions)
+        suffix = "" if count <= 3 else ", ..."
+        raise PathAnalysisError(
+            f"{trace_path}: {count} packet key(s) contain repeated "
+            "relay/delivery observations but have no tagged hop_admission "
+            "rows; source-proved repeated-DACK branch "
+            "reconstruction requires --admissionTrace=1 "
+            f"(examples: {examples}{suffix}); refusing to infer HOP identity"
+        )
+    packets: list[PacketAnalysis] = []
+    reconstructed_branch_packet_keys = 0
+    ambiguous_repeated_dack_branch_packet_keys = 0
+    source_exact_dack_retry_forks = 0
+    for key, events in loaded.packets.items():
+        reconstruction = _reconstruct_repeated_dack_branches(
+            key,
+            events,
+            loaded.hop_evidence.get(key, []),
+            loaded.queue_delay_by_forward,
+        )
+        if reconstruction is AMBIGUOUS_BRANCH_RECONSTRUCTION:
+            ambiguous_repeated_dack_branch_packet_keys += 1
+            reconstruction = None
+        if reconstruction is None:
+            packets.append(
+                analyze_packet(key, events, loaded.route_changes, tolerance_s)
+            )
+            continue
+        reconstructed_branch_packet_keys += 1
+        source_exact_dack_retry_forks += reconstruction.repeated_dack_forks
+        for copy_index, lifecycle in enumerate(reconstruction.lifecycles):
+            packets.append(
+                analyze_packet(
+                    key,
+                    lifecycle.events,
+                    loaded.route_changes,
+                    tolerance_s,
+                    copy_index=copy_index,
+                    hop_lineage=lifecycle.hop_lineage,
+                )
+            )
+    packets.sort(
+        key=lambda packet: (packet.first_event_index, packet.key, packet.copy_index)
+    )
     valid_complete = [
         packet
         for packet in packets
@@ -1014,7 +1745,9 @@ def analyze_trace(
                     excluded_after_stop += 1
             else:
                 excluded_after_stop += 1
-    post_keys = {packet.key for packet in post_startup_packets}
+    post_keys = {
+        (packet.key, packet.copy_index) for packet in post_startup_packets
+    }
     issue_counts: Counter[str] = Counter(
         str(issue["code"]) for packet in packets for issue in packet.issues
     )
@@ -1044,6 +1777,26 @@ def analyze_trace(
         },
         "configuration": {
             "packet_key": ["src", "dst", "sequence"],
+            "directed_hop_identity": [
+                "src",
+                "dst",
+                "sequence",
+                "from",
+                "to",
+                "hop_sequence",
+            ],
+            "repeated_dack_branch_matching": (
+                "exact directed-HOP identity plus queue-delay-constrained unique "
+                "bipartite queue-copy matching; never FIFO"
+            ),
+            "queue_delay_statistic": NWK_QUEUE_DELAY_STATISTIC,
+            "queue_delay_evidence_adjacency": (
+                "immediately preceding CSV row, consecutive event index, same node "
+                "and timestamp"
+            ),
+            "queue_delay_match_abs_tolerance_s": (
+                QUEUE_DELAY_MATCH_ABS_TOLERANCE_S
+            ),
             "startup_time_s": startup_time_s,
             "post_startup_selection": "delivery_time_s > startup_time_s",
             "end_to_end_bucket_width_s": bucket_width_s,
@@ -1054,7 +1807,13 @@ def analyze_trace(
             "hop_resend_lifetime_is_additive": False,
         },
         "counts": {
-            "packet_keys": len(packets),
+            "packet_keys": len(loaded.packets),
+            "packet_lifecycles": len(packets),
+            "reconstructed_branch_packet_keys": reconstructed_branch_packet_keys,
+            "ambiguous_repeated_dack_branch_packet_keys": (
+                ambiguous_repeated_dack_branch_packet_keys
+            ),
+            "source_exact_dack_retry_forks": source_exact_dack_retry_forks,
             "delivered_packets": sum(packet.delivered for packet in packets),
             "valid_complete_delivered_packets": len(valid_complete),
             "post_startup_valid_complete_delivered_packets": len(
@@ -1083,6 +1842,7 @@ def analyze_trace(
                 "src": packet.key.source,
                 "dst": packet.key.destination,
                 "sequence": packet.key.sequence,
+                "copy_index": packet.copy_index,
                 "issues": packet.issues,
             }
             for packet in invalid_packets[:20]
@@ -1092,6 +1852,7 @@ def analyze_trace(
                 "src": packet.key.source,
                 "dst": packet.key.destination,
                 "sequence": packet.key.sequence,
+                "copy_index": packet.copy_index,
                 "delivered": packet.delivered,
                 "valid": packet.valid,
                 "issues": packet.issues,
@@ -1143,6 +1904,7 @@ def packet_rows(
                 "src": str(packet.key.source),
                 "dst": str(packet.key.destination),
                 "sequence": str(packet.key.sequence),
+                "copy_index": str(packet.copy_index),
                 "status": _packet_status(packet),
                 "valid": "1" if packet.valid else "0",
                 "complete": "1" if packet.complete else "0",
@@ -1180,6 +1942,21 @@ def packet_rows(
                 "issue_count": str(len(packet.issues)),
                 "issues_json": json.dumps(
                     packet.issues, separators=(",", ":"), sort_keys=True
+                ),
+                "hop_lineage_json": json.dumps(
+                    [
+                        {
+                            "src": leg.packet.source,
+                            "dst": leg.packet.destination,
+                            "sequence": leg.packet.sequence,
+                            "from": leg.from_node,
+                            "to": leg.to_node,
+                            "hop_sequence": leg.hop_sequence,
+                        }
+                        for leg in packet.hop_lineage
+                    ],
+                    separators=(",", ":"),
+                    sort_keys=True,
                 ),
             }
         )

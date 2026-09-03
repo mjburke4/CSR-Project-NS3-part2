@@ -61,7 +61,9 @@ struct CsrPhyProfile
   double rxAntennaGainDb {0.0}; ///< Receiver antenna gain.
   double txHeightMeters {1.0}; ///< Transmitter altitude/height.
   double rxHeightMeters {1.0}; ///< Receiver altitude/height.
-  double syncSnrThresholdDb {-11.0}; ///< Deterministic SYNC threshold mean.
+  double syncSnrThresholdDb {-11.0}; ///< Mean SYNC threshold in dB.
+  double syncSnrThresholdVarianceDb2 {0.25}; ///< SYNC threshold variance in dB squared.
+  bool stochasticSyncThreshold {true}; ///< Draw one threshold per SYNC attempt.
   double eccThreshold {0.1}; ///< Correctable fraction of non-preamble bits.
   CsrClosureMode closureMode {
     CsrClosureMode::EARTH_LINE_OF_SIGHT
@@ -1026,6 +1028,10 @@ private:
                      candidate.rxBwHz <= 0.0 ||
                      candidate.txHeightMeters < 0.0 ||
                      candidate.rxHeightMeters < 0.0 ||
+                     !std::isfinite (candidate.syncSnrThresholdDb) ||
+                     !std::isfinite (
+                       candidate.syncSnrThresholdVarianceDb2) ||
+                     candidate.syncSnrThresholdVarianceDb2 < 0.0 ||
                      !std::isfinite (candidate.eccThreshold) ||
                      candidate.eccThreshold < 0.0 ||
                      candidate.eccThreshold > 1.0 ||

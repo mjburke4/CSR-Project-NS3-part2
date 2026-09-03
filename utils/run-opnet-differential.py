@@ -156,6 +156,8 @@ def main() -> None:
 
     compare_command = [
         sys.executable,
+        "-B",
+        "-I",
         str(comparator),
         str(arguments.opnet_trace),
         str(ns3_trace),

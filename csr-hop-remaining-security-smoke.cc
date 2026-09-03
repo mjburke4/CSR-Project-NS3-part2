@@ -37,6 +37,11 @@ std::vector<Time> g_ackWakeTimes;
 Ptr<Packet> g_capturedDack;
 uint32_t g_capturedDackPacketBits = 0;
 uint32_t g_liveDackRelayDeliveries = 0;
+Ptr<CsrHopLayer> g_profileDataReceiver;
+Ptr<Packet> g_capturedProfileData;
+uint32_t g_capturedProfileDataPacketBits = 0;
+uint32_t g_profileDataDeliveries = 0;
+std::vector<uint8_t> g_profileDataPayload;
 
 void
 Require (bool condition, const char *message)
@@ -344,6 +349,24 @@ BuildProtectedFrame (const std::vector<uint8_t> &record,
   return frame;
 }
 
+Ptr<Packet>
+BuildBareDataFrame (const std::vector<uint8_t> &payload,
+                    uint16_t hopSequence,
+                    bool ackable)
+{
+  Ptr<Packet> frame = Create<Packet> (payload.data (), payload.size ());
+  CsrHeader header (SOURCE,
+                    DESTINATION,
+                    hopSequence,
+                    7,
+                    ackable,
+                    false);
+  header.SetType (CSR_PKT_DATA);
+  header.SetDestType (CSR_DEST_UNICAST);
+  frame->AddHeader (header);
+  return frame;
+}
+
 void
 NoteManualPairwise (Ptr<Packet> payload, CsrNodeId source)
 {
@@ -541,6 +564,221 @@ CheckAuthenticationBeforeAckAndDelivery ()
 }
 
 void
+CheckCrossProfileDataRejection ()
+{
+  const std::vector<uint8_t> payload {0x31, 0x32, 0x33, 0x34};
+  constexpr uint16_t hopSequence = 93;
+  CsrHopSecurityState sender;
+  ConfigureState (sender, SOURCE, DESTINATION);
+  CsrProtectedPairwiseMessage protectedData =
+    sender.ProtectPairwiseMessage (DESTINATION,
+                                   CsrPairwiseSecurityMode::Pairwise16,
+                                   3,
+                                   payload);
+
+  {
+    Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (DESTINATION);
+    Ptr<CsrHopLayer> receiver = CreateObject<CsrHopLayer> ();
+    receiver->SetMac (&device->GetMac ());
+    ConfigureHop (receiver, DESTINATION, SOURCE);
+    receiver->SetRxFromHopCallback (MakeCallback (&NoteManualPairwise));
+    g_manualPairwiseDeliveries = 0;
+    g_manualLastPayload.clear ();
+
+    receiver->ReceiveFromMac (
+      BuildBareDataFrame (payload, hopSequence, true),
+      60.0,
+      40.0);
+    Require (g_manualPairwiseDeliveries == 0 &&
+               device->GetMac ().GetAckQueuedFrameCount () == 0,
+             "production profile accepted bare ordinary DATA");
+
+    receiver->ReceiveFromMac (
+      BuildProtectedFrame (protectedData.record,
+                           CSR_PKT_DATA,
+                           hopSequence,
+                           true,
+                           false),
+      60.0,
+      40.0);
+    Require (g_manualPairwiseDeliveries == 1 &&
+               g_manualLastPayload == payload &&
+               device->GetMac ().GetAckQueuedFrameCount () == 1,
+             "bare mismatch poisoned the matching production DATA sequence");
+    Simulator::Destroy ();
+  }
+
+  {
+    Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (DESTINATION);
+    Ptr<CsrHopLayer> receiver = CreateObject<CsrHopLayer> ();
+    receiver->SetMac (&device->GetMac ());
+    ConfigureHop (receiver, DESTINATION, SOURCE);
+    receiver->SetHopWireProfile (CsrHopWireProfile::HIST_ADB97C54_BARE);
+    receiver->SetRxFromHopCallback (MakeCallback (&NoteManualPairwise));
+    g_manualPairwiseDeliveries = 0;
+    g_manualLastPayload.clear ();
+
+    receiver->ReceiveFromMac (
+      BuildProtectedFrame (protectedData.record,
+                           CSR_PKT_DATA,
+                           hopSequence,
+                           true,
+                           false),
+      60.0,
+      40.0);
+    Require (g_manualPairwiseDeliveries == 0 &&
+               device->GetMac ().GetAckQueuedFrameCount () == 0,
+             "historical profile accepted Pairwise16 ordinary DATA");
+
+    receiver->ReceiveFromMac (
+      BuildBareDataFrame (payload, hopSequence, true),
+      60.0,
+      40.0);
+    Require (g_manualPairwiseDeliveries == 1 &&
+               g_manualLastPayload == payload &&
+               device->GetMac ().GetAckQueuedFrameCount () == 1,
+             "protected mismatch poisoned the matching historical DATA sequence");
+    Simulator::Destroy ();
+  }
+}
+
+enum class InvalidOrdinaryDataMetadata : uint8_t
+{
+  IsAck,
+  IsDack,
+  AckWindow,
+  DestinationSequences,
+  GroupSecurity,
+  BroadcastDestType,
+  MulticastDestType,
+  BroadcastSource,
+  BroadcastDestination
+};
+
+void
+ApplyInvalidOrdinaryDataMetadata (CsrHeader &header,
+                                  InvalidOrdinaryDataMetadata invalid,
+                                  uint16_t hopSequence)
+{
+  switch (invalid)
+    {
+    case InvalidOrdinaryDataMetadata::IsAck:
+      header.SetIsAck (true);
+      break;
+    case InvalidOrdinaryDataMetadata::IsDack:
+      header.SetIsDack (true);
+      break;
+    case InvalidOrdinaryDataMetadata::AckWindow:
+      header.SetHasAckWindow (true);
+      break;
+    case InvalidOrdinaryDataMetadata::DestinationSequences:
+      header.SetDestinationSequences ({{DESTINATION, hopSequence}});
+      break;
+    case InvalidOrdinaryDataMetadata::GroupSecurity:
+      header.SetHasGroupSecurity (true);
+      break;
+    case InvalidOrdinaryDataMetadata::BroadcastDestType:
+      header.SetDestType (CSR_DEST_BROADCAST);
+      break;
+    case InvalidOrdinaryDataMetadata::MulticastDestType:
+      header.SetDestType (CSR_DEST_MULTICAST);
+      break;
+    case InvalidOrdinaryDataMetadata::BroadcastSource:
+      header.SetSrc (CSR_BROADCAST_ID);
+      break;
+    case InvalidOrdinaryDataMetadata::BroadcastDestination:
+      header.SetDst (CSR_BROADCAST_ID);
+      break;
+    }
+}
+
+void
+CheckMalformedOrdinaryDataEnvelopes (CsrHopWireProfile profile)
+{
+  constexpr std::array<InvalidOrdinaryDataMetadata, 9> invalidCases {
+    InvalidOrdinaryDataMetadata::IsAck,
+    InvalidOrdinaryDataMetadata::IsDack,
+    InvalidOrdinaryDataMetadata::AckWindow,
+    InvalidOrdinaryDataMetadata::DestinationSequences,
+    InvalidOrdinaryDataMetadata::GroupSecurity,
+    InvalidOrdinaryDataMetadata::BroadcastDestType,
+    InvalidOrdinaryDataMetadata::MulticastDestType,
+    InvalidOrdinaryDataMetadata::BroadcastSource,
+    InvalidOrdinaryDataMetadata::BroadcastDestination
+  };
+  const std::vector<uint8_t> payload {0x41, 0x42, 0x43, 0x44};
+  uint16_t hopSequence = 120;
+
+  for (InvalidOrdinaryDataMetadata invalid : invalidCases)
+    {
+      Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (DESTINATION);
+      Ptr<CsrHopLayer> receiver = CreateObject<CsrHopLayer> ();
+      receiver->SetMac (&device->GetMac ());
+      ConfigureHop (receiver, DESTINATION, SOURCE);
+      receiver->SetHopWireProfile (profile);
+      receiver->SetRxFromHopCallback (MakeCallback (&NoteManualPairwise));
+
+      Ptr<Packet> body;
+      if (profile == CsrHopWireProfile::HIST_ADB97C54_BARE)
+        {
+          body = Create<Packet> (payload.data (), payload.size ());
+        }
+      else
+        {
+          CsrHopSecurityState sender;
+          ConfigureState (sender, SOURCE, DESTINATION);
+          CsrProtectedPairwiseMessage protectedData =
+            sender.ProtectPairwiseMessage (
+              DESTINATION,
+              CsrPairwiseSecurityMode::Pairwise16,
+              3,
+              payload);
+          body = Create<Packet> (protectedData.record.data (),
+                                 protectedData.record.size ());
+        }
+
+      CsrHeader validHeader (SOURCE,
+                             DESTINATION,
+                             hopSequence,
+                             5,
+                             true,
+                             false);
+      validHeader.SetType (CSR_PKT_DATA);
+      validHeader.SetDestType (CSR_DEST_UNICAST);
+      if (profile == CsrHopWireProfile::PRODUCTION_PAIRWISE16)
+        {
+          validHeader.SetSecurityCount (SECURITY_COUNT);
+        }
+
+      CsrHeader malformedHeader = validHeader;
+      ApplyInvalidOrdinaryDataMetadata (malformedHeader,
+                                        invalid,
+                                        hopSequence);
+      Ptr<Packet> malformedFrame = body->Copy ();
+      malformedFrame->AddHeader (malformedHeader);
+
+      g_manualPairwiseDeliveries = 0;
+      g_manualLastPayload.clear ();
+      receiver->ReceiveFromMac (malformedFrame, 60.0, 40.0);
+      Require (g_manualPairwiseDeliveries == 0 &&
+                 device->GetMac ().GetAckQueuedFrameCount () == 0 &&
+                 !receiver->HasNeighbor (SOURCE),
+               "malformed ordinary DATA changed receive state");
+
+      Ptr<Packet> validFrame = body->Copy ();
+      validFrame->AddHeader (validHeader);
+      receiver->ReceiveFromMac (validFrame, 60.0, 40.0);
+      Require (g_manualPairwiseDeliveries == 1 &&
+                 g_manualLastPayload == payload &&
+                 device->GetMac ().GetAckQueuedFrameCount () == 1,
+               "malformed DATA poisoned the matching valid HOP sequence");
+
+      Simulator::Destroy ();
+      hopSequence++;
+    }
+}
+
+void
 NoteAckWake ()
 {
   g_ackWakeTimes.push_back (Simulator::Now ());
@@ -552,6 +790,10 @@ CheckAckDackSecurityPolicy ()
   Ptr<CsrNetDevice> localDevice =
     CreateObject<CsrNetDevice> (DESTINATION);
   Ptr<CsrHopLayer> localHop = CreateObject<CsrHopLayer> ();
+  Require (
+    localHop->GetHopWireProfile () ==
+      CsrHopWireProfile::PRODUCTION_PAIRWISE16,
+    "production Pairwise16 HOP wire profile is not the default");
   localHop->SetMac (&localDevice->GetMac ());
   ConfigureHop (localHop, DESTINATION, SOURCE);
   localHop->SetNwkQueueWakeCallback (MakeCallback (&NoteAckWake));
@@ -645,6 +887,62 @@ CheckAckDackSecurityPolicy ()
   Simulator::Destroy ();
 }
 
+void
+CheckBareExactAckCompatibilityReception ()
+{
+  Ptr<CsrNetDevice> localDevice =
+    CreateObject<CsrNetDevice> (DESTINATION);
+  Ptr<CsrHopLayer> localHop = CreateObject<CsrHopLayer> ();
+  localHop->SetMac (&localDevice->GetMac ());
+  ConfigureHop (localHop, DESTINATION, SOURCE);
+  localHop->SetHopWireProfile (
+    CsrHopWireProfile::HIST_ADB97C54_BARE);
+  Require (
+    localHop->GetHopWireProfile () ==
+      CsrHopWireProfile::HIST_ADB97C54_BARE,
+    "historical bare HOP wire profile did not round-trip configuration");
+
+  g_ackWakeTimes.clear ();
+  localHop->SetNwkQueueWakeCallback (MakeCallback (&NoteAckWake));
+  localHop->SendData (SOURCE, 5, Create<Packet> (4), true);
+  Require (localHop->GetPendingDataCount () == 1 &&
+             localHop->GetResendQueueSize () == 1,
+           "bare exact-ACK compatibility test did not create one pending DATA record");
+
+  CsrHeader ackHeader (SOURCE,
+                       DESTINATION,
+                       1,
+                       7,
+                       false,
+                       true);
+  ackHeader.SetType (CSR_PKT_ACK);
+  ackHeader.SetDestType (CSR_DEST_UNICAST);
+  ackHeader.SetLinkControl (8, 0.0, 0.0);
+  Ptr<Packet> bareAck = Create<Packet> ();
+  bareAck->AddHeader (ackHeader);
+  // The br_Ack base fields plus br_Mac total 25 bytes. The archived adb97
+  // executable's five send_ack() callers all pass null PacketRxInfo and thus
+  // set both cumulative registers; this synthetic exact frame verifies profile
+  // receive compatibility, not an archived 25-byte transmit path.
+  Require (CsrAnnotateOpnetEnvelope (bareAck) &&
+             CsrGetOpnetWireSize (bareAck) == 25,
+           "bare exact-ACK compatibility envelope is not 25 bytes");
+
+  localHop->ReceiveFromMac (bareAck, 60.0, 40.0);
+  Require (localHop->GetPendingDataCount () == 0 &&
+             localHop->GetResendQueueSize () == 0 &&
+             localDevice->GetMac ().GetDataQueuedFrameCount () == 0 &&
+             g_ackWakeTimes.empty (),
+           "bare exact-ACK compatibility frame did not release custody before delayed wake");
+
+  const Time tic = CsrOpnetTic ();
+  Simulator::Stop (tic + NanoSeconds (1));
+  Simulator::Run ();
+  Require (g_ackWakeTimes.size () == 1 && g_ackWakeTimes[0] == tic,
+           "bare exact-ACK compatibility frame lost the one-TIC generic wake ordering");
+  Simulator::Destroy ();
+}
+
 bool
 AlwaysDack (CsrNodeId, CsrNodeId)
 {
@@ -681,7 +979,8 @@ CaptureDack (Ptr<Packet> frame, double, double)
 }
 
 void
-CheckLiveOutboundDackWrapper ()
+CheckLiveOutboundDackWrapper (CsrHopWireProfile profile,
+                              uint32_t expectedWireBytes)
 {
   Ptr<CsrNetDevice> dackDevice =
     CreateObject<CsrNetDevice> (DESTINATION);
@@ -709,6 +1008,7 @@ CheckLiveOutboundDackWrapper ()
   Ptr<CsrHopLayer> dackHop = CreateObject<CsrHopLayer> ();
   dackHop->SetMac (&dackDevice->GetMac ());
   ConfigureHop (dackHop, DESTINATION, SOURCE);
+  dackHop->SetHopWireProfile (profile);
   dackHop->SetShouldDackCallback (MakeCallback (&AlwaysDack));
   dackHop->SetRelayRouteAvailableCallback (
     MakeCallback (&DackRelayRouteAvailable));
@@ -719,16 +1019,25 @@ CheckLiveOutboundDackWrapper ()
   Ptr<Packet> networkPayload = Create<Packet> (3);
   CsrNetHeader networkHeader (SOURCE, RELAY_DESTINATION, 5);
   networkPayload->AddHeader (networkHeader);
-  std::vector<uint8_t> plaintext = CopyBytes (networkPayload);
-  CsrProtectedPairwiseMessage securedData =
-    dataSender.ProtectPairwiseMessage (
-      DESTINATION,
-      CsrPairwiseSecurityMode::Pairwise16,
-      3,
-      plaintext);
-
-  Ptr<Packet> dataFrame = Create<Packet> (securedData.record.data (),
-                                          securedData.record.size ());
+  Ptr<Packet> dataFrame;
+  const bool historicalBare =
+    profile == CsrHopWireProfile::HIST_ADB97C54_BARE;
+  if (historicalBare)
+    {
+      dataFrame = networkPayload->Copy ();
+    }
+  else
+    {
+      std::vector<uint8_t> plaintext = CopyBytes (networkPayload);
+      CsrProtectedPairwiseMessage securedData =
+        dataSender.ProtectPairwiseMessage (
+          DESTINATION,
+          CsrPairwiseSecurityMode::Pairwise16,
+          3,
+          plaintext);
+      dataFrame = Create<Packet> (securedData.record.data (),
+                                  securedData.record.size ());
+    }
   CsrHeader dataHeader (SOURCE,
                         DESTINATION,
                         77,
@@ -737,7 +1046,10 @@ CheckLiveOutboundDackWrapper ()
                         false);
   dataHeader.SetType (CSR_PKT_DATA);
   dataHeader.SetDestType (CSR_DEST_UNICAST);
-  dataHeader.SetSecurityCount (SECURITY_COUNT);
+  if (!historicalBare)
+    {
+      dataHeader.SetSecurityCount (SECURITY_COUNT);
+    }
   dataHeader.SetLinkControl (8, 0.0, 0.0);
   dataFrame->AddHeader (dataHeader);
 
@@ -753,21 +1065,35 @@ CheckLiveOutboundDackWrapper ()
   Simulator::Run ();
   Require (g_capturedDack != nullptr,
            "live DACK frame was not transmitted to the capture peer");
-  Require (CsrGetOpnetWireSize (g_capturedDack) == 46,
-           "Pairwise16 cumulative DACK did not model 41 + 5 bytes");
-  uint32_t shortPacketBits = 104 + 48 + 46 * 8 + 32;
-  uint32_t longPacketBits = 7888 + 48 + 46 * 8 + 32;
+  Require (CsrGetOpnetWireSize (g_capturedDack) == expectedWireBytes,
+           "live cumulative DACK used the wrong source-version envelope");
+  uint32_t shortPacketBits = 104 + 48 + expectedWireBytes * 8 + 32;
+  uint32_t longPacketBits = 7888 + 48 + expectedWireBytes * 8 + 32;
   Require (g_capturedDackPacketBits == shortPacketBits ||
              g_capturedDackPacketBits == longPacketBits,
-           "PHY did not charge the 46-byte DACK to packet bits");
+           "PHY did not charge the selected DACK envelope to packet bits");
 
   Ptr<Packet> securedRecord = g_capturedDack->Copy ();
   CsrHeader outer;
   securedRecord->RemoveHeader (outer);
   Require (outer.IsAck () && outer.IsDack () &&
-             outer.GetType () == CSR_PKT_ACK &&
-             outer.HasSecurityCount (),
+             outer.GetType () == CSR_PKT_ACK,
            "MAC-visible DACK metadata did not retain the common AckMsg type");
+
+  if (profile == CsrHopWireProfile::HIST_ADB97C54_BARE)
+    {
+      Require (!outer.HasSecurityCount () &&
+                 securedRecord->GetSize () == 0 &&
+                 outer.HasAckWindow () &&
+                 outer.GetAckBitmap () == 0 &&
+                 outer.GetDackBitmap () == 1,
+               "historical executable DACK was not a bare logical br_Ack");
+      Simulator::Destroy ();
+      return;
+    }
+
+  Require (outer.HasSecurityCount (),
+           "production DACK lost its Pairwise16 security count");
 
   std::vector<uint8_t> record = CopyBytes (securedRecord);
   CsrHopSecurityState verifier;
@@ -798,6 +1124,124 @@ CheckLiveOutboundDackWrapper ()
              !authenticated.HasLinkControl (),
            "Pairwise16 did not authenticate the complete logical DACK body");
 
+  Simulator::Destroy ();
+}
+
+void
+NoteProfileDataDelivery (Ptr<Packet> payload, CsrNodeId source)
+{
+  Require (source == SOURCE,
+           "profile DATA callback reported the wrong source");
+  g_profileDataPayload = CopyBytes (payload);
+  g_profileDataDeliveries++;
+}
+
+void
+CaptureAndDeliverProfileData (Ptr<Packet> frame,
+                              double pathlossDb,
+                              double snrDb)
+{
+  CsrHeader header;
+  if (g_capturedProfileData == nullptr &&
+      frame->PeekHeader (header) &&
+      header.GetType () == CSR_PKT_DATA)
+    {
+      g_capturedProfileData = frame->Copy ();
+    }
+  Require (g_profileDataReceiver != nullptr,
+           "profile DATA receiver was not configured");
+  g_profileDataReceiver->ReceiveFromMac (frame, pathlossDb, snrDb);
+}
+
+void
+CheckLiveOrdinaryDataWireProfile (CsrHopWireProfile profile,
+                                  uint32_t expectedWireBytes,
+                                  bool expectSecurity)
+{
+  Ptr<CsrNetDevice> senderDevice = CreateObject<CsrNetDevice> (SOURCE);
+  Ptr<CsrNetDevice> receiverDevice =
+    CreateObject<CsrNetDevice> (DESTINATION);
+  senderDevice->AddPeer (receiverDevice);
+  receiverDevice->AddPeer (senderDevice);
+
+  CsrPerModelFn noErrors = [] (int, double, uint32_t) { return 0.0; };
+  senderDevice->GetPhy ().SetPerModel (noErrors);
+  receiverDevice->GetPhy ().SetPerModel (
+    [] (int, double, uint32_t packetBits) {
+      g_capturedProfileDataPacketBits = packetBits;
+      return 0.0;
+    });
+  senderDevice->GetPhy ().SetLinkDistanceMeters (
+    SOURCE,
+    DESTINATION,
+    1.0);
+  receiverDevice->GetPhy ().SetLinkDistanceMeters (
+    SOURCE,
+    DESTINATION,
+    1.0);
+
+  Ptr<CsrHopLayer> sender = CreateObject<CsrHopLayer> ();
+  Ptr<CsrHopLayer> receiver = CreateObject<CsrHopLayer> ();
+  sender->SetMac (&senderDevice->GetMac ());
+  receiver->SetMac (&receiverDevice->GetMac ());
+  ConfigureHop (sender, SOURCE, DESTINATION);
+  ConfigureHop (receiver, DESTINATION, SOURCE);
+  sender->SetHopWireProfile (profile);
+  receiver->SetHopWireProfile (profile);
+  receiver->SetRxFromHopCallback (MakeCallback (&NoteProfileDataDelivery));
+
+  g_profileDataReceiver = receiver;
+  g_capturedProfileData = nullptr;
+  g_capturedProfileDataPacketBits = 0;
+  g_profileDataDeliveries = 0;
+  g_profileDataPayload.clear ();
+  receiverDevice->GetMac ().SetRxCallback (
+    MakeCallback (&CaptureAndDeliverProfileData));
+
+  // br_app Packet Size 200 produces one 192-byte br_Network packet.  The
+  // archived direct br_Network -> br_Hop -> br_Mac path is therefore 217 B;
+  // production Pairwise16 adds its five-byte record and is 222 B.
+  Ptr<Packet> networkPayload = Create<Packet> (185);
+  CsrNetHeader networkHeader (SOURCE, DESTINATION, 5);
+  networkPayload->AddHeader (networkHeader);
+  Require (networkPayload->GetSize () == 192,
+           "profile DATA fixture is not a 192-byte network packet");
+  const std::vector<uint8_t> expectedPayload = CopyBytes (networkPayload);
+
+  sender->SendData (DESTINATION, 5, networkPayload, false);
+  Simulator::Stop (Seconds (4.0));
+  Simulator::Run ();
+
+  Require (g_capturedProfileData != nullptr,
+           "live ordinary DATA was not transmitted to the receiver");
+  Require (CsrGetOpnetWireSize (g_capturedProfileData) == expectedWireBytes,
+           "live ordinary DATA used the wrong source-version wire size");
+  const uint32_t shortPacketBits =
+    104 + 48 + expectedWireBytes * 8 + 32;
+  const uint32_t longPacketBits =
+    7888 + 48 + expectedWireBytes * 8 + 32;
+  Require (g_capturedProfileDataPacketBits == shortPacketBits ||
+             g_capturedProfileDataPacketBits == longPacketBits,
+           "PHY did not charge the selected DATA envelope to packet bits");
+
+  Ptr<Packet> record = g_capturedProfileData->Copy ();
+  CsrHeader outer;
+  record->RemoveHeader (outer);
+  Require (outer.GetType () == CSR_PKT_DATA &&
+             outer.GetSrc () == SOURCE &&
+             outer.GetDst () == DESTINATION &&
+             outer.GetDscp () == 5 &&
+             !outer.IsAckable (),
+           "ordinary DATA lost its HOP metadata");
+  Require (outer.HasSecurityCount () == expectSecurity,
+           "ordinary DATA security-count presence disagrees with profile");
+  Require (record->GetSize () == 192 + (expectSecurity ? 5 : 0),
+           "ordinary DATA record contains the wrong authentication bytes");
+  Require (g_profileDataDeliveries == 1 &&
+             g_profileDataPayload == expectedPayload,
+           "matching ordinary DATA profile did not deliver plaintext once");
+
+  g_profileDataReceiver = nullptr;
   Simulator::Destroy ();
 }
 
@@ -926,8 +1370,27 @@ main ()
   InitializeKeys ();
   CheckGoldenPairwiseRecords ();
   CheckAuthenticationBeforeAckAndDelivery ();
+  CheckCrossProfileDataRejection ();
+  CheckMalformedOrdinaryDataEnvelopes (
+    CsrHopWireProfile::PRODUCTION_PAIRWISE16);
+  CheckMalformedOrdinaryDataEnvelopes (
+    CsrHopWireProfile::HIST_ADB97C54_BARE);
   CheckAckDackSecurityPolicy ();
-  CheckLiveOutboundDackWrapper ();
+  CheckBareExactAckCompatibilityReception ();
+  CheckLiveOutboundDackWrapper (
+    CsrHopWireProfile::PRODUCTION_PAIRWISE16,
+    46);
+  CheckLiveOutboundDackWrapper (
+    CsrHopWireProfile::HIST_ADB97C54_BARE,
+    41);
+  CheckLiveOrdinaryDataWireProfile (
+    CsrHopWireProfile::PRODUCTION_PAIRWISE16,
+    222,
+    true);
+  CheckLiveOrdinaryDataWireProfile (
+    CsrHopWireProfile::HIST_ADB97C54_BARE,
+    217,
+    false);
   CheckLiveSendPaths ();
   std::cout << "PASS: remaining OPNET HOP-security mode parity test"
             << std::endl;

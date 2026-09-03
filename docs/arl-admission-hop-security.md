@@ -1,6 +1,6 @@
 # ARL neighbor admission and hop-security foundation
 
-Updated: 2026-09-01
+Updated: 2026-09-02
 
 ## Implemented scope
 
@@ -10,7 +10,8 @@ KeyRequest, KeyUpdate, GroupEstablish, Group16, and Group32Encrypt
 cryptography. The model uses the source's SHA-1, HMAC-SHA1, one-iteration
 PBKDF2 derivations, AES-256-CBC group-key wrapping, AES-256-CTR pairwise/group
 encryption, 128-entry pairwise and group replay windows, reliable completion,
-admission decisions, and the source-owned Pairwise16 ACK/DACK wrapper.
+admission decisions, and explicit production Pairwise16 versus hash-bound
+historical bare ordinary-DATA and ACK/DACK wrappers.
 Embedded flash and key-manager access are replaced by injectable synthetic
 mission, pairwise, and group keys.
 
@@ -33,7 +34,7 @@ advertised.
 | Received KeyRequest sends KeyUpdate unless a previously ACKed key is already recorded | `CsrNetLayer::NoteKeyRequestReceived()` |
 | KeyUpdate is reliable; receive ACKs it and starts a reciprocal KeyUpdate | `CsrHopLayer` KeyUpdate receive path / `CsrNetLayer::NoteKeyUpdateReceived()` |
 | Pairwise protection keys use MNK + pairwise material + A5/5A pads and source/count/key-ID salt | `CsrLegacyCrypto::DeriveProtectionKeys()` |
-| The common `AckMsg` packet type (ACK and DACK subtypes) uses Pairwise16 packet type 0 | `CsrHopLayer::ProtectAckFrame()` / `AuthenticateAckFrame()` |
+| Production AppData/AppDataNoAck and common `AckMsg` use Pairwise16; archived executable `adb97c54...` directly wraps ordinary DATA and `br_Ack` without security | `CsrHopLayer::SendDataFrame()`, `ProtectAckFrame()`, and receive validation selected by the atomic HOP-security profile |
 | KeyRequest authenticates its packed key-ID/sequence with a four-byte Pairwise32 HMAC | `CsrHopSecurityState::BuildKeyRequest()` / `ReceiveKeyRequest()` |
 | KeyUpdate authenticates the plaintext group key, derives a pairwise wrapping key, and uses AES-256-CBC | `CsrHopSecurityState::BuildKeyUpdate()` / `ReceiveKeyUpdate()` |
 | `getNextGroupKeyIdSeq()` advances the shared 12-bit group sequence and evolves the key at rollover | `CsrHopSecurityState::NextGroupKeySequence()` |
@@ -59,7 +60,7 @@ advertised.
 | --- | --- | ---: | --- |
 | KeyRequest | packed 12-bit pairwise key ID + 12-bit sequence (3), auth tag (4) | 7 bytes | No ACK, no resend |
 | KeyUpdate | packed key ID/sequence (3), reserved/group-key ID (2), data PRN wire field (6), wrapped group key (32), auth tag (8) | 51 bytes | ACK/resend |
-| Pairwise16 | packed pairwise key ID/sequence (3), plaintext, auth tag (2) | 5 bytes | Default DATA and common packet-type-0 ACK/DACK |
+| Pairwise16 | packed pairwise key ID/sequence (3), plaintext, auth tag (2) | 5 bytes | Default DATA and production common packet-type-0 ACK/DACK |
 | Pairwise32 | packed pairwise key ID/sequence (3), plaintext, auth tag (4) | 7 bytes | Portable provider and golden tests |
 | Pairwise32Encrypt | packed pairwise key ID/sequence (3), AES-CTR ciphertext, auth tag (4) | 7 bytes | Explicit encrypted one-hop DATA path |
 | GroupEstablish | packed group key ID/sequence (3), AES-CTR ciphertext, mission/group auth tag (4) | 7 bytes | Discover broadcasts |
@@ -151,8 +152,13 @@ count is absent.
   Pairwise32, and Pairwise32Encrypt golden records; plaintext/ciphertext round
   trips; wrong-key, wrong-type, tamper, malformed, and replay rejection;
   authentication-before-ACK/delivery; plaintext/tampered/malformed ACK
-  rejection; authenticated ACK/DACK state and wake ordering; a live 46-byte
-  cumulative Pairwise16 DACK; exact-once AppNeighborcast; and live over-air
+  rejection; authenticated ACK/DACK state and wake ordering; live 46-byte
+  production Pairwise16 and 41-byte hash-bound historical cumulative DACKs,
+  222-byte production and 217-byte historical ordinary DATA with exact PHY bit
+  accounting and matching live receive, impossible-metadata and declared
+  cross-profile rejection before replay state, and a synthetic 25-byte bare exact-envelope
+  compatibility ACK and its custody/wake path (not an archived transmit
+  claim); exact-once AppNeighborcast; and live over-air
   sends for Pairwise16, Pairwise32Encrypt, and Group32Encrypt.
 - `csr-hop-neighbor-check-security-smoke.cc` checks the source-exact
   packet-type-9 Pairwise16 NeighborCheck wrapper policy, authentication before
@@ -174,11 +180,17 @@ count is absent.
 ## Deliberate boundary
 
 All enabled HOP-security transforms now have portable provider coverage.
-Pairwise16 is connected to ordinary DATA, the common ACK/DACK packet type, and
+Pairwise16 is connected to production ordinary DATA, the common ACK/DACK packet type, and
 packet-type-9 NeighborCheck; Pairwise32Encrypt has an explicit one-hop DATA
 path; and Group32Encrypt is connected to AppNeighborcast. The ACK/DACK
-Pairwise16 policy is source-exact; the ns-3 logical-body byte mapping remains
-unverified without a production golden protected record. Reassessing a
+Pairwise16 policy is source-exact. The adb97 profile atomically selects direct
+bare ordinary DATA and ACK/DACK, and its full executable digest is required in
+canonical certifying scenarios. The ns-3 logical-body byte mapping remains
+unverified without a production golden protected record. Clearing a
+Pairwise16 frame's outer security-count flag can leave bytes indistinguishable
+from an arbitrary bare payload because `br_Network` has no authenticated magic
+or length discriminator; no stronger body-heuristic rejection is claimed.
+Reassessing a
 Pairwise16 authenticated duplicate when its HOP sequence is DACK-marked is an
 inferred cross-source integration: `br_hop.pr.c` proves the HOP retry rule, but
 the archived OPNET executable has no production security dispatcher proving

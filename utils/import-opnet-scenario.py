@@ -57,6 +57,24 @@ MAC_PROFILES = (
     MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
     MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE,
 )
+HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16 = "production-pairwise16"
+HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE = "hist-adb97c54-bare"
+HOP_SECURITY_PROFILES = (
+    HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+    HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+)
+HIST_ADB97C54_EXECUTABLE_SHA256 = (
+    "adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af"
+)
+
+# Backward-compatible names for the original ACK-only CLI/CSV alias.
+ACK_ENVELOPE_PROFILE_PRODUCTION_PAIRWISE16 = (
+    HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
+)
+ACK_ENVELOPE_PROFILE_HIST_ADB97C54_BARE = (
+    HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+)
+ACK_ENVELOPE_PROFILES = HOP_SECURITY_PROFILES
 # ns-3's MRG32k3a RngStream requires seed < m2 (4294944443), which
 # is narrower than the uint32 storage type accepted by RngSeedManager.
 NS3_RNG_SEED_MAX = 4294944442
@@ -73,6 +91,9 @@ SCENARIO_COLUMNS = (
     "reservation_control_start_s",
     "application_profile",
     "mac_profile",
+    "hop_security_profile",
+    "ack_envelope_profile",
+    "source_executable_sha256",
     "node_id",
     "forced_reservation_slot",
     "name",
@@ -666,6 +687,32 @@ def _blank_row() -> dict[str, object]:
     return {column: "" for column in SCENARIO_COLUMNS}
 
 
+def resolve_hop_security_profile(
+    hop_security_profile: str | None,
+    ack_envelope_profile: str | None,
+) -> str:
+    """Resolve the canonical DATA+ACK profile and its deprecated ACK alias."""
+    for field, value in (
+        ("HOP security", hop_security_profile),
+        ("ACK envelope", ack_envelope_profile),
+    ):
+        if value is not None and value not in HOP_SECURITY_PROFILES:
+            raise ImportErrorDetail(f"unsupported {field} profile {value!r}")
+    if (
+        hop_security_profile is not None
+        and ack_envelope_profile is not None
+        and hop_security_profile != ack_envelope_profile
+    ):
+        raise ImportErrorDetail(
+            "hop_security_profile and deprecated ack_envelope_profile disagree"
+        )
+    return (
+        hop_security_profile
+        or ack_envelope_profile
+        or HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
+    )
+
+
 def write_scenario(
     output: Path,
     scenario_name: str,
@@ -677,6 +724,8 @@ def write_scenario(
     reservation_slot_overrides: dict[int, int],
     application_profile: str = APPLICATION_PROFILE_CURRENT_SEND_ONLY,
     mac_profile: str = MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
+    ack_envelope_profile: str | None = None,
+    hop_security_profile: str | None = None,
 ) -> None:
     """Write the rectangular canonical scenario CSV."""
     if application_profile not in APPLICATION_PROFILES:
@@ -685,6 +734,23 @@ def write_scenario(
         )
     if mac_profile not in MAC_PROFILES:
         raise ImportErrorDetail(f"unsupported MAC profile {mac_profile!r}")
+    resolved_hop_security_profile = resolve_hop_security_profile(
+        hop_security_profile,
+        ack_envelope_profile,
+    )
+    if (
+        resolved_hop_security_profile
+        == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+    ) != (
+        application_profile == APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP
+        and mac_profile == MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE
+    ):
+        raise ImportErrorDetail(
+            "the adb97 executable tuple must select "
+            f"hop_security_profile={HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE}, "
+            f"application_profile={APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP}, "
+            f"and mac_profile={MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE} together"
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=SCENARIO_COLUMNS, lineterminator="\n")
@@ -701,6 +767,16 @@ def write_scenario(
             coordinate_scale_m_per_unit=repr(coordinate_scale),
             application_profile=application_profile,
             mac_profile=mac_profile,
+            hop_security_profile=resolved_hop_security_profile,
+            # Deprecated input alias only: new scenarios leave it blank so
+            # the canonical DATA+ACK selector is unambiguous.
+            ack_envelope_profile="",
+            source_executable_sha256=(
+                HIST_ADB97C54_EXECUTABLE_SHA256
+                if resolved_hop_security_profile
+                == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+                else ""
+            ),
             reservation_control_start_s=(
                 ""
                 if "reservation_control_start_s" not in run
@@ -868,6 +944,8 @@ def import_scenario(arguments: argparse.Namespace) -> tuple[list[Node], list[Flo
         reservation_slot_overrides,
         arguments.application_profile,
         arguments.mac_profile,
+        hop_security_profile=arguments.hop_security_profile,
+        ack_envelope_profile=arguments.ack_envelope_profile,
     )
     if resolved.environment_name is None:
         print(
@@ -956,6 +1034,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "executable-backed MAC reservation profile recorded in the run "
             "row (default: current-fine-free-slot)"
+        ),
+    )
+    parser.add_argument(
+        "--hop-security-profile",
+        choices=HOP_SECURITY_PROFILES,
+        default=None,
+        help=(
+            "atomic ordinary-DATA and ACK/DACK security-envelope source "
+            "version recorded in the run row (default: production-pairwise16)"
+        ),
+    )
+    parser.add_argument(
+        "--ack-envelope-profile",
+        choices=ACK_ENVELOPE_PROFILES,
+        default=None,
+        help=(
+            "deprecated alias for --hop-security-profile; when both are "
+            "present they must match"
         ),
     )
     parser.add_argument(

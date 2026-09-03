@@ -10,10 +10,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 
 
@@ -42,6 +44,9 @@ SCENARIO_COLUMNS = (
     "scenario",
     "application_profile",
     "mac_profile",
+    "hop_security_profile",
+    "ack_envelope_profile",
+    "source_executable_sha256",
     "source_sha256",
     "duration_s",
     "seed",
@@ -81,7 +86,17 @@ def write_scenario(
     source_sha256: str = "0" * 64,
     application_profile: str = "current-send-only",
     mac_profile: str | None = "current-fine-free-slot",
+    hop_security_profile: str | None = "production-pairwise16",
+    ack_envelope_profile: str | None = None,
+    source_executable_sha256: str | None = None,
 ) -> None:
+    if source_executable_sha256 is None:
+        source_executable_sha256 = (
+            WORKFLOW.HIST_ADB97C54_EXECUTABLE_SHA256
+            if hop_security_profile
+            == WORKFLOW.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+            else ""
+        )
     rows = [
         {
             "record": "run",
@@ -144,11 +159,31 @@ def write_scenario(
     ]
     if mac_profile is not None:
         rows[0]["mac_profile"] = mac_profile
-        columns = SCENARIO_COLUMNS
-    else:
-        columns = tuple(
-            column for column in SCENARIO_COLUMNS if column != "mac_profile"
+    if hop_security_profile is not None:
+        rows[0]["hop_security_profile"] = hop_security_profile
+    if ack_envelope_profile is not None:
+        rows[0]["ack_envelope_profile"] = ack_envelope_profile
+    if source_executable_sha256:
+        rows[0]["source_executable_sha256"] = source_executable_sha256
+    columns = tuple(
+        column
+        for column in SCENARIO_COLUMNS
+        if not (
+            (column == "mac_profile" and mac_profile is None)
+            or (
+                column == "hop_security_profile"
+                and hop_security_profile is None
+            )
+            or (
+                column == "ack_envelope_profile"
+                and ack_envelope_profile is None
+            )
+            or (
+                column == "source_executable_sha256"
+                and not source_executable_sha256
+            )
         )
+    )
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
@@ -183,6 +218,14 @@ def write_fake_runner(path: Path, mode: str = "exact") -> None:
                 raise SystemExit(65)
             if options["aggregateTraceOnly"] != "1" or options["quietModelLogs"] != "1":
                 raise SystemExit(66)
+
+            with Path(options["scenario"]).open(encoding="utf-8") as stream:
+                scenario_rows = list(csv.DictReader(stream))
+            application_profile = next(
+                row.get("application_profile", "") or "unspecified"
+                for row in scenario_rows
+                if row["record"] == "run"
+            )
 
             fields = (
                 "schema", "event_index", "time_s", "event", "src", "dst",
@@ -226,7 +269,7 @@ def write_fake_runner(path: Path, mode: str = "exact") -> None:
                 "destination_mode,attempts,admitted,blocked_discovery,"
                 "blocked_topology,blocked_gateway_route,blocked_destination,"
                 "blocked_nsdp,first_admitted_s,last_admitted_s\\n"
-                "csr-app-admission-diagnostics-v1,fixture,current-send-only,"
+                "csr-app-admission-diagnostics-v1,fixture," + application_profile + ","
                 "0,2,1,fixed,100,100,"
                 "0,0,0,0,0,598,599\\n",
                 encoding="utf-8",
@@ -240,6 +283,40 @@ def write_fake_runner(path: Path, mode: str = "exact") -> None:
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def instrument_python_utility(source: Path, destination: Path) -> None:
+    """Copy one child utility and record the interpreter flags it observes."""
+
+    marker = '\nif __name__ == "__main__":\n'
+    program = source.read_text(encoding="utf-8")
+    if marker not in program:
+        raise RuntimeError(f"cannot instrument {source}")
+    probe = textwrap.dedent(
+        """
+
+        import sys as _probe_sys
+        from pathlib import Path as _ProbePath
+        _probe_sys.path.insert(0, str(_ProbePath(__file__).resolve().parent))
+        import child_execution_probe
+        child_execution_probe.record(_ProbePath(__file__).name)
+        """
+    )
+    destination.write_text(program.replace(marker, probe + marker), encoding="utf-8")
+
+
+def load_uncached_module(name: str, path: Path):
+    """Execute a temporary workflow copy without generating import bytecode."""
+
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = ""
+    sys.modules[name] = module
+    try:
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    finally:
+        del sys.modules[name]
+    return module
 
 
 class AggregateWorkflowTests(unittest.TestCase):
@@ -361,6 +438,14 @@ class AggregateWorkflowTests(unittest.TestCase):
                     "scenario": "fixture",
                     "application_profile": "current-send-only",
                     "mac_profile": "current-fine-free-slot",
+                    "hop_security_profile": "production-pairwise16",
+                    "hop_security_profile_origin": "explicit",
+                    "hop_security_behavior": {
+                        "ordinary_data": "pairwise16",
+                        "ack_dack": "pairwise16",
+                    },
+                    "ack_envelope_profile": "unspecified",
+                    "source_executable_sha256": "",
                     "duration_s": 60000.0,
                     "seed": 128,
                     "source_sha256": "0" * 64,
@@ -389,6 +474,14 @@ class AggregateWorkflowTests(unittest.TestCase):
                     ),
                     "application_profile": "current-send-only",
                     "mac_profile": "current-fine-free-slot",
+                    "hop_security_profile": "production-pairwise16",
+                    "hop_security_profile_origin": "explicit",
+                    "hop_security_behavior": {
+                        "ordinary_data": "pairwise16",
+                        "ack_dack": "pairwise16",
+                    },
+                    "ack_envelope_profile": "unspecified",
+                    "source_executable_sha256": "",
                     "aggregate_trace_only": True,
                     "duty_cycling": False,
                     "opnet_aligned_duty_cycle": True,
@@ -415,6 +508,126 @@ class AggregateWorkflowTests(unittest.TestCase):
                     "matched_size_compared_count": 100,
                     "matched_size_mismatch_count": 0,
                 },
+            )
+
+    def test_nested_python_utilities_are_isolated_and_bytecode_free(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            workflow_path = tools / SCRIPT.name
+            shutil.copy2(SCRIPT, workflow_path)
+            utility_names = (
+                "extract-opnet-ov.py",
+                "aggregate-ns3-trace.py",
+                "compare-opnet-ns3-aggregates.py",
+            )
+            for utility_name in utility_names:
+                instrument_python_utility(
+                    ROOT / "utils" / utility_name,
+                    tools / utility_name,
+                )
+            (tools / "child_execution_probe.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import json
+                    from pathlib import Path
+                    import sys
+
+                    def record(tool):
+                        state = {
+                            "tool": tool,
+                            "isolated": sys.flags.isolated,
+                            "dont_write_bytecode": sys.dont_write_bytecode,
+                        }
+                        with Path(__file__).with_name("child-state.jsonl").open(
+                            "a", encoding="utf-8"
+                        ) as stream:
+                            stream.write(json.dumps(state, sort_keys=True) + "\\n")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            copied_workflow = load_uncached_module(
+                "csr_opnet_aggregate_workflow_isolation_test",
+                workflow_path,
+            )
+            scenario, ov, _pb, runner = self.prepare(root)
+            output = root / "run"
+            result = copied_workflow.main(
+                self.command(scenario, ov, runner, output)[2:]
+            )
+            self.assertEqual(
+                result,
+                0,
+                (output / "ns3-aggregate.log").read_text(encoding="utf-8"),
+            )
+
+            manifest = json.loads(
+                (output / copied_workflow.MANIFEST_NAME).read_text(encoding="utf-8")
+            )
+            stage_tools = {
+                "extract_opnet": "extract-opnet-ov.py",
+                "aggregate_ns3": "aggregate-ns3-trace.py",
+                "compare": "compare-opnet-ns3-aggregates.py",
+            }
+            for stage, utility_name in stage_tools.items():
+                command = manifest["stages"][stage]["command"]
+                self.assertEqual(command[:3], [sys.executable, "-B", "-I"])
+                self.assertEqual(Path(command[3]), tools / utility_name)
+
+            states = [
+                json.loads(line)
+                for line in (tools / "child-state.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual([state["tool"] for state in states], list(utility_names))
+            self.assertTrue(all(state["isolated"] == 1 for state in states))
+            self.assertTrue(all(state["dont_write_bytecode"] for state in states))
+            self.assertEqual(list(tools.rglob("*.pyc")), [])
+            self.assertEqual(list(tools.rglob("__pycache__")), [])
+
+    def test_historical_manifest_binds_binary_and_projects_data_and_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenario, ov, _pb, runner = self.prepare(root)
+            write_scenario(
+                scenario,
+                application_profile="legacy-send-only-no-dscp",
+                mac_profile="hist-2014-next-tslot-modulo-probe",
+                hop_security_profile="hist-adb97c54-bare",
+            )
+            output = root / "historical-run"
+            completed = subprocess.run(
+                self.command(scenario, ov, runner, output),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            manifest = json.loads(
+                (output / WORKFLOW.MANIFEST_NAME).read_text(encoding="utf-8")
+            )
+            canonical = manifest["configuration"]["identities"][
+                "canonical_scenario"
+            ]
+            self.assertEqual(canonical["hop_security_profile"], "hist-adb97c54-bare")
+            self.assertEqual(canonical["hop_security_profile_origin"], "explicit")
+            self.assertEqual(
+                canonical["source_executable_sha256"],
+                WORKFLOW.HIST_ADB97C54_EXECUTABLE_SHA256,
+            )
+            self.assertEqual(
+                canonical["hop_security_behavior"],
+                {"ordinary_data": "bare", "ack_dack": "bare"},
+            )
+            configuration = manifest["configuration"]
+            runner_configuration = configuration["runner"]
+            self.assertEqual(
+                runner_configuration["hop_security_behavior"],
+                canonical["hop_security_behavior"],
             )
             runner_command = manifest["stages"]["run_ns3"]["command"]
             self.assertIn("--stop=60000", runner_command)
@@ -1124,6 +1337,178 @@ class AggregateWorkflowTests(unittest.TestCase):
                     self.assertEqual(
                         WORKFLOW.load_scenario_run(path)["mac_profile"], profile
                     )
+
+    def test_hop_security_profile_is_atomic_and_version_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scenario.csv"
+            write_scenario(path)
+            loaded = WORKFLOW.load_scenario_run(path)
+            self.assertEqual(
+                loaded["hop_security_profile"],
+                WORKFLOW.HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+            )
+            self.assertEqual(loaded["hop_security_profile_origin"], "explicit")
+            self.assertEqual(
+                loaded["hop_security_behavior"],
+                {"ordinary_data": "pairwise16", "ack_dack": "pairwise16"},
+            )
+            self.assertEqual(loaded["ack_envelope_profile"], "unspecified")
+            self.assertEqual(loaded["source_executable_sha256"], "")
+
+            write_scenario(
+                path,
+                application_profile="legacy-send-only-no-dscp",
+                mac_profile="hist-2014-next-tslot-modulo-probe",
+                hop_security_profile=(
+                    WORKFLOW.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+                ),
+            )
+            loaded = WORKFLOW.load_scenario_run(path)
+            self.assertEqual(
+                loaded["hop_security_profile"],
+                WORKFLOW.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+            )
+            self.assertEqual(
+                loaded["source_executable_sha256"],
+                WORKFLOW.HIST_ADB97C54_EXECUTABLE_SHA256,
+            )
+            self.assertEqual(
+                loaded["hop_security_behavior"],
+                {"ordinary_data": "bare", "ack_dack": "bare"},
+            )
+
+            write_scenario(
+                path,
+                hop_security_profile=(
+                    WORKFLOW.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
+                ),
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError,
+                "adb97 executable tuple must select",
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+            write_scenario(
+                path,
+                application_profile="legacy-send-only-no-dscp",
+                mac_profile="hist-2014-next-tslot-modulo-probe",
+                hop_security_profile="production-pairwise16",
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "adb97 executable tuple must select"
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+            write_scenario(path, hop_security_profile="invented-profile")
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "unsupported hop_security_profile"
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+            write_scenario(
+                path,
+                hop_security_profile="production-pairwise16",
+                ack_envelope_profile="hist-adb97c54-bare",
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "ack_envelope_profile disagree"
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+    def test_legacy_ack_alias_is_resolved_but_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scenario.csv"
+            write_scenario(
+                path,
+                application_profile="legacy-send-only-no-dscp",
+                mac_profile="hist-2014-next-tslot-modulo-probe",
+                hop_security_profile=None,
+                ack_envelope_profile="hist-adb97c54-bare",
+                source_executable_sha256=(
+                    WORKFLOW.HIST_ADB97C54_EXECUTABLE_SHA256
+                ),
+            )
+            loaded = WORKFLOW.load_scenario_run(path)
+            self.assertEqual(loaded["hop_security_profile"], "hist-adb97c54-bare")
+            self.assertEqual(
+                loaded["hop_security_profile_origin"], "legacy_ack_alias"
+            )
+
+            write_scenario(
+                path,
+                application_profile="legacy-send-only-no-dscp",
+                mac_profile="hist-2014-next-tslot-modulo-probe",
+                hop_security_profile=None,
+                ack_envelope_profile="hist-adb97c54-bare",
+                source_executable_sha256="",
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError,
+                "effective hist-adb97c54-bare requires",
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+            write_scenario(
+                path,
+                hop_security_profile=None,
+                ack_envelope_profile="production-pairwise16",
+                source_executable_sha256=(
+                    WORKFLOW.HIST_ADB97C54_EXECUTABLE_SHA256
+                ),
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError,
+                "effective production-pairwise16 cannot claim",
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+    def test_missing_hop_security_profile_is_compatible_but_diagnostic(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenario, ov, _pb, runner = self.prepare(root)
+            write_scenario(
+                scenario,
+                hop_security_profile=None,
+                ack_envelope_profile=None,
+            )
+
+            loaded = WORKFLOW.load_scenario_run(scenario)
+            self.assertEqual(loaded["hop_security_profile"], "production-pairwise16")
+            self.assertEqual(loaded["hop_security_profile_origin"], "missing")
+            self.assertEqual(loaded["ack_envelope_profile"], "unspecified")
+
+            output = root / "run"
+            completed = subprocess.run(
+                self.command(scenario, ov, runner, output),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            manifest = json.loads(
+                (output / WORKFLOW.MANIFEST_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["profile"], "diagnostic")
+            self.assertIn(
+                "hop_security_profile_missing",
+                manifest["noncertifying_overrides"],
+            )
+            self.assertEqual(
+                manifest["configuration"]["identities"]["canonical_scenario"][
+                    "hop_security_profile"
+                ],
+                "production-pairwise16",
+            )
+            self.assertEqual(
+                manifest["configuration"]["runner"][
+                    "hop_security_profile_origin"
+                ],
+                "missing",
+            )
 
     def test_missing_mac_profile_is_backward_compatible_but_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

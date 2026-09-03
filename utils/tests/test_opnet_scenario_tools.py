@@ -400,6 +400,11 @@ class ScenarioImporterTests(unittest.TestCase):
             run_row["mac_profile"],
             IMPORTER.MAC_PROFILE_HIST_2014_ZERO_BASED_REBUILD_LIST,
         )
+        self.assertEqual(
+            run_row["hop_security_profile"],
+            IMPORTER.HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+        )
+        self.assertEqual(run_row["ack_envelope_profile"], "")
         flow_row = next(row for row in rows if row["record"] == "flow")
         self.assertEqual(flow_row["flow_src"], "7")
         self.assertEqual(flow_row["flow_dst"], "7")
@@ -540,6 +545,11 @@ class ScenarioImporterTests(unittest.TestCase):
                 run_row["mac_profile"],
                 IMPORTER.MAC_PROFILE_CURRENT_FINE_FREE_SLOT,
             )
+            self.assertEqual(
+                run_row["hop_security_profile"],
+                IMPORTER.HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+            )
+            self.assertEqual(run_row["ack_envelope_profile"], "")
 
     def test_mac_profile_cli_and_run_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -575,6 +585,106 @@ class ScenarioImporterTests(unittest.TestCase):
                 )
         help_text = IMPORTER.build_parser().format_help()
         for profile in IMPORTER.MAC_PROFILES:
+            self.assertIn(profile, help_text)
+
+    def test_hop_security_profile_cli_and_run_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scenario.nt.m"
+            output = root / "scenario.csv"
+            source.write_bytes(synthetic_network())
+            arguments = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--infer-gateway-flows",
+                    "--application-profile",
+                    IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP,
+                    "--mac-profile",
+                    IMPORTER.MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE,
+                    "--hop-security-profile",
+                    IMPORTER.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+                ]
+            )
+            IMPORTER.import_scenario(arguments)
+            with output.open(encoding="utf-8") as stream:
+                run_row = next(csv.DictReader(stream))
+            self.assertEqual(
+                run_row["hop_security_profile"],
+                IMPORTER.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+            )
+            self.assertEqual(run_row["ack_envelope_profile"], "")
+            self.assertEqual(
+                run_row["source_executable_sha256"],
+                IMPORTER.HIST_ADB97C54_EXECUTABLE_SHA256,
+            )
+
+            # The former ACK-only option remains an input alias, but the
+            # generated scenario always records the canonical atomic field.
+            alias_arguments = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--infer-gateway-flows",
+                    "--application-profile",
+                    IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP,
+                    "--mac-profile",
+                    IMPORTER.MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE,
+                    "--ack-envelope-profile",
+                    IMPORTER.ACK_ENVELOPE_PROFILE_HIST_ADB97C54_BARE,
+                ]
+            )
+            IMPORTER.import_scenario(alias_arguments)
+            with output.open(encoding="utf-8") as stream:
+                alias_run_row = next(csv.DictReader(stream))
+            self.assertEqual(
+                alias_run_row["hop_security_profile"],
+                IMPORTER.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+            )
+            self.assertEqual(alias_run_row["ack_envelope_profile"], "")
+
+            incompatible = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--hop-security-profile",
+                    IMPORTER.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+                ]
+            )
+            with self.assertRaisesRegex(
+                IMPORTER.ImportErrorDetail,
+                "adb97 executable tuple must select",
+            ):
+                IMPORTER.import_scenario(incompatible)
+
+            conflicting = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--hop-security-profile",
+                    IMPORTER.HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+                    "--ack-envelope-profile",
+                    IMPORTER.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+                ]
+            )
+            with self.assertRaisesRegex(
+                IMPORTER.ImportErrorDetail,
+                "ack_envelope_profile disagree",
+            ):
+                IMPORTER.import_scenario(conflicting)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                IMPORTER.build_parser().parse_args(
+                    [
+                        "scenario.nt.m",
+                        "scenario.csv",
+                        "--hop-security-profile",
+                        "not-a-profile",
+                    ]
+                )
+        help_text = IMPORTER.build_parser().format_help()
+        for profile in IMPORTER.HOP_SECURITY_PROFILES:
             self.assertIn(profile, help_text)
 
 

@@ -393,6 +393,7 @@ RunReceiverCapabilityScenario ()
 
   uint32_t directCost = 0;
   uint8_t capability = 0xff;
+  CsrNodeId applicationGateway = CSR_BROADCAST_ID;
   Require (receiver->GetSelectedRouteCost (
              REPORTER_NODE,
              directCost),
@@ -402,6 +403,8 @@ RunReceiverCapabilityScenario ()
              capability) &&
              capability == 0,
            "HELLO NodeType incorrectly bootstrapped routing capability");
+  Require (!receiver->FindApplicationGateway (applicationGateway),
+           "application accepted HELLO role metadata as route capability");
 
   DeliverSections (
     receiver,
@@ -412,6 +415,8 @@ RunReceiverCapabilityScenario ()
              capability) &&
              capability == 1,
            "zero-hop self UPDATE did not establish routing capability");
+  Require (!receiver->FindApplicationGateway (applicationGateway),
+           "application treated a Routable capability as Gateway");
 
   // Wrapper role metadata remains independent.  A later plain HELLO must
   // refresh link measurements without overwriting routes.c capability state.
@@ -438,6 +443,9 @@ RunReceiverCapabilityScenario ()
              capability) &&
              capability == 2,
            "newer self UPDATE did not change routing capability");
+  Require (receiver->FindApplicationGateway (applicationGateway) &&
+             applicationGateway == REPORTER_NODE,
+           "application did not discover the selected Gateway route");
 
   DeliverSections (
     receiver,
@@ -536,6 +544,8 @@ RunReceiverCapabilityScenario ()
              capability) &&
              capability == 0,
            "self DELETE did not clear routing capability");
+  Require (!receiver->FindApplicationGateway (applicationGateway),
+           "application retained a deleted Gateway capability");
 
   uint32_t costAfterDelete = 0;
   Require (receiver->GetSelectedRouteCost (

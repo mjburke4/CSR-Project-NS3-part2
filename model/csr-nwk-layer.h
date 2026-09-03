@@ -482,6 +482,19 @@ public:
                                    uint8_t &capabilityOut) const;
 
   /**
+   * Find the gateway destination visible to the recovered application.
+   *
+   * br_app scans its route list and caches the last entry carrying the
+   * Gateway capability.  The ns-3 route store can retain multiple candidates
+   * for one destination, so expose only each destination's selected route to
+   * the application-facing scan.
+   *
+   * @param gatewayOut Gateway node identifier when one is available.
+   * @return True when a selected route advertises Gateway capability.
+   */
+  bool FindApplicationGateway (CsrNodeId &gatewayOut) const;
+
+  /**
    * Build the exact routes.c snapshot sections for focused wire tests.
    *
    * The returned packets still contain the ns-3/HOP envelope.  Removing
@@ -3164,6 +3177,8 @@ public:
     uint32_t expectedGeneration);
 
 private:
+  friend struct CsrNwkActiveNodeProvenanceSmokeAccess;
+
   CsrNodeId                              m_nodeId;
   Ptr<CsrHopLayer>                      m_hop;
   Callback<void, Ptr<Packet>, CsrNodeId> m_rxFromNetCb;
@@ -7658,10 +7673,22 @@ CsrNetLayer::SendHelloBroadcast (
 uint32_t
 CsrNetLayer::GetActiveNodeCount () const
 {
-  // OPNET raises active_nodes from neighbor-list size + 1 and never lowers
-  // it when a known neighbor becomes inactive.  Neighbor records are kept
-  // across ClearRoutes(), so their count is the legacy historical maximum.
-  return static_cast<uint32_t> (m_nwkNeighbors.size ()) + 1;
+  // br_nwk proc_hello() raises active_nodes from the shared HOP neighbor-list
+  // size + 1.  That list contains directly heard link peers, not every node
+  // named in an advertised route path.  A NWK entry receives lastHeardSec
+  // only after direct link traffic; route-only placeholders retain -1.  Since
+  // entries and their last-heard marker survive ClearRoutes(), this remains
+  // the source's monotonic historical direct-neighbor population.
+  uint32_t directlyHeard = 0;
+  for (const auto &entry : m_nwkNeighbors)
+    {
+      if (entry.second.lastHeardSec >= 0.0)
+        {
+          directlyHeard++;
+        }
+    }
+
+  return directlyHeard + 1;
 }
 
 uint32_t
@@ -10517,6 +10544,30 @@ CsrNetLayer::GetSelectedRouteCapability (
 
   capabilityOut = best->capability;
   return true;
+}
+
+bool
+CsrNetLayer::FindApplicationGateway (
+  CsrNodeId &gatewayOut) const
+{
+  bool found = false;
+  std::set<CsrNodeId> scanned;
+  for (const RouteEntry &candidate : m_routes)
+    {
+      if (!scanned.insert (candidate.nwkDst).second)
+        {
+          continue;
+        }
+
+      uint8_t capability = 0;
+      if (GetSelectedRouteCapability (candidate.nwkDst, capability) &&
+          capability == static_cast<uint8_t> (CsrNodeType::Gateway))
+        {
+          gatewayOut = candidate.nwkDst;
+          found = true;
+        }
+    }
+  return found;
 }
 
 bool

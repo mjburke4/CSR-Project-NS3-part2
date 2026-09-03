@@ -52,6 +52,12 @@ constexpr const char *HIST_FINE_NO_AVOID_MAC_PROFILE =
   "hist-2015-fine-one-based-table-no-avoid";
 constexpr const char *HIST_MODULO_PROBE_MAC_PROFILE =
   "hist-2014-next-tslot-modulo-probe";
+constexpr const char *PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE =
+  "production-pairwise16";
+constexpr const char *HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE =
+  "hist-adb97c54-bare";
+constexpr const char *HIST_ADB97C54_EXECUTABLE_SHA256 =
+  "adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af";
 
 class NullStreamBuffer : public std::streambuf
 {
@@ -104,6 +110,7 @@ struct FlowRuntimeState
   uint64_t blockedDestination {0};
   uint64_t blockedNsdp {0};
   bool gatewayKnown {false};
+  CsrNodeId gatewayNodeId {CSR_BROADCAST_ID};
   double firstAdmittedSeconds {std::numeric_limits<double>::quiet_NaN ()};
   double lastAdmittedSeconds {std::numeric_limits<double>::quiet_NaN ()};
   Ptr<UniformRandomVariable> destinationRandomVariable;
@@ -114,6 +121,12 @@ struct ImportedScenario
   std::string name;
   std::string applicationProfile {"unspecified"};
   std::string macProfile {"unspecified"};
+  std::string hopSecurityProfile {"unspecified"};
+  std::string ackEnvelopeProfile {"unspecified"};
+  std::string sourceExecutableSha256;
+  std::string effectiveHopSecurityProfile {
+    PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE};
+  std::string hopSecurityProfileOrigin {"missing"};
   double durationSeconds {60.0};
   double reservationControlStartSeconds {0.0};
   uint32_t seed {128};
@@ -262,6 +275,18 @@ LoadScenario (const std::string &path)
             {
               scenario.macProfile = GetField (row, "mac_profile");
             }
+          if (!GetField (row, "hop_security_profile").empty ())
+            {
+              scenario.hopSecurityProfile =
+                GetField (row, "hop_security_profile");
+            }
+          if (!GetField (row, "ack_envelope_profile").empty ())
+            {
+              scenario.ackEnvelopeProfile =
+                GetField (row, "ack_envelope_profile");
+            }
+          scenario.sourceExecutableSha256 =
+            GetField (row, "source_executable_sha256");
           scenario.durationSeconds = ParseDouble (row, "duration_s");
           const uint64_t seed = ParseUnsigned (row, "seed");
           NS_ABORT_MSG_IF (
@@ -411,6 +436,66 @@ LoadScenario (const std::string &path)
       scenario.macProfile != HIST_FINE_NO_AVOID_MAC_PROFILE &&
       scenario.macProfile != HIST_MODULO_PROBE_MAC_PROFILE,
     "scenario run row has an unsupported mac_profile");
+  NS_ABORT_MSG_IF (
+    scenario.hopSecurityProfile != "unspecified" &&
+      scenario.hopSecurityProfile !=
+        PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE &&
+      scenario.hopSecurityProfile !=
+        HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE,
+    "scenario run row has an unsupported hop_security_profile");
+  NS_ABORT_MSG_IF (
+    scenario.ackEnvelopeProfile != "unspecified" &&
+      scenario.ackEnvelopeProfile !=
+        PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE &&
+      scenario.ackEnvelopeProfile !=
+        HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE,
+    "scenario run row has an unsupported ack_envelope_profile");
+  NS_ABORT_MSG_IF (
+    scenario.hopSecurityProfile != "unspecified" &&
+      scenario.ackEnvelopeProfile != "unspecified" &&
+      scenario.hopSecurityProfile != scenario.ackEnvelopeProfile,
+    "hop_security_profile and deprecated ack_envelope_profile disagree");
+
+  if (scenario.hopSecurityProfile != "unspecified")
+    {
+      scenario.effectiveHopSecurityProfile = scenario.hopSecurityProfile;
+      scenario.hopSecurityProfileOrigin = "explicit";
+    }
+  else if (scenario.ackEnvelopeProfile != "unspecified")
+    {
+      scenario.effectiveHopSecurityProfile = scenario.ackEnvelopeProfile;
+      scenario.hopSecurityProfileOrigin = "legacy_ack_alias";
+    }
+
+  NS_ABORT_MSG_IF (
+    !scenario.sourceExecutableSha256.empty () &&
+      scenario.sourceExecutableSha256 != HIST_ADB97C54_EXECUTABLE_SHA256,
+    "scenario source_executable_sha256 is not the adb97 executable digest");
+  NS_ABORT_MSG_IF (
+    scenario.effectiveHopSecurityProfile ==
+        HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE &&
+      scenario.sourceExecutableSha256 != HIST_ADB97C54_EXECUTABLE_SHA256,
+    "effective hist-adb97c54-bare requires its full "
+    "source_executable_sha256");
+  NS_ABORT_MSG_IF (
+    scenario.effectiveHopSecurityProfile ==
+        PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE &&
+      !scenario.sourceExecutableSha256.empty (),
+    "effective production-pairwise16 cannot claim an archived source executable");
+
+  const bool selectedAdb97Profile =
+    scenario.effectiveHopSecurityProfile ==
+      HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE;
+  const bool selectedAdb97ApplicationAndMac =
+    scenario.applicationProfile == LEGACY_SEND_ONLY_PROFILE &&
+    scenario.macProfile == HIST_MODULO_PROBE_MAC_PROFILE;
+  NS_ABORT_MSG_IF (
+    selectedAdb97Profile != selectedAdb97ApplicationAndMac,
+    "the adb97 executable tuple must select hop_security_profile="
+      << HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE
+      << ", application_profile=" << LEGACY_SEND_ONLY_PROFILE
+      << ", and mac_profile=" << HIST_MODULO_PROBE_MAC_PROFILE
+      << " together");
   if (scenario.applicationProfile == LEGACY_SEND_ONLY_PROFILE ||
       scenario.applicationProfile == LEGACY_SEND_TO_FROM_PROFILE)
     {
@@ -506,6 +591,21 @@ ParseMacProfile (const std::string &profile)
   return CsrMacCore::SlotSelectionProfile::NS3_CURRENT_FINE_FREE_SLOT;
 }
 
+CsrHopWireProfile
+ParseHopSecurityProfile (const std::string &profile)
+{
+  if (profile == PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE)
+    {
+      return CsrHopWireProfile::PRODUCTION_PAIRWISE16;
+    }
+  if (profile == HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE)
+    {
+      return CsrHopWireProfile::HIST_ADB97C54_BARE;
+    }
+  NS_ABORT_MSG ("unsupported imported HOP security profile " << profile);
+  return CsrHopWireProfile::PRODUCTION_PAIRWISE16;
+}
+
 void
 ConnectStack (RuntimeNode &node)
 {
@@ -594,7 +694,9 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
   state->attempts++;
   const uint64_t attemptIndex = state->attempts;
   bool admitted = true;
-  CsrNodeId destination = flow.destination;
+  CsrNodeId destination = state->gatewayKnown
+    ? state->gatewayNodeId
+    : flow.destination;
   std::string admissionReason = "admitted";
   const bool traceAdmission = IsDifferentialAdmissionTraceEnabled ();
   const bool discoveryActive = traceAdmission
@@ -646,13 +748,17 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
   else if (admitted && opnetAppGating && !state->gatewayKnown)
     {
       routeCheckPerformed = true;
-      routeAvailable = network->HasRelayRoute (destination);
+      CsrNodeId gateway = CSR_BROADCAST_ID;
+      routeAvailable = network->FindApplicationGateway (gateway);
       if (routeAvailable)
         {
           // Historical br_app caches gateway_node_id after the first route
-          // lookup.  Later application attempts do not repeat a stricter ARL
-          // validity/freshness check; NWK queues packets if forwarding stalls.
+          // capability scan. Later application attempts do not repeat a
+          // stricter ARL validity/freshness check; NWK queues packets if
+          // forwarding stalls.
           state->gatewayKnown = true;
+          state->gatewayNodeId = gateway;
+          destination = gateway;
         }
       else
         {
@@ -698,6 +804,10 @@ SendFlowPacket (Ptr<CsrNetLayer> network,
       ";discovery_active=" + CsrTraceInteger (discoveryActive ? 1 : 0) +
       ";topology_known=" + CsrTraceInteger (topologyKnown ? 1 : 0) +
       ";gateway_cached=" + CsrTraceInteger (state->gatewayKnown ? 1 : 0) +
+      ";gateway_node=" +
+        (state->gatewayKnown
+           ? CsrTraceInteger (state->gatewayNodeId)
+           : std::string ()) +
       ";route_check_performed=" +
         CsrTraceInteger (routeCheckPerformed ? 1 : 0) +
       ";route_available=" + CsrTraceInteger (routeAvailable ? 1 : 0) +
@@ -828,6 +938,7 @@ main (int argc, char *argv[])
   bool aggregateTraceOnly = false;
   bool admissionTrace = false;
   bool quietModelLogs = false;
+  bool stochasticSyncThreshold = true;
   uint64_t flowLimit = 0;
 
   CommandLine command (__FILE__);
@@ -860,6 +971,11 @@ main (int argc, char *argv[])
     "quietModelLogs",
     "Suppress per-event model stdout while retaining the final summary",
     quietModelLogs);
+  command.AddValue (
+    "stochasticSyncThreshold",
+    "Draw the source normal(-11, 0.25 variance) SYNC threshold; false is "
+    "deterministic compatibility mode",
+    stochasticSyncThreshold);
   command.AddValue ("flowLimit", "Maximum packets per flow (0 is unlimited)", flowLimit);
   command.Parse (argc, argv);
 
@@ -887,11 +1003,13 @@ main (int argc, char *argv[])
     }
 
   std::map<CsrNodeId, RuntimeNode> nodes;
+  int64_t nextDeviceStream = 0;
   for (const ImportedNode &configuration : scenario.nodes)
     {
       RuntimeNode runtime;
       runtime.configuration = configuration;
       runtime.device = CreateObject<CsrNetDevice> (configuration.id);
+      nextDeviceStream += runtime.device->AssignStreams (nextDeviceStream);
       runtime.device->GetMac ().SetSlotSelectionProfile (
         ParseMacProfile (scenario.macProfile));
       if (configuration.forcedReservationSlot > 0)
@@ -903,6 +1021,8 @@ main (int argc, char *argv[])
             configuration.forcedReservationSlot);
         }
       runtime.hop = CreateObject<CsrHopLayer> ();
+      runtime.hop->SetHopWireProfile (
+        ParseHopSecurityProfile (scenario.effectiveHopSecurityProfile));
       runtime.network = CreateObject<CsrNetLayer> ();
 
       CsrPhyProfile profile;
@@ -914,6 +1034,7 @@ main (int argc, char *argv[])
       profile.txHeightMeters = configuration.heightMeters;
       profile.rxHeightMeters = configuration.heightMeters;
       profile.eccThreshold = configuration.eccThreshold;
+      profile.stochasticSyncThreshold = stochasticSyncThreshold;
       profile.propagationModel = CsrPropagationModel::OPNET_THREE_PATH;
       runtime.device->GetPhy ().SetProfile (profile);
       if (dutyCycling && opnetAlignedDutyCycle)
@@ -1003,6 +1124,13 @@ main (int argc, char *argv[])
             << " nodes=" << nodes.size ()
             << " flows=" << scenario.flows.size ()
             << " stop=" << stopSeconds
+            << " hopSecurityProfile=" << scenario.effectiveHopSecurityProfile
+            << " hopSecurityProfileOrigin="
+            << scenario.hopSecurityProfileOrigin
+            << " sourceExecutableSha256="
+            << (scenario.sourceExecutableSha256.empty ()
+                  ? "none"
+                  : scenario.sourceExecutableSha256)
             << " trace=" << tracePath
             << std::endl;
   return 0;
