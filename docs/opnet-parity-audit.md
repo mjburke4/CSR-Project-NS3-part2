@@ -1,6 +1,6 @@
 # OPNET parity audit
 
-Updated: 2026-09-02
+Updated: 2026-09-05
 
 ## Scope and confidence limits
 
@@ -508,20 +508,31 @@ adding them to aggregate CSV. They have no packet or tree identifier and are
 therefore statistic writes, not packet events or a safe basis for row-by-row
 MAC/HOP/NWK correlation.
 
-Full core-statistic two-node, symmetrical hidden-node, and multihop
-comparisons align all 800 selected points in each case without missing or
-extra timestamps. The recovered application packet size matches exactly with
-the source-backed
-`configured_bytes - 8` modeled network packet. With the hash-bound application
-and MAC profiles, the two-node OPNET/ns-3 means are 16.4417/16.3597 sent,
-16.4373/16.3474 received, and 1.45125/1.42737 seconds delay. Hidden-node means
-are 12.1707/12.7283 sent, 11.4370/12.0342 received, and 9.17976/8.40223 seconds
-delay. The retained pre-fix multihop comparison remains the outlier at
-2.0120/2.45667 sent,
-1.90167/2.29000 received, and 112.748/91.4031 seconds delay. Exact-tolerance
-reports still contain 696, 700, and 665 numeric mismatches respectively, plus
-20 correctly skipped multihop no-sample values; close means are calibration
-evidence, not claimed bucket parity.
+Full core-statistic two-node, symmetrical hidden-node, and multihop comparisons
+align all 800 selected points in each case without missing or extra timestamps.
+The recovered application packet size matches exactly with the source-backed
+`configured_bytes - 8` modeled network packet. The two-node result remains a
+retained historical comparison: its OPNET/ns-3 means are 16.4417/16.3597 sent,
+16.4373/16.3474 received, and 1.45125/1.42737 seconds delay.
+
+The reconstructed full-duration hidden-node run has OPNET/ns-3 means of
+12.1707333/13.3092167 packets/s sent (+9.3543%),
+11.4369500/12.6972833 packets/s received (+11.0198%), and
+9.1797597/8.1754843 seconds delay (-10.9401%). All 800 identities and numeric
+points align; packet size is exact in all 100 buckets, and all 761,837
+deliveries have exact sequence and size lineage with no unmatched delivery.
+
+The reconstructed full-duration multihop run has OPNET/ns-3 means of
+2.0120000/2.0561667 packets/s sent (+2.1952%),
+1.9016667/1.9596667 packets/s received (+3.0500%), and
+112.7480075/95.6824538 seconds delay (-15.1360%). All 800 identities align;
+625 of 780 numeric points differ at exact tolerance, the 20 authoritative
+no-sample values are preserved, and packet size is exact in all 95 measured
+buckets. Its 11,758 deliveries consist of 11,757 exact application sequences
+plus one fully source-proved repeated-DACK lineage, with no unmatched or
+size-mismatched delivery. These are general-parity results with a measured
+15.136% maximum absolute headline-mean residual, not exact bucket or event/RNG
+parity.
 
 The retained pre-fix source-exact multihop queue diagnostic also aligns all
 400 positions for
@@ -632,10 +643,10 @@ transmit-delay, error, and concatenation code implement only 8--128 kbit/s and
 fall through or reject high-rate packets. It therefore does not supersede the
 opt-in recovered-modem extension.
 
-The hidden-node ECC-drop probe also exposes a substantive behavioral gap:
-Modeler records 10.84105 dropped packets/s on average, while ns-3's
-source-equivalent `reason=ecc` event classification records 0.6195167
-packets/s. Inspection of `br_mac` and `br_ecc` proves that prior-stage and
+The reconstructed hidden-node ECC-drop probe still exposes a substantive
+numeric-calibration gap: Modeler records 10.84105 dropped packets/s on average,
+while ns-3's source-equivalent `reason=ecc` event classification records
+0.90395 packets/s. Inspection of `br_mac` and `br_ecc` proves that prior-stage and
 half-duplex rejections do not increment this statistic. ECC remains outside
 the default set because the vector is absent from some recovered results, but
 can now be selected as an exact-identity diagnostic where present. The
@@ -703,9 +714,11 @@ The remaining high-value expansions are:
 
 ## Current regression baseline
 
-All 38 CSR executable targets build on this audit revision. The 36 focused
-parity smoke tests, `csr-mac-demo-split`, and the imported-scenario runner
-workflow pass (38/38). All 202 focused Python tests pass; the suite additionally
+This audit revision produces 39 build products: 38 executable CSR programs and
+the `contrib/csr` shared library. All 38 executable workflows pass: 36 focused
+parity smoke programs, `csr-mac-demo-split`, and the imported-scenario runner.
+All 289 utility Python tests and all 51 release-classifier self-tests pass; the
+utility suite additionally
 covers the admission-state and packet-path analyzers as well as the
 scenario importer, event comparator/instrumenter, conservative `*.ov`
 extractor, ns-3 bucket aggregator, aggregate comparator, and end-to-end

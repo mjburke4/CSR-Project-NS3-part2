@@ -285,9 +285,10 @@ csr_opnet_trace_reservation (
 static void
 csr_opnet_trace_tx_start (
     double time_s, int node, int destination, int sequence, int rate_kbps,
-    int size_bytes, int next_slot)
+    int size_bytes, const char *preamble, int next_slot)
 {
     CsrOpnetTraceEvent event;
+    char detail[32];
     csr_opnet_trace_clear (&event);
     event.time_s = time_s;
     event.event = "tx_start";
@@ -304,6 +305,8 @@ csr_opnet_trace_tx_start (
     event.rate_kbps = rate_kbps;
     event.has_size = 1;
     event.size_bytes = size_bytes;
+    sprintf (detail, "preamble=%s", preamble == OPC_NIL ? "" : preamble);
+    event.detail = detail;
     event.has_reservation_slot = 1;
     event.reservation_slot = next_slot;
     event.has_reservation_counter = 1;

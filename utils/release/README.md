@@ -5,7 +5,8 @@ checkout whose `HEAD` and `origin/main` equal the full tested commit, plus a
 separate clean ns-3 checkout
 at `6b5cd24ea80713ce16d88575869aedd6f432bdae`. It archives both Git objects into
 the new output directory, makes the staged CSR tree read-only, and binds all 38
-scratch targets and `contrib/csr` to that one tree.
+scratch programs plus the `contrib/csr` module to that one tree. These are 39
+build products and 38 executable workflows.
 
 The debug build keeps assertions and logging enabled but explicitly disables
 warnings-as-errors. The supplied source contains three pre-existing unused
@@ -73,7 +74,7 @@ executable. The canonical selector projects both ordinary DATA and ACK/DACK as
 bare (ordinary DATA is 217 bytes); the deprecated ACK-only CSV alias must be
 blank. The aggregate manifest must independently record the same two-part
 behavior for both the canonical identity and the runner, with explicit profile
-origin and the exact `adb97c54…` executable SHA-256. The canonical application
+origin and the exact `adb97c54...` executable SHA-256. The canonical application
 aggregate comparator may exit 0 for exact numeric parity or 1 for a measured
 numeric residual. In both cases its exact eight statistics and all 800
 identities must align, 780 numeric points must be compared, the 20
@@ -82,6 +83,16 @@ delivery/size integrity must be exact, and every non-numeric failure count must
 be zero. `Generator.Packet Size (bits)` is also an independent hard gate: all
 95 authoritative values must match exactly, with only the five OPNET no-sample
 buckets skipped.
+
+The official certification harness intentionally remains the canonical
+multihop/adb97 run. Shared import, runner, and aggregate tooling also recognizes
+the separate hidden-node tuple
+`legacy-send-to-from-no-dscp` +
+`hist-2015-fine-one-based-table-no-avoid` +
+`hist-dd3f38e8-bare`, bound to executable SHA-256
+`dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0`.
+Hidden-node full-duration comparison is a separate gate; it is not silently
+folded into this multihop certificate.
 
 A second zero-tolerance comparison gates the source-comparable protocol queue
 surface over the 95 steady bucket ends from 360 through 6,000 seconds:
@@ -145,6 +156,12 @@ is a hard release failure. The analyzer summary, full leg CSV, and application
 diagnostics CSV are all path-, hash-, and row-count-bound. The diagnostics must
 contain exactly the six canonical flows, partition every attempt, and reproduce
 the summary totals with no reconciliation mismatch.
+
+Strict current evidence may contain zero duplicate lineages: all duplicate
+counts and the lineage list must then be empty. Historical source-proved
+lost-DACK compatibility is retained only for a nonempty, exactly partitioned,
+trace-bound lineage ledger. The classifier records which of these two modes was
+accepted and rejects mixed zero-count/nonempty-lineage summaries.
 
 Packet-path report schema `csr-packet-path-analysis-v2` is accepted only when
 the analyzer exits 0 in strict mode, every lifecycle row is valid, lifecycle

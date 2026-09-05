@@ -258,6 +258,13 @@ Historical OPNET aggregate comparison:
 3. See docs/opnet-aggregate-comparison.md for the canonical schema, exact
    source-level application packet sizing, measured historical mismatches,
    and the aggregate-versus-event evidence boundary.
+4. Historical executable provenance is tuple-bound: hidden-node uses
+   legacy-send-to-from-no-dscp + hist-2015-fine-one-based-table-no-avoid +
+   hist-dd3f38e8-bare (617-byte DATA/41-byte ACK), while multihop uses
+   legacy-send-only-no-dscp + hist-2014-next-tslot-modulo-probe +
+   hist-adb97c54-bare (217-byte DATA/41-byte ACK). The official release harness
+   remains multihop-only; run the hidden-node full-duration comparison as a
+   separate gate.
 
 ns-3 packet-path and NWK-residence diagnostic:
 1. Run csr-opnet-scenario-runner with --aggregateTraceOnly=1 and
@@ -281,7 +288,7 @@ Python utility regression suite:
   PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
     -s utils/tests -p 'test_*.py' -v
 
-Discovery at this revision reports 202 tests. That is the current observed
+Discovery at this revision reports 289 tests. That is the current observed
 inventory, not a permanent invariant: added coverage may legitimately increase
 it. Release evidence should record and validate the count discovered at the
 tested commit rather than carrying an older hard-coded total forward.

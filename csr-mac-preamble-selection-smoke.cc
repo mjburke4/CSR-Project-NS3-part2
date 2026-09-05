@@ -140,9 +140,35 @@ RunGroupedUnknownDestinationScenario ()
 
   Require (sender->GetMac ().GetTransmittedFrameCount () == 1,
            "grouped-destination scenario did not form one aggregate");
+  Require (sender->GetMac ().GetLongPreambleTxCount () == 0 &&
+             sender->GetMac ().GetShortPreambleTxCount () == 1,
+           "known destination after an unknown did not preserve the source "
+           "time0 reset quirk");
+  Simulator::Destroy ();
+}
+
+void
+RunFinalUnknownDestinationScenario ()
+{
+  Ptr<CsrNetDevice> sender = BuildSenderWithPeers ();
+  sender->GetMac ().NoteHeardFrom (2, 0.0);
+
+  // Equal DSCP retains FIFO order.  The scalar known receiver is visited
+  // first and the grouped frame ends on unknown node 3, leaving ngbr_ptr NIL
+  // at the source's final preamble branch.
+  sender->GetMac ().EnqueueTxFrame (
+    BuildFrame (2, 21, 7), 2, 7, false);
+  sender->GetMac ().EnqueueTxFrame (
+    BuildGroupedFrame ({{2, 22}, {3, 23}}), 2, 7, false);
+
+  Simulator::Stop (Seconds (2.0));
+  Simulator::Run ();
+
+  Require (sender->GetMac ().GetTransmittedFrameCount () == 1,
+           "final-unknown scenario did not form one aggregate");
   Require (sender->GetMac ().GetLongPreambleTxCount () == 1 &&
              sender->GetMac ().GetShortPreambleTxCount () == 0,
-           "unknown non-primary grouped destination did not select LONG");
+           "final unknown destination did not select LONG");
   Simulator::Destroy ();
 }
 
@@ -277,8 +303,9 @@ RunAckUnknownDestinationScenario ()
   Ptr<CsrNetDevice> sender = BuildSenderWithPeers ();
   sender->GetMac ().NoteHeardFrom (2, 0.0);
 
-  // OPNET packs ACKs first and includes their destinations when finding the
-  // earliest last_rcvd_time.  The ACK remains queued for five transmissions.
+  // OPNET packs ACKs first and includes their destinations in its mutable
+  // time0/ngbr_ptr walk.  The first mixed aggregate ends on known node 2 and
+  // is SHORT; the four ACK-only retries end on unknown node 3 and are LONG.
   sender->GetMac ().EnqueueTxFrame (
     BuildFrame (3, 60, 0, true), 3, 0, false);
   sender->GetMac ().EnqueueTxFrame (
@@ -289,9 +316,10 @@ RunAckUnknownDestinationScenario ()
 
   Require (sender->GetMac ().GetTransmittedFrameCount () == 5,
            "ACK scenario did not preserve OPNET's five transmissions");
-  Require (sender->GetMac ().GetLongPreambleTxCount () == 5 &&
-             sender->GetMac ().GetShortPreambleTxCount () == 0,
-           "unknown ACK destination was omitted from preamble selection");
+  Require (sender->GetMac ().GetLongPreambleTxCount () == 4 &&
+             sender->GetMac ().GetShortPreambleTxCount () == 1,
+           "ACK-first destination walk did not preserve the final-pointer "
+           "preamble quirk");
   Simulator::Destroy ();
 }
 
@@ -304,6 +332,7 @@ main ()
   CheckDestinationEnumerator ();
   RunSingleGroupedLegacyScenario ();
   RunGroupedUnknownDestinationScenario ();
+  RunFinalUnknownDestinationScenario ();
   RunStaleLaterSegmentScenario ();
   RunAllFreshScenario ();
   RunDutyCycleFreshDestinationScenario ();

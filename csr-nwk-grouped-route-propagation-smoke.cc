@@ -219,7 +219,8 @@ AddRoute (const Harness &harness,
           uint8_t hops,
           uint32_t linkCost,
           uint32_t advertisedCost,
-          const std::vector<CsrNodeId> &path)
+          const std::vector<CsrNodeId> &path,
+          bool receivedFromArlUpdate = false)
 {
   Require (harness.nwk->AddOrUpdateRoute (
              destination,
@@ -231,8 +232,18 @@ AddRoute (const Harness &harness,
              advertisedCost,
              nextHop,
              1,
-             path),
+             path,
+             receivedFromArlUpdate),
            "test route update was rejected");
+}
+
+void
+DrainSameTime ()
+{
+  Simulator::Schedule (NanoSeconds (1), [] {
+    Simulator::Stop ();
+  });
+  Simulator::Run ();
 }
 
 std::vector<uint8_t>
@@ -303,6 +314,10 @@ TestSameCycleGoldenGroupingAndSequenceGap ()
   Simulator::Schedule (NanoSeconds (100), [&harness] {
     AddRoute (harness, ROUTE_A, 9, 2, 40, 1, {9, ROUTE_A});
     AddRoute (harness, ROUTE_A, 9, 2, 50, 1, {9, ROUTE_A});
+    // routesParseRouting() may replace the selected candidate with a newer
+    // byte-identical record before routesProcess() runs.  That replacement
+    // must not clear the already-pending changed-destination cascade.
+    AddRoute (harness, ROUTE_A, 9, 2, 50, 1, {9, ROUTE_A});
     harness.nwk->SetNodeType (CsrNodeType::Ordinary);
   });
 
@@ -362,6 +377,40 @@ TestSameCycleGoldenGroupingAndSequenceGap ()
   Require (g_observations[2].bytes == expectedSecond &&
              g_observations[3].bytes == expectedSecond,
            "final-state dedup or mixed UPDATE/DELETE bytes are wrong");
+
+  Simulator::Destroy ();
+}
+
+void
+TestIdenticalSelectedArlReplacementCascade ()
+{
+  g_observations.clear ();
+  Harness harness = MakeHarness ();
+  AddRecipients (harness, {2});
+  AddRoute (harness, ROUTE_A, 2, 2, 10, 1, {2, ROUTE_A});
+  Simulator::Run ();
+  g_observations.clear ();
+
+  harness.nwk->SetAutomaticRoutePropagationEnabled (true);
+  AddRoute (harness,
+            ROUTE_A,
+            2,
+            2,
+            10,
+            1,
+            {2, ROUTE_A},
+            true);
+  DrainSameTime ();
+
+  Require (g_observations.size () == 1 &&
+             g_observations[0].targets == std::vector<CsrNodeId> ({2}),
+           "byte-identical selected ARL replacement lost its changed cascade");
+
+  std::vector<uint8_t> expected;
+  AppendSectionPrefix (expected, 0, 0, 1);
+  AppendUpdate (expected, ROUTE_A, 1, 2, 11, {2, ROUTE_A});
+  Require (g_observations[0].bytes == expected,
+           "identical ARL replacement emitted the wrong selected route");
 
   Simulator::Destroy ();
 }
@@ -664,6 +713,7 @@ main ()
   Time::SetResolution (Time::NS);
 
   TestSameCycleGoldenGroupingAndSequenceGap ();
+  TestIdenticalSelectedArlReplacementCascade ();
   TestSectionAndGroupCrossProduct ();
   TestNoRecipientConsumesChangeWithoutSequenceAdvance ();
   TestAuthenticatedDiscoverCreationOrder ();

@@ -116,22 +116,23 @@ MakeSectionEnvelope (CsrNodeId source,
 }
 
 std::vector<std::vector<uint8_t>>
-BuildSelfMessage (uint32_t sequence,
-                  uint8_t capability,
-                  bool deletion)
+BuildSelfMessageFor (CsrNodeId source,
+                     uint32_t sequence,
+                     uint8_t capability,
+                     bool deletion)
 {
   CsrArlRoutingMessage::Builder builder;
   std::string error;
 
   if (deletion)
     {
-      Require (builder.AddDelete (REPORTER_NODE, &error),
+      Require (builder.AddDelete (source, &error),
                "failed to encode self DELETE");
     }
   else
     {
       Require (builder.AddUpdate (
-                 REPORTER_NODE,
+                 source,
                  capability,
                  0,
                  0,
@@ -144,6 +145,18 @@ BuildSelfMessage (uint32_t sequence,
   Require (builder.BuildSections (sequence, sections, &error),
            "failed to section self capability message");
   return sections;
+}
+
+std::vector<std::vector<uint8_t>>
+BuildSelfMessage (uint32_t sequence,
+                  uint8_t capability,
+                  bool deletion)
+{
+  return BuildSelfMessageFor (
+    REPORTER_NODE,
+    sequence,
+    capability,
+    deletion);
 }
 
 std::vector<std::vector<uint8_t>>
@@ -162,21 +175,35 @@ BuildOrdinarySnapshot (uint32_t sequence)
 }
 
 void
-DeliverSections (Ptr<CsrNetLayer> receiver,
-                 CsrNodeType outerNodeType,
-                 const std::vector<std::vector<uint8_t>> &sections)
+DeliverSectionsFrom (
+  Ptr<CsrNetLayer> receiver,
+  CsrNodeId source,
+  CsrNodeType outerNodeType,
+  const std::vector<std::vector<uint8_t>> &sections)
 {
   for (const auto &section : sections)
     {
       receiver->ProcessHello (
         MakeSectionEnvelope (
-          REPORTER_NODE,
+          source,
           outerNodeType,
           section),
-        REPORTER_NODE,
+        source,
         70.0,
         20.0);
     }
+}
+
+void
+DeliverSections (Ptr<CsrNetLayer> receiver,
+                 CsrNodeType outerNodeType,
+                 const std::vector<std::vector<uint8_t>> &sections)
+{
+  DeliverSectionsFrom (
+    receiver,
+    REPORTER_NODE,
+    outerNodeType,
+    sections);
 }
 
 std::vector<uint8_t>
@@ -376,6 +403,155 @@ CheckLocalSnapshot (CsrNodeType nodeType,
 }
 
 void
+CheckOrdinaryLearnedRouteSnapshot ()
+{
+  constexpr CsrNodeId learnedDestination = 0x040506;
+
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  nwk->SetNodeId (LOCAL_NODE);
+  nwk->SetNodeType (CsrNodeType::Ordinary);
+  nwk->SetArlNeighborAdmissionEnabled (false);
+  nwk->SetAutomaticRoutePropagationEnabled (false);
+  nwk->ProcessHello (
+    MakePlainHello (REPORTER_NODE, CsrNodeType::Routable),
+    REPORTER_NODE,
+    70.0,
+    20.0);
+  Require (nwk->AddOrUpdateRoute (
+             learnedDestination,
+             REPORTER_NODE,
+             false,
+             2,
+             70.0,
+             10,
+             7,
+             REPORTER_NODE,
+             static_cast<uint8_t> (CsrNodeType::Routable),
+             {REPORTER_NODE, learnedDestination}),
+           "ordinary-node learned route setup failed");
+
+  Simulator::Run ();
+  std::vector<uint8_t> stream = ExtractRecordStream (
+    nwk->BuildArlRoutingSnapshotPayloadsForTest (0x22334455));
+  std::vector<CsrArlRoutingMessage::Record> records;
+  std::string error;
+  Require (CsrArlRoutingMessage::ParseRecordStream (
+             stream,
+             records,
+             &error),
+           "ordinary learned-route snapshot did not parse");
+  Require (records.size () == 3 &&
+             records[0].operation == CsrRoutingOperation::Info &&
+             records[1].operation == CsrRoutingOperation::Update &&
+             records[1].nodeId == learnedDestination &&
+             records[1].hopCount == 2 &&
+             records[1].cost == 17 &&
+             records[2].operation == CsrRoutingOperation::Flush,
+           "ordinary full snapshot suppressed its learned capable route");
+
+  Simulator::Destroy ();
+}
+
+void
+CheckOrdinaryCompatibilityTransitAdvertisement ()
+{
+  constexpr CsrNodeId learnedDestination = 0x050607;
+
+  Ptr<CsrNetLayer> receiver = CreateObject<CsrNetLayer> ();
+  receiver->SetNodeId (RECEIVER_NODE);
+  receiver->SetArlNeighborAdmissionEnabled (false);
+
+  CsrHelloHeader update;
+  update.SetNodeId (REPORTER_NODE);
+  update.SetHelloSeq (7);
+  update.SetNodeType (CsrNodeType::Ordinary);
+  update.SetSpeedKey (8);
+  update.SetRxPowerDbmX10 (-1050);
+  update.SetActiveNodes (1);
+  update.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
+  update.SetRoutingSequence (20);
+  Require (update.AddAdvertisedRoute (
+             learnedDestination,
+             1,
+             9,
+             0,
+             static_cast<uint8_t> (CsrNodeType::Routable),
+             {learnedDestination}),
+           "ordinary compatibility UPDATE setup failed");
+
+  Ptr<Packet> packet = Create<Packet> ();
+  packet->AddHeader (update);
+  receiver->ProcessHello (
+    packet,
+    REPORTER_NODE,
+    70.0,
+    20.0);
+
+  uint32_t routeCost = 0;
+  Require (receiver->GetSelectedRouteCost (
+             learnedDestination,
+             routeCost) &&
+             routeCost > 9,
+           "receiver rejected a learned route solely because sender was Ordinary");
+
+  Simulator::Destroy ();
+}
+
+void
+CheckHelloIdentityAndInactiveSelfMaterialization ()
+{
+  constexpr CsrNodeId olderReporter = 0x000102;
+  constexpr CsrNodeId newerReporter = 0x000103;
+  constexpr CsrNodeId wrongOuter = 0x000104;
+
+  Ptr<CsrNetLayer> receiver = CreateObject<CsrNetLayer> ();
+  receiver->SetNodeId (RECEIVER_NODE);
+
+  receiver->ProcessHello (
+    MakePlainHello (olderReporter, CsrNodeType::Gateway),
+    wrongOuter,
+    70.0,
+    20.0);
+  uint32_t ignoredCost = 0;
+  CsrNodeId ignoredGateway = CSR_BROADCAST_ID;
+  Require (!receiver->GetSelectedRouteCost (olderReporter, ignoredCost) &&
+             !receiver->FindApplicationGateway (ignoredGateway),
+           "mismatched inner HELLO identity changed NWK state");
+
+  receiver->ProcessHello (
+    MakePlainHello (olderReporter, CsrNodeType::Routable, 2),
+    olderReporter,
+    70.0,
+    20.0);
+  DeliverSectionsFrom (
+    receiver,
+    olderReporter,
+    CsrNodeType::Routable,
+    BuildSelfMessageFor (olderReporter, 10, 1, false));
+
+  receiver->ProcessHello (
+    MakePlainHello (newerReporter, CsrNodeType::Routable, 3),
+    newerReporter,
+    70.0,
+    20.0);
+  DeliverSectionsFrom (
+    receiver,
+    newerReporter,
+    CsrNodeType::Routable,
+    BuildSelfMessageFor (newerReporter, 11, 1, false));
+
+  // Both peers are still admission-inactive.  Disabling the gate makes the
+  // already-materialized direct routes visible without creating destinations
+  // at this later point.
+  receiver->SetArlNeighborAdmissionEnabled (false);
+  Require (receiver->GetKnownDiscoveryNodes () ==
+             std::vector<CsrNodeId> ({newerReporter, olderReporter}),
+           "inactive self UPDATEs did not materialize destinations newest-first");
+
+  Simulator::Destroy ();
+}
+
+void
 RunReceiverCapabilityScenario ()
 {
   Ptr<CsrNetLayer> receiver = CreateObject<CsrNetLayer> ();
@@ -566,6 +742,9 @@ main ()
   CheckLocalSnapshot (CsrNodeType::Ordinary, false);
   CheckLocalSnapshot (CsrNodeType::Routable, true);
   CheckLocalSnapshot (CsrNodeType::Gateway, true);
+  CheckOrdinaryLearnedRouteSnapshot ();
+  CheckOrdinaryCompatibilityTransitAdvertisement ();
+  CheckHelloIdentityAndInactiveSelfMaterialization ();
   RunReceiverCapabilityScenario ();
 
   std::cout << "PASS: source-owned self-route capability parity test"

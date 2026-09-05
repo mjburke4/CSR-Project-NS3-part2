@@ -74,8 +74,20 @@ python3 utils/instrument-opnet-reservation-trace.py \
 
 The output contains instrumented `br_app.pr.c`, `br_mac.pr.c`, `br_ecc.ps.c`,
 `csr-opnet-trace.h`, and `opnet-instrumentation-manifest.json`. The manifest
-records the exact original and generated hashes and describes the behavioral
-control.
+records the exact original and generated hashes, the generator identity, and
+the behavioral control. It also binds the recovered `br_support.h` and
+`br_txdel.ps.c` used for the independent airtime contract. Keep all four
+generated files beside the manifest: the validator recomputes their hashes,
+the generated header, the header-template identity, and the generator identity
+before accepting a trace. Every emitted `tx_start` also records `preamble=long` or
+`preamble=short` in its `detail` field. `preamble=unknown` is an instrumentation
+alarm and the validator rejects it.
+
+The instrumenter rejects an output directory that is the source directory, an
+ancestor or descendant of it, or a filesystem alias of it. `--overwrite`
+allows replacement of existing bundle files only; it never permits an output
+to alias a recovered input, the header template, or another managed output. A
+lone existing manifest also requires `--overwrite`.
 
 Install the three generated C sources and header in the Modeler project and
 rebuild those process/pipeline models with the normal local source-build
@@ -108,9 +120,38 @@ set CSR_OPNET_TRACE=C:\csr-reference\opnet-reservation-collision.csv
 
 The validator requires an ordered lifecycle for each sender: controlled
 prepare, a ready holdoff gate or a 300-ms wait, counters 4 through -1,
-reservation advertisement, and transmit. It also requires simultaneous
-transmissions and a positive collision/drop outcome at gateway 1 for both
-signals.
+reservation advertisement, and transmit. These relevant events must be
+contiguous, with exactly one controlled prepare in the comparison window.
+Every prepare/holdoff/advertise/transmit slot and counter is bound to the forced
+slot. The first tick must match the generated 100-ms control epoch, subsequent
+ticks must be 13 ms apart, and advertisement and transmit must coincide with
+the `-1` tick within 1 microsecond. It also requires simultaneous
+transmissions. Each transmit must name gateway 1 as its peer, have a positive
+payload size, name a long or short preamble, and use one of the source-exact
+rates: 8, 16, 32, 64, or 128 kbps. The separate 500- and 1000-kbps extension
+smokes are deliberately outside this source-exact validator and are rejected
+here. Transmit source, destination, and sequence are also required and checked;
+the gateway outcome must repeat the transmitting source identity.
+
+The expected receive-completion time is derived independently from recovered
+`br_txdel` arithmetic. The preamble plus the 48-bit SOF/speed/length header use
+the S0 nibble duration, while the payload plus 32-bit FCS use the selected
+rate's nibble duration:
+
+```text
+airtime = ((preamble_bits + 48) / 4) * 0.000510
+        + ((payload_bytes * 8 + 32) / 4) * selected_nibble_duration
+```
+
+Long and short preambles are 7888 and 104 bits. The exact S0 through S4 nibble
+durations for 8, 16, 32, 64, and 128 kbps are 0.000510, 0.000254, 0.000126,
+0.000062, and 0.000030 seconds respectively.
+
+For each sender, exactly one gateway outcome must match the peer, rate, and
+payload size and occur within 1 ms of that derived completion. That same row
+must be an `rx_drop` with `success=0` and a positive `collisions` count.
+Consequently, a later unrelated collision, duplicate outcomes, or an accept
+row combined with a separate drop row cannot satisfy the case.
 
 ```bash
 python3 utils/validate-opnet-reservation-collision.py \
@@ -121,12 +162,16 @@ python3 utils/validate-opnet-reservation-collision.py \
   --slot 5 \
   --time-start 59.8 \
   --time-stop 61.3 \
+  --slot-tolerance 0.000001 \
+  --completion-tolerance 0.001 \
   --report opnet-reservation-collision-validation.json
 ```
 
 Do not use a failed export as the differential reference. A failure usually
 identifies a source-build problem, application attribute mismatch, missing
-route convergence, or control activation at the wrong time.
+route convergence, control activation at the wrong time, or a provenance
+mismatch. The report path must be distinct from the trace and manifest; direct,
+symbolic-link, and hard-link aliases are rejected before any report write.
 
 ## Run the differential harness
 
@@ -169,6 +214,13 @@ and ns-3 do not share a random-number implementation. They remain in both raw
 traces for distribution-level calibration. The lifecycle, slot/counter values,
 transmit/receive identities, collision counts, rate, and mutually observed PHY
 quantities remain comparison evidence.
+
+The provenance checks are deliberately strong but not a signature. The
+reference-only `br_support.h` and `br_txdel.ps.c` records prove what the
+instrumenter inspected, not which objects a licensed Modeler installation
+ultimately linked, and the manifest is not cryptographically embedded in the
+CSV. Preserve Modeler build logs and binary identities with the authoritative
+run if that stronger chain of custody is required.
 
 ## Local checkpoint
 

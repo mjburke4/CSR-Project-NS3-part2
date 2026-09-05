@@ -7,12 +7,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -54,8 +56,12 @@ constexpr const char *HIST_MODULO_PROBE_MAC_PROFILE =
   "hist-2014-next-tslot-modulo-probe";
 constexpr const char *PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE =
   "production-pairwise16";
+constexpr const char *HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE =
+  "hist-dd3f38e8-bare";
 constexpr const char *HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE =
   "hist-adb97c54-bare";
+constexpr const char *HIST_DD3F38E8_EXECUTABLE_SHA256 =
+  "dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0";
 constexpr const char *HIST_ADB97C54_EXECUTABLE_SHA256 =
   "adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af";
 
@@ -123,6 +129,7 @@ struct ImportedScenario
   std::string macProfile {"unspecified"};
   std::string hopSecurityProfile {"unspecified"};
   std::string ackEnvelopeProfile {"unspecified"};
+  std::string sourceSha256;
   std::string sourceExecutableSha256;
   std::string effectiveHopSecurityProfile {
     PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE};
@@ -226,6 +233,69 @@ GetField (const std::map<std::string, std::string> &row,
   return iterator == row.end () ? std::string () : iterator->second;
 }
 
+bool
+IsLowercaseSha256 (const std::string &value)
+{
+  return value.size () == 64 &&
+    std::all_of (value.begin (), value.end (), [] (char character) {
+      return (character >= '0' && character <= '9') ||
+             (character >= 'a' && character <= 'f');
+    });
+}
+
+std::filesystem::path
+NormalizedPath (const std::string &value)
+{
+  std::error_code error;
+  const std::filesystem::path normalized =
+    std::filesystem::weakly_canonical (std::filesystem::path (value), error);
+  NS_ABORT_MSG_IF (error, "cannot resolve path " << value << ": "
+                                                  << error.message ());
+  return normalized;
+}
+
+bool
+PathsAlias (const std::string &first, const std::string &second)
+{
+  if (NormalizedPath (first) == NormalizedPath (second))
+    {
+      return true;
+    }
+  std::error_code firstError;
+  std::error_code secondError;
+  const bool firstExists = std::filesystem::exists (first, firstError);
+  const bool secondExists = std::filesystem::exists (second, secondError);
+  NS_ABORT_MSG_IF (firstError || secondError,
+                   "cannot inspect runner input/output paths");
+  if (!firstExists || !secondExists)
+    {
+      return false;
+    }
+  std::error_code equivalentError;
+  const bool equivalent =
+    std::filesystem::equivalent (first, second, equivalentError);
+  NS_ABORT_MSG_IF (equivalentError,
+                   "cannot compare runner input/output paths: "
+                     << equivalentError.message ());
+  return equivalent;
+}
+
+void
+ValidateRunnerPaths (const std::string &scenario,
+                     const std::string &trace,
+                     const std::string &applicationDiagnostics)
+{
+  NS_ABORT_MSG_IF (PathsAlias (scenario, trace),
+                   "--trace must not alias --scenario");
+  if (!applicationDiagnostics.empty ())
+    {
+      NS_ABORT_MSG_IF (PathsAlias (scenario, applicationDiagnostics),
+                       "--appDiagnostics must not alias --scenario");
+      NS_ABORT_MSG_IF (PathsAlias (trace, applicationDiagnostics),
+                       "--trace and --appDiagnostics must be distinct");
+    }
+}
+
 ImportedScenario
 LoadScenario (const std::string &path)
 {
@@ -235,10 +305,14 @@ LoadScenario (const std::string &path)
   NS_ABORT_MSG_IF (!std::getline (stream, line), "scenario CSV is empty");
   std::vector<std::string> headers = ParseCsvLine (line);
   NS_ABORT_MSG_IF (headers.empty (), "scenario CSV has no columns");
+  NS_ABORT_MSG_IF (std::set<std::string> (headers.begin (), headers.end ()).size ()
+                     != headers.size (),
+                   "scenario CSV has duplicate columns");
 
   ImportedScenario scenario;
   bool sawRun = false;
   std::map<CsrNodeId, bool> nodeIds;
+  std::set<std::string> nodeNames;
   uint32_t lineNumber = 1;
   while (std::getline (stream, line))
     {
@@ -287,6 +361,7 @@ LoadScenario (const std::string &path)
             }
           scenario.sourceExecutableSha256 =
             GetField (row, "source_executable_sha256");
+          scenario.sourceSha256 = GetField (row, "source_sha256");
           scenario.durationSeconds = ParseDouble (row, "duration_s");
           const uint64_t seed = ParseUnsigned (row, "seed");
           NS_ABORT_MSG_IF (
@@ -304,8 +379,9 @@ LoadScenario (const std::string &path)
         {
           ImportedNode node;
           uint64_t nodeId = ParseUnsigned (row, "node_id");
-          NS_ABORT_MSG_IF (nodeId > CSR_NODE_ID_MAX,
-                           "scenario node ID exceeds 24 bits");
+          NS_ABORT_MSG_IF (
+            nodeId >= CSR_BROADCAST_ID,
+            "scenario node ID is outside the concrete 24-bit range");
           node.id = static_cast<CsrNodeId> (nodeId);
           NS_ABORT_MSG_IF (nodeIds.find (node.id) != nodeIds.end (),
                            "scenario contains duplicate node ID " << node.id);
@@ -320,6 +396,9 @@ LoadScenario (const std::string &path)
             }
           node.name = GetField (row, "name");
           node.type = GetField (row, "node_type");
+          NS_ABORT_MSG_IF (node.name.empty (), "scenario node name is empty");
+          NS_ABORT_MSG_IF (!nodeNames.insert (node.name).second,
+                           "scenario contains duplicate node name " << node.name);
           node.xMeters = ParseDouble (row, "x_m");
           node.yMeters = ParseDouble (row, "y_m");
           node.heightMeters = ParseDouble (row, "height_m");
@@ -351,9 +430,9 @@ LoadScenario (const std::string &path)
           ImportedFlow flow;
           uint64_t source = ParseUnsigned (row, "flow_src");
           uint64_t destination = ParseUnsigned (row, "flow_dst");
-          NS_ABORT_MSG_IF (source > CSR_NODE_ID_MAX ||
-                           destination > CSR_NODE_ID_MAX,
-                           "scenario flow endpoint exceeds 24 bits");
+          NS_ABORT_MSG_IF (
+            source >= CSR_BROADCAST_ID || destination >= CSR_BROADCAST_ID,
+            "scenario flow endpoint is outside the concrete 24-bit range");
           flow.source = static_cast<CsrNodeId> (source);
           flow.destination = static_cast<CsrNodeId> (destination);
           flow.startSeconds = ParseDouble (row, "flow_start_s");
@@ -392,7 +471,9 @@ LoadScenario (const std::string &path)
               flow.source != flow.destination,
             "random_route_or_neighbor flow must use its source as the "
               "placeholder flow_dst");
-          NS_ABORT_MSG_IF (flow.startSeconds < 0.0 ||
+          NS_ABORT_MSG_IF (!std::isfinite (flow.startSeconds) ||
+                           !std::isfinite (flow.intervalSeconds) ||
+                           flow.startSeconds < 0.0 ||
                            flow.intervalSeconds <= 0.0,
                            "scenario flow contains an invalid value");
           scenario.flows.push_back (flow);
@@ -405,6 +486,7 @@ LoadScenario (const std::string &path)
     }
 
   NS_ABORT_MSG_IF (!sawRun, "scenario CSV has no run row");
+  NS_ABORT_MSG_IF (scenario.name.empty (), "scenario run row has no name");
   NS_ABORT_MSG_IF (scenario.durationSeconds <= 0.0,
                    "scenario duration must be positive");
   NS_ABORT_MSG_IF (scenario.reservationControlStartSeconds < 0.0 ||
@@ -441,12 +523,16 @@ LoadScenario (const std::string &path)
       scenario.hopSecurityProfile !=
         PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE &&
       scenario.hopSecurityProfile !=
+        HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE &&
+      scenario.hopSecurityProfile !=
         HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE,
     "scenario run row has an unsupported hop_security_profile");
   NS_ABORT_MSG_IF (
     scenario.ackEnvelopeProfile != "unspecified" &&
       scenario.ackEnvelopeProfile !=
         PRODUCTION_PAIRWISE16_HOP_SECURITY_PROFILE &&
+      scenario.ackEnvelopeProfile !=
+        HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE &&
       scenario.ackEnvelopeProfile !=
         HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE,
     "scenario run row has an unsupported ack_envelope_profile");
@@ -467,10 +553,29 @@ LoadScenario (const std::string &path)
       scenario.hopSecurityProfileOrigin = "legacy_ack_alias";
     }
 
+  const bool selectedHistoricalSourceProfile =
+    scenario.effectiveHopSecurityProfile ==
+      HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE ||
+    scenario.effectiveHopSecurityProfile ==
+      HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE;
+  NS_ABORT_MSG_IF (
+    selectedHistoricalSourceProfile &&
+      !IsLowercaseSha256 (scenario.sourceSha256),
+    "a historical source-backed profile requires source_sha256 to be a "
+    "lowercase SHA-256 digest");
+
   NS_ABORT_MSG_IF (
     !scenario.sourceExecutableSha256.empty () &&
+      scenario.sourceExecutableSha256 != HIST_DD3F38E8_EXECUTABLE_SHA256 &&
       scenario.sourceExecutableSha256 != HIST_ADB97C54_EXECUTABLE_SHA256,
-    "scenario source_executable_sha256 is not the adb97 executable digest");
+    "scenario source_executable_sha256 is not a supported historical "
+    "executable digest");
+  NS_ABORT_MSG_IF (
+    scenario.effectiveHopSecurityProfile ==
+        HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE &&
+      scenario.sourceExecutableSha256 != HIST_DD3F38E8_EXECUTABLE_SHA256,
+    "effective hist-dd3f38e8-bare requires its full "
+    "source_executable_sha256");
   NS_ABORT_MSG_IF (
     scenario.effectiveHopSecurityProfile ==
         HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE &&
@@ -495,6 +600,19 @@ LoadScenario (const std::string &path)
       << HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE
       << ", application_profile=" << LEGACY_SEND_ONLY_PROFILE
       << ", and mac_profile=" << HIST_MODULO_PROBE_MAC_PROFILE
+      << " together");
+  const bool selectedDd3f38e8Profile =
+    scenario.effectiveHopSecurityProfile ==
+      HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE;
+  const bool selectedDd3f38e8ApplicationAndMac =
+    scenario.applicationProfile == LEGACY_SEND_TO_FROM_PROFILE &&
+    scenario.macProfile == HIST_FINE_NO_AVOID_MAC_PROFILE;
+  NS_ABORT_MSG_IF (
+    selectedDd3f38e8Profile != selectedDd3f38e8ApplicationAndMac,
+    "the dd3f38e8 executable tuple must select hop_security_profile="
+      << HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE
+      << ", application_profile=" << LEGACY_SEND_TO_FROM_PROFILE
+      << ", and mac_profile=" << HIST_FINE_NO_AVOID_MAC_PROFILE
       << " together");
   if (scenario.applicationProfile == LEGACY_SEND_ONLY_PROFILE ||
       scenario.applicationProfile == LEGACY_SEND_TO_FROM_PROFILE)
@@ -598,7 +716,8 @@ ParseHopSecurityProfile (const std::string &profile)
     {
       return CsrHopWireProfile::PRODUCTION_PAIRWISE16;
     }
-  if (profile == HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE)
+  if (profile == HIST_ADB97C54_BARE_HOP_SECURITY_PROFILE ||
+      profile == HIST_DD3F38E8_BARE_HOP_SECURITY_PROFILE)
     {
       return CsrHopWireProfile::HIST_ADB97C54_BARE;
     }
@@ -980,6 +1099,7 @@ main (int argc, char *argv[])
   command.Parse (argc, argv);
 
   NS_ABORT_MSG_IF (scenarioPath.empty (), "--scenario is required");
+  ValidateRunnerPaths (scenarioPath, tracePath, appDiagnosticsPath);
   ImportedScenario scenario = LoadScenario (scenarioPath);
   NS_ABORT_MSG_IF (scenario.tmm,
                    "imported TMM terrain scenarios are not supported yet");

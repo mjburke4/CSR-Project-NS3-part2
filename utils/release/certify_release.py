@@ -150,9 +150,25 @@ PACKET_PATH_V2_QUEUE_DELAY_ADJACENCY = (
     "immediately preceding CSV row, consecutive event index, same node and timestamp"
 )
 HISTORICAL_HOP_SECURITY_PROFILE = "hist-adb97c54-bare"
+HIDDEN_HISTORICAL_HOP_SECURITY_PROFILE = "hist-dd3f38e8-bare"
+HIDDEN_HISTORICAL_EXECUTABLE_SHA256 = (
+    "dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0"
+)
 HISTORICAL_HOP_SECURITY_BEHAVIOR = {
     "ordinary_data": "bare",
     "ack_dack": "bare",
+}
+HISTORICAL_HOP_SECURITY_BINDINGS = {
+    HISTORICAL_HOP_SECURITY_PROFILE: {
+        "application_profile": "legacy-send-only-no-dscp",
+        "mac_profile": "hist-2014-next-tslot-modulo-probe",
+        "source_executable_sha256": EXTERNAL_INPUTS["multihop_executable"][1],
+    },
+    HIDDEN_HISTORICAL_HOP_SECURITY_PROFILE: {
+        "application_profile": "legacy-send-to-from-no-dscp",
+        "mac_profile": "hist-2015-fine-one-based-table-no-avoid",
+        "source_executable_sha256": HIDDEN_HISTORICAL_EXECUTABLE_SHA256,
+    },
 }
 CANONICAL_APPLICATION_AGGREGATE_STATISTICS = (
     "Generator.Traffic Sent (packets/sec)",
@@ -757,10 +773,16 @@ def validate_historical_security_provenance(
 ) -> None:
     """Require the archived executable's joint DATA and ACK/DACK projection."""
 
+    matches = [
+        (profile, binding)
+        for profile, binding in HISTORICAL_HOP_SECURITY_BINDINGS.items()
+        if binding["source_executable_sha256"] == archived_executable_digest
+    ]
     require(
-        archived_executable_digest == EXTERNAL_INPUTS["multihop_executable"][1],
-        "archived executable digest is not the canonical adb97 evidence",
+        len(matches) == 1,
+        "archived executable digest is not uniquely bound historical evidence",
     )
+    profile, binding = matches[0]
     for label, record in (
         ("canonical_scenario", canonical_identity),
         ("runner", runner_configuration),
@@ -769,11 +791,11 @@ def validate_historical_security_provenance(
         require(
             isinstance(record, dict)
             and record.get("application_profile")
-            == "legacy-send-only-no-dscp"
+            == binding["application_profile"]
             and record.get("mac_profile")
-            == "hist-2014-next-tslot-modulo-probe"
+            == binding["mac_profile"]
             and record.get("hop_security_profile")
-            == HISTORICAL_HOP_SECURITY_PROFILE
+            == profile
             and record.get("hop_security_profile_origin") == "explicit"
             and record.get("hop_security_behavior")
             == HISTORICAL_HOP_SECURITY_BEHAVIOR
@@ -795,11 +817,14 @@ def validate_effective_hop_security_source_binding(record: dict[str, Any]) -> No
         origin in {"explicit", "legacy_ack_alias", "missing"},
         "HOP security profile origin is unsupported",
     )
-    if profile == HISTORICAL_HOP_SECURITY_PROFILE:
+    if profile in HISTORICAL_HOP_SECURITY_BINDINGS:
+        expected_digest = HISTORICAL_HOP_SECURITY_BINDINGS[profile][
+            "source_executable_sha256"
+        ]
         require(
             origin in {"explicit", "legacy_ack_alias"}
-            and source_digest == EXTERNAL_INPUTS["multihop_executable"][1],
-            "effective historical HOP profile lacks exact adb97 executable binding",
+            and source_digest == expected_digest,
+            "effective historical HOP profile lacks exact executable binding",
         )
         return
     require(
@@ -992,6 +1017,38 @@ def release_status_from_aggregate_codes(exit_codes: Sequence[int]) -> str:
         if all(code == 0 for code in codes)
         else "passed_with_scoped_exemptions_and_observed_aggregate_residual"
     )
+
+
+def classify_duplicate_lineage_summary(duplicate: Any) -> str:
+    """Accept strict zero-duplicate evidence and the bounded legacy ledger."""
+
+    require(isinstance(duplicate, dict), "malformed DACK duplicate-proof summary")
+    proof_count = duplicate.get("repeated_feedback_proof_count")
+    matched_count = duplicate.get("matched_duplicate_delivery_count")
+    unused_count = duplicate.get("unused_proof_count")
+    lineages = duplicate.get("lineages")
+    require(
+        isinstance(proof_count, int)
+        and not isinstance(proof_count, bool)
+        and proof_count >= 0
+        and isinstance(matched_count, int)
+        and not isinstance(matched_count, bool)
+        and matched_count >= 0
+        and isinstance(unused_count, int)
+        and not isinstance(unused_count, bool)
+        and unused_count >= 0
+        and proof_count == matched_count + unused_count
+        and isinstance(lineages, list),
+        "malformed DACK duplicate-proof summary",
+    )
+    if proof_count == 0:
+        require(
+            matched_count == 0 and unused_count == 0 and lineages == [],
+            "zero-duplicate proof summary contains historical lineage records",
+        )
+        return "strict_zero_duplicate_lineage"
+    require(lineages, "historical duplicate-proof summary omits lineage records")
+    return "historical_source_proved_duplicate_compatibility"
 
 
 class Certification:
@@ -4315,24 +4372,11 @@ class Certification:
         provenance_digest = evidence_digests["aggregate_provenance"]
         provenance = json_load(provenance_path)
         duplicate = provenance.get("source_exact_dack_retry_duplicates") or {}
+        duplicate_classification = classify_duplicate_lineage_summary(duplicate)
         proof_count = duplicate.get("repeated_feedback_proof_count")
         matched_duplicate_count = duplicate.get("matched_duplicate_delivery_count")
         unused_proof_count = duplicate.get("unused_proof_count")
         lineages = duplicate.get("lineages")
-        require(
-            isinstance(proof_count, int)
-            and not isinstance(proof_count, bool)
-            and proof_count >= 0
-            and isinstance(matched_duplicate_count, int)
-            and not isinstance(matched_duplicate_count, bool)
-            and matched_duplicate_count >= 0
-            and isinstance(unused_proof_count, int)
-            and not isinstance(unused_proof_count, bool)
-            and unused_proof_count >= 0
-            and proof_count == matched_duplicate_count + unused_proof_count
-            and isinstance(lineages, list),
-            "malformed DACK duplicate-proof summary",
-        )
         budgets: dict[PacketKey, int] = {}
         lineage_records: dict[PacketKey, dict[str, Any]] = {}
         lineage_identities: set[LineageIdentity] = set()
@@ -4898,6 +4942,7 @@ class Certification:
         return {
             "classified_evidence_sha256": evidence_digests,
             "source_exact_duplicate_provenance": {
+                "classification": duplicate_classification,
                 "matched_duplicate_delivery_count": matched_duplicate_count,
                 "repeated_feedback_proof_count": proof_count,
                 "unused_proof_count": unused_proof_count,

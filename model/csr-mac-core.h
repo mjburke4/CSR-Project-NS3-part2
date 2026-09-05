@@ -292,6 +292,45 @@ class CsrMacCore
 
   void SetActiveNodesForPostTx (uint32_t n);
 
+  /**
+   * Apply the slot-range reduction published by the legacy supervisor.
+   *
+   * br_supervisor publishes twice the configured application DSCP value and
+   * br_mac subtracts that value only when the resulting range remains above
+   * one.  Keeping the already-multiplied value here mirrors the process-model
+   * interface and also permits a source-exact zero for pre-DSCP projects.
+   *
+   * @param reduction Already-multiplied supervisor slot reduction.
+   */
+  void SetSupervisorSlotReduction (int32_t reduction)
+  {
+    m_supervisorSlotReduction = reduction;
+  }
+
+  /**
+   * Return the configured supervisor slot reduction.
+   *
+   * @return Already-multiplied supervisor slot reduction.
+   */
+  int32_t GetSupervisorSlotReduction () const
+  {
+    return m_supervisorSlotReduction;
+  }
+
+  /**
+   * Return the DSCP metadata selected for the most recent OTA aggregate.
+   *
+   * The compatibility runtime does not instantiate an outer br_OTA packet,
+   * so this is an observable diagnostic mirror of that source field.  DATA
+   * members contribute to it; ACK members do not.
+   *
+   * @return Maximum DATA DSCP in the most recently transmitted aggregate.
+   */
+  uint8_t GetLastAggregateDscp () const
+  {
+    return m_lastAggregateDscp;
+  }
+
   // SendHelloInternal moved after CsrNetDevice definition (see below)
 
   // Discovery window (OPNET-style)
@@ -329,6 +368,7 @@ class CsrMacCore
   int
   GetOpnetSlotRange (uint32_t activeNodesForSlotting) const
   {
+    int slotRange = 255;
     if (m_slotSelectionProfile ==
           SlotSelectionProfile::HIST_2014_COARSE_INCLUSIVE_NO_AVOID ||
         m_slotSelectionProfile ==
@@ -338,40 +378,51 @@ class CsrMacCore
       {
         if (activeNodesForSlotting <= 4)
           {
-            return 31;
+            slotRange = 31;
           }
-        if (activeNodesForSlotting <= 8)
+        else if (activeNodesForSlotting <= 8)
           {
-            return 63;
+            slotRange = 63;
           }
-        if (activeNodesForSlotting <= 12)
+        else if (activeNodesForSlotting <= 12)
           {
-            return 127;
+            slotRange = 127;
           }
-        return 255;
+      }
+    else
+      {
+        switch (activeNodesForSlotting)
+          {
+          case 0:  slotRange = 15; break;
+          case 1:  slotRange = 18; break;
+          case 2:  slotRange = 21; break;
+          case 3:  slotRange = 25; break;
+          case 4:  slotRange = 31; break;
+          case 5:  slotRange = 37; break;
+          case 6:  slotRange = 44; break;
+          case 7:  slotRange = 52; break;
+          case 8:  slotRange = 63; break;
+          case 9:  slotRange = 75; break;
+          case 10: slotRange = 89; break;
+          case 11: slotRange = 106; break;
+          case 12: slotRange = 127; break;
+          case 13: slotRange = 151; break;
+          case 14: slotRange = 180; break;
+          case 15: slotRange = 214; break;
+          case 16: slotRange = 255; break;
+          default: slotRange = 255; break;
+          }
       }
 
-    switch (activeNodesForSlotting)
+    // br_mac applies this after its selected slot range.  The strict > 1
+    // guard is part of the supplied source: reductions that would leave zero
+    // or one do nothing rather than clamping the range.
+    if (m_supervisorSlotReduction > 0 &&
+        slotRange - m_supervisorSlotReduction > 1)
       {
-      case 0:  return 15;
-      case 1:  return 18;
-      case 2:  return 21;
-      case 3:  return 25;
-      case 4:  return 31;
-      case 5:  return 37;
-      case 6:  return 44;
-      case 7:  return 52;
-      case 8:  return 63;
-      case 9:  return 75;
-      case 10: return 89;
-      case 11: return 106;
-      case 12: return 127;
-      case 13: return 151;
-      case 14: return 180;
-      case 15: return 214;
-      case 16: return 255;
-      default: return 255;
+        slotRange -= m_supervisorSlotReduction;
       }
+    return slotRange;
   }
 
   void SetRxCallback (Callback<void, Ptr<Packet>, double, double> cb)
@@ -617,7 +668,7 @@ private:
   {
     Ptr<Packet> frame;
     CsrNodeId    dest;
-    uint8_t     dscp;
+    uint8_t     dscp; ///< DSCP copied from the selected DATA queue entry.
     bool        ackable;
     Time        enqueuedAt;
   };
@@ -637,6 +688,7 @@ private:
     CsrNodeId    dest;
     bool        ackable;
     bool        fromAckQueue;
+    uint8_t     dscp; ///< DATA DSCP; zero for ACK queue entries.
     uint32_t    queueIndex;
     int         rateKbps;
     double      txPowerDbm;
@@ -694,6 +746,8 @@ private:
   uint64_t                            m_longPreambleTxCount {0};
   uint64_t                            m_shortPreambleTxCount {0};
   uint64_t                            m_dataQueueDropCount {0};
+  int32_t                             m_supervisorSlotReduction {0}; ///< Supervisor slot reduction.
+  uint8_t                             m_lastAggregateDscp {0}; ///< Last DATA-only aggregate DSCP.
   int                                 m_maxRateKbps {128}; ///< Transmit ceiling.
   int                                 m_lastTxRateKbps {0};
   double                              m_lastTxPowerDbm {0.0};
@@ -828,10 +882,15 @@ private:
     // slot_range itself is selectable.  The current ordinal-scan profile uses
     // this fixed reservation table; historical branches below reproduce their
     // own exact endpoint rules.
-    const int MAX_SLOTRESERVE_NS3 = 256;
+    // Keep one safety cell for controlled fixtures that reproduce the
+    // source's invalid fallback index 255.  The source table itself contains
+    // 255 entries, and its pre-access exhaustion check makes the ordinary
+    // scan stop before reading physical slot 254.
+    const int RESERVATION_STORAGE_SIZE = 256;
+    const int SOURCE_MAX_SLOTRESERVE = 255;
 
-    bool used[MAX_SLOTRESERVE_NS3];
-    for (int i = 0; i < MAX_SLOTRESERVE_NS3; ++i)
+    bool used[RESERVATION_STORAGE_SIZE];
+    for (int i = 0; i < RESERVATION_STORAGE_SIZE; ++i)
       {
         used[i] = false;
       }
@@ -849,7 +908,7 @@ private:
         NeighborInfo &ni = kv.second;
 
         if (ni.rtCounter >= 0 &&
-            ni.rtCounter < MAX_SLOTRESERVE_NS3)
+            ni.rtCounter < RESERVATION_STORAGE_SIZE)
           {
             used[ni.rtCounter] = true;
 
@@ -971,13 +1030,14 @@ private:
           }
       }
 
-    // The legacy code draws an ordinal in [1, slotRange], then scans the full
-    // 255-entry reservation table beginning at slot zero.  Slot zero is
+    // The legacy code draws an ordinal in [1, slotRange].  It increments its
+    // iteration counter and checks k >= 255 before reading the table entry, so
+    // the normal scan examines physical slots 0..253 only.  Slot zero is
     // intentionally skipped by the countdown logic; occupied slots therefore
     // shift the selected physical offset beyond the nominal slot range.
     int remaining = rng->GetInteger (1, slotRange);
     int chosenSlot = -1;
-    for (int slot = 0; slot < MAX_SLOTRESERVE_NS3 - 1; ++slot)
+    for (int slot = 0; slot < SOURCE_MAX_SLOTRESERVE - 1; ++slot)
       {
         if (used[slot])
           {

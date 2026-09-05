@@ -284,12 +284,56 @@ CheckFinalState (Ptr<CsrNetLayer> sourceNwk,
            "source HOP DATA custody did not clear");
 }
 
+void
+CheckSecurityCountSourceRetention ()
+{
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  nwk->SetNodeId (SOURCE_NODE);
+
+  CsrNetLayer::SecurityResetStateForTest before;
+  before.discoverySequenceValid = true;
+  before.keyUpdateComplete = true;
+  before.keyRequestSentValid = true;
+  before.keySendComplete = true;
+  before.keySendActive = true;
+  before.keySendValid = true;
+  before.overheardValid = true;
+  before.keyRequestDelay = Seconds (11);
+  before.keySendDelay = Seconds (13);
+  before.overheardDelay = Seconds (17);
+  before.numFailures = 9;
+  before.admissionRetryPending = true;
+  nwk->SetSecurityResetStateForTest (DESTINATION_NODE, before);
+
+  nwk->NoteSecurityCountChangeForTest (DESTINATION_NODE);
+  CsrNetLayer::SecurityResetStateForTest after =
+    nwk->GetSecurityResetStateForTest (DESTINATION_NODE);
+
+  Require (!after.discoverySequenceValid &&
+             !after.keyUpdateComplete &&
+             !after.keyRequestSentValid &&
+             !after.keySendComplete &&
+             !after.keySendValid &&
+             after.numFailures == 0,
+           "security-count reset did not clear the exact routes.c fields");
+  Require (after.keySendActive &&
+             after.overheardValid &&
+             after.keyRequestDelay == before.keyRequestDelay &&
+             after.keySendDelay == before.keySendDelay &&
+             after.overheardDelay == before.overheardDelay &&
+             after.admissionRetryPending,
+           "security-count reset discarded source-owned owner/backoff state");
+
+  Simulator::Destroy ();
+}
+
 } // namespace
 
 int
 main ()
 {
   Time::SetResolution (Time::NS);
+  CheckSecurityCountSourceRetention ();
 
   Ptr<CsrNetDevice> sourceDevice =
     CreateObject<CsrNetDevice> (SOURCE_NODE);

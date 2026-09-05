@@ -1377,6 +1377,61 @@ class ClassifierProbe(unittest.TestCase):
                 changed, dict(record), digest
             )
 
+    def test_hidden_historical_security_provenance_has_distinct_exact_tuple(self) -> None:
+        digest = CERTIFY.HIDDEN_HISTORICAL_EXECUTABLE_SHA256
+        record = {
+            "application_profile": "legacy-send-to-from-no-dscp",
+            "mac_profile": "hist-2015-fine-one-based-table-no-avoid",
+            "hop_security_profile": CERTIFY.HIDDEN_HISTORICAL_HOP_SECURITY_PROFILE,
+            "hop_security_profile_origin": "explicit",
+            "hop_security_behavior": dict(
+                CERTIFY.HISTORICAL_HOP_SECURITY_BEHAVIOR
+            ),
+            "ack_envelope_profile": "unspecified",
+            "source_executable_sha256": digest,
+        }
+        CERTIFY.validate_historical_security_provenance(record, dict(record), digest)
+        changed = dict(record)
+        changed["source_executable_sha256"] = CERTIFY.EXTERNAL_INPUTS[
+            "multihop_executable"
+        ][1]
+        with self.assertRaisesRegex(CERTIFY.CertificationError, "lacks exact"):
+            CERTIFY.validate_effective_hop_security_source_binding(changed)
+
+    def test_duplicate_lineage_classifier_accepts_zero_and_historical_ledgers(self) -> None:
+        zero = {
+            "repeated_feedback_proof_count": 0,
+            "matched_duplicate_delivery_count": 0,
+            "unused_proof_count": 0,
+            "lineages": [],
+        }
+        self.assertEqual(
+            CERTIFY.classify_duplicate_lineage_summary(zero),
+            "strict_zero_duplicate_lineage",
+        )
+        historical = {
+            "repeated_feedback_proof_count": 1,
+            "matched_duplicate_delivery_count": 1,
+            "unused_proof_count": 0,
+            "lineages": [{}],
+        }
+        self.assertEqual(
+            CERTIFY.classify_duplicate_lineage_summary(historical),
+            "historical_source_proved_duplicate_compatibility",
+        )
+
+    def test_zero_duplicate_lineage_classifier_rejects_historical_records(self) -> None:
+        malformed = {
+            "repeated_feedback_proof_count": 0,
+            "matched_duplicate_delivery_count": 0,
+            "unused_proof_count": 0,
+            "lineages": [{}],
+        }
+        with self.assertRaisesRegex(
+            CERTIFY.CertificationError, "contains historical lineage records"
+        ):
+            CERTIFY.classify_duplicate_lineage_summary(malformed)
+
     def test_effective_hop_profile_always_binds_source_executable_semantics(self) -> None:
         digest = CERTIFY.EXTERNAL_INPUTS["multihop_executable"][1]
         historical_alias = {

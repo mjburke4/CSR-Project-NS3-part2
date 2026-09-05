@@ -455,6 +455,14 @@ TestBerSelectionAndProcessingGain ()
                0.174688707266,
                1.0e-15,
                "different-rate collision did not keep standard payload BER");
+  RequireNear (values.headerBer,
+               CsrOpnetBerTables::GetCollisionBer (
+                 8,
+                 differentRate.jsrDb,
+                 differentRate.timeOffsetSeconds,
+                 values.headerEffectiveSnrDb),
+               0.0,
+               "different-rate collision did not keep the S0 header on the collision table");
 
   CsrBerInterval sameRate;
   sameRate.noisePowerWatts = std::pow (

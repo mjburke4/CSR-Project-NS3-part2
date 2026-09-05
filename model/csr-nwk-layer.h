@@ -264,6 +264,29 @@ public:
     return m_discoveryBroadcastCount;
   }
 
+  uint32_t GetDiscoveryChirpCountForTest () const
+  {
+    return m_discoveryChirpCount;
+  }
+
+  /** Inspect the source-owned discovery sequence retained for one neighbor. */
+  bool GetNeighborDiscoverySequenceForTest (
+    CsrNodeId neighbor,
+    uint32_t &sequenceOut) const
+  {
+    auto it = m_nwkNeighbors.find (neighbor);
+    if (it == m_nwkNeighbors.end () ||
+        !it->second.discoverySequenceValid)
+      {
+        return false;
+      }
+    sequenceOut = it->second.discoverySequence;
+    return true;
+  }
+
+  /** Return the exact newest-first neighbor list serialized by a Chirp. */
+  std::vector<CsrNodeId> GetActiveChirpNeighborsForTest () const;
+
   uint32_t GetSnmpStartSentCount () const
   {
     return m_snmpStartSentCount;
@@ -579,6 +602,75 @@ public:
            m_ownedRoutingControls.front ().ready;
   }
 
+  struct SecurityResetStateForTest
+  {
+    bool discoverySequenceValid {false};
+    bool keyUpdateComplete {false};
+    bool keyRequestSentValid {false};
+    bool keySendComplete {false};
+    bool keySendActive {false};
+    bool keySendValid {false};
+    bool overheardValid {false};
+    Time keyRequestDelay {Seconds (0)};
+    Time keySendDelay {Seconds (0)};
+    Time overheardDelay {Seconds (0)};
+    uint32_t numFailures {0};
+    bool admissionRetryPending {false};
+  };
+
+  /** Install sentinel admission state for the source-exact reset regression. */
+  void SetSecurityResetStateForTest (
+    CsrNodeId neighbor,
+    const SecurityResetStateForTest &state)
+  {
+    NwkNeighborEntry &entry = GetOrCreateNwkNeighbor (neighbor);
+    entry.discoverySequenceValid = state.discoverySequenceValid;
+    entry.keyUpdateComplete = state.keyUpdateComplete;
+    entry.keyRequestSentValid = state.keyRequestSentValid;
+    entry.keySendComplete = state.keySendComplete;
+    entry.keySendActive = state.keySendActive;
+    entry.keySendValid = state.keySendValid;
+    entry.overheardValid = state.overheardValid;
+    entry.keyRequestDelay = state.keyRequestDelay;
+    entry.keySendDelay = state.keySendDelay;
+    entry.overheardDelay = state.overheardDelay;
+    entry.numFailures = state.numFailures;
+    if (state.admissionRetryPending)
+      {
+        ScheduleAdmissionRetry (neighbor, Hours (1));
+      }
+  }
+
+  SecurityResetStateForTest GetSecurityResetStateForTest (
+    CsrNodeId neighbor) const
+  {
+    SecurityResetStateForTest state;
+    auto it = m_nwkNeighbors.find (neighbor);
+    if (it == m_nwkNeighbors.end ())
+      {
+        return state;
+      }
+    const NwkNeighborEntry &entry = it->second;
+    state.discoverySequenceValid = entry.discoverySequenceValid;
+    state.keyUpdateComplete = entry.keyUpdateComplete;
+    state.keyRequestSentValid = entry.keyRequestSentValid;
+    state.keySendComplete = entry.keySendComplete;
+    state.keySendActive = entry.keySendActive;
+    state.keySendValid = entry.keySendValid;
+    state.overheardValid = entry.overheardValid;
+    state.keyRequestDelay = entry.keyRequestDelay;
+    state.keySendDelay = entry.keySendDelay;
+    state.overheardDelay = entry.overheardDelay;
+    state.numFailures = entry.numFailures;
+    state.admissionRetryPending = entry.admissionRetryEvent.IsPending ();
+    return state;
+  }
+
+  void NoteSecurityCountChangeForTest (CsrNodeId neighbor)
+  {
+    NoteSecurityCountChange (neighbor);
+  }
+
   /** Exercise the routesRcvUnAuthedMsg() neighbor-creation path. */
   void
   NoteAuthenticatedGroupKeyNeededForTest (
@@ -719,6 +811,11 @@ public:
     CsrNeighborCheckType type,
     uint32_t discoverySequence)
   {
+    // HOP reports reliable completion before it releases the corresponding
+    // resend entry.  Wake any NWK-owned routing residual in a later same-time
+    // event so that it observes the newly available HOP capacity.
+    ScheduleOwnedRoutingControlRetry ();
+
     if (type == CsrNeighborCheckType::Verify &&
       discoverySequence != 0 &&
       discoverySequence != m_discoverySequence)
@@ -1005,9 +1102,7 @@ public:
                   << "] routesClearTable scheduling consolidated Chirp"
                   << std::endl;
 
-        Simulator::ScheduleNow (
-          &CsrNetLayer::SendDiscoveryChirp,
-          this);
+        ScheduleDiscoveryChirp ();
       }
 
   }
@@ -1484,6 +1579,15 @@ public:
       CaptureSelectedRouteState (
         nwkDst);
 
+    // routesParseRouting() removes an older per-neighbor candidate before it
+    // inserts the accepted replacement.  If that candidate was selected,
+    // the intermediate routesFindBestRoute() call sets the destination's
+    // changed flag even when the replacement restores byte-identical state.
+    const bool replacingSelectedArlCandidate =
+      receivedFromArlUpdate &&
+      selectedBefore.available &&
+      selectedBefore.nextHop == nextHop;
+
     uint32_t totalCost =
       linkCostToNextHop +
       advertisedCost;
@@ -1597,6 +1701,12 @@ public:
             MarkSelectedRouteChanged (
               nwkDst,
               "candidate update");
+          }
+        else if (replacingSelectedArlCandidate)
+          {
+            MarkSelectedRouteChanged (
+              nwkDst,
+              "source candidate replacement");
           }
         return true;
       }
@@ -3242,6 +3352,8 @@ private:
 
   uint32_t m_discoveryStartCount {0};
   uint32_t m_discoveryBroadcastCount {0};
+  uint32_t m_discoveryChirpCount {0};
+  bool m_pendingDiscoveryChirp {false};
   uint32_t m_snmpStartSentCount {0};
   uint32_t m_snmpStartReceivedCount {0};
   uint32_t m_snmpDoneSentCount {0};
@@ -3403,6 +3515,7 @@ private:
   bool ShouldAdvertiseLocalSelfRoute () const;
 
   void ScheduleDiscoveryHello ();
+  void ScheduleDiscoveryChirp ();
   void DiscoveryHelloTick ();
 
   void CheckNeighborFreshness ();
@@ -4019,6 +4132,14 @@ CsrNetLayer::MakeNeighborInactive (
             << " wasActive=" << (wasActive ? 1 : 0)
             << std::endl;
 
+  // routesMakeNeighborInactive() sets sendChirp and wakes CTRLSEMA only for
+  // an actual ACTIVE-to-INACTIVE transition.  Defer the send to the next
+  // same-time event so callers finish deleting/recomputing route state first.
+  if (wasActive)
+    {
+      ScheduleDiscoveryChirp ();
+    }
+
   // routesMakeNeighborInactive() calls routesDeleteNeighborRoutes() before
   // recomputing affected destinations.  Direct-neighbor state remains, but
   // its learned self capability does not: readmission starts from the
@@ -4265,21 +4386,11 @@ CsrNetLayer::NoteSecurityCountChange (CsrNodeId neighbor)
   entry.keyUpdateComplete = false;
   entry.keyRequestSentValid = false;
   entry.keySendComplete = false;
-  entry.keySendActive = false;
   entry.keySendValid = false;
-  entry.overheardValid = false;
-  entry.keyRequestDelay = MilliSeconds (5000);
-  entry.keySendDelay = MilliSeconds (5000);
-  entry.overheardDelay = MilliSeconds (5000);
   entry.numFailures = 0;
 
-  if (entry.admissionRetryEvent.IsPending ())
-    {
-      Simulator::Cancel (entry.admissionRetryEvent);
-    }
-
   std::cout << "[NWK " << m_nodeId
-            << "] Reset ARL admission after security-count change"
+            << "] Reset source-owned ARL security state after security-count change"
             << " neighbor=" << neighbor
             << std::endl;
 }
@@ -4386,6 +4497,19 @@ CsrNetLayer::ProcessHello (Ptr<Packet> helloPayload,
     }
 
   CsrNodeId src = hh.GetNodeId ();
+
+  // The legacy NWK API receives one authenticated source identity.  The
+  // ns-3 envelope carries that identity twice, so bind the inner HELLO owner
+  // to the authenticated outer HOP sender before changing any NWK state.
+  if (src != hopSrc)
+    {
+      std::cout << "[NWK " << m_nodeId
+                << "] Drop HELLO with inner/outer source mismatch"
+                << " hopSrc=" << hopSrc
+                << " helloSrc=" << src
+                << std::endl;
+      return;
+    }
 
   if (src == m_nodeId)
     {
@@ -4890,6 +5014,12 @@ CsrNetLayer::ApplyNeighborSelfCapability (
   SelectedRouteState before =
     CaptureSelectedRouteState (helloSrc);
 
+  // routesParseRouting() materializes the logical destination by invoking
+  // routesFindBestRoute() even while the reporting neighbor is inactive.
+  // Preserve that source list-order side effect at self-UPDATE time rather
+  // than postponing it until admission.
+  NoteDestinationCreated (helloSrc);
+
   directRoute->capability = capability;
   directRoute->pathlossDb = pathlossDb;
   directRoute->numHop = 1;
@@ -5076,13 +5206,8 @@ CsrNetLayer::ApplyCompleteArlRoutingMessage (
                     break;
                   }
 
-                CsrNodeId node = pathNode;
-                advertisedPath.push_back (node);
-                if (node != m_nodeId)
-                  {
-                    GetOrCreateNwkNeighbor (node);
-                  }
-                if (node == m_nodeId)
+                advertisedPath.push_back (pathNode);
+                if (pathNode == m_nodeId)
                   {
                     containsLocalNode = true;
                   }
@@ -5435,12 +5560,6 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
 
     uint8_t advCount = hh.GetAdvertisedRouteCount ();
 
-    auto neighborIt = m_nwkNeighbors.find (helloSrc);
-
-    bool senderIsOrdinary =
-      neighborIt != m_nwkNeighbors.end () &&
-      neighborIt->second.nodeType == CsrNodeType::Ordinary;
-
     if (advCount == 0)
       {
         return acceptedDestinations;
@@ -5471,16 +5590,6 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
               {
                 acceptedDestinations.insert (helloSrc);
               }
-            continue;
-          }
-
-        if (senderIsOrdinary)
-          {
-            std::cout << "[NWK " << m_nodeId
-                      << "] Ignoring transit route advertisement from "
-                      << "Ordinary neighbor=" << helloSrc
-                      << " dst=" << ar.dst
-                      << std::endl;
             continue;
           }
 
@@ -5549,11 +5658,6 @@ CsrNetLayer::ProcessRoutesPayload (const CsrHelloHeader &hh,
         for (CsrNodeId pathNode :
             ar.path)
           {
-            if (pathNode != m_nodeId &&
-                pathNode < CSR_BROADCAST_ID)
-              {
-                GetOrCreateNwkNeighbor (pathNode);
-              }
             candidatePath.push_back (
               pathNode);
 
@@ -6776,9 +6880,7 @@ CsrNetLayer::CheckNeighborFreshness ()
                 << "; scheduling automatic Discover Chirp"
                 << std::endl;
 
-      Simulator::ScheduleNow (
-        &CsrNetLayer::SendDiscoveryChirp,
-        this);
+      ScheduleDiscoveryChirp ();
     }
 
   m_neighborFreshnessEvent =
@@ -6909,8 +7011,9 @@ CsrNetLayer::ProcessDiscover (const CsrHelloHeader &hh,
 
         bool isNewSequence =
           !neighbor.discoverySequenceValid ||
-          static_cast<int32_t> (
-            receivedSequence - neighbor.discoverySequence) > 0;
+          CompareRoutingSequence (
+            neighbor.discoverySequence,
+            receivedSequence) < 0;
 
         if (isNewSequence)
           {
@@ -7490,11 +7593,29 @@ CsrNetLayer::DiscoveryHelloTick ()
 }
 
 void
+CsrNetLayer::ScheduleDiscoveryChirp ()
+{
+  // routes.c stores one sendChirp bit and wakes CTRLSEMA.  Multiple neighbor
+  // transitions before the next routesProcess() pass collapse into one
+  // broadcast, emitted after that pass handles route state and retained
+  // routing messages.
+  if (m_pendingDiscoveryChirp)
+    {
+      return;
+    }
+
+  m_pendingDiscoveryChirp = true;
+  ScheduleRoutesProcess ();
+}
+
+void
 CsrNetLayer::SendDiscoveryChirp ()
 {
   std::cout << "[NWK " << m_nodeId
             << "] Sending ARL Discover Chirp"
             << std::endl;
+
+  m_discoveryChirpCount++;
 
   SendHelloBroadcast (
     CsrArlRouteMsgType::Discover,
@@ -7549,22 +7670,13 @@ CsrNetLayer::SendHelloBroadcast (
   if (type == CsrArlRouteMsgType::Discover &&
       discoverType == CsrDiscoverType::Chirp)
     {
-      for (const auto &kv : m_nwkNeighbors)
+      for (CsrNodeId neighborId : GetActiveChirpNeighborsForTest ())
         {
-          const NwkNeighborEntry &neighbor = kv.second;
-
-          if (neighbor.lastHeardSec < 0.0 ||
-              neighbor.stale ||
-              !IsArlNeighborUsable (neighbor.nodeId))
-            {
-              continue;
-            }
-
-          if (hh.AddChirpNeighbor (neighbor.nodeId))
+          if (hh.AddChirpNeighbor (neighborId))
             {
               std::cout << "[NWK " << m_nodeId
                         << "] Chirp includes active neighbor="
-                        << neighbor.nodeId
+                        << neighborId
                         << std::endl;
             }
         }
@@ -7697,6 +7809,39 @@ CsrNetLayer::GetNeighborCount () const
   return static_cast<uint32_t> (m_nwkNeighbors.size ());
 }
 
+std::vector<CsrNodeId>
+CsrNetLayer::GetActiveChirpNeighborsForTest () const
+{
+  std::vector<CsrNodeId> active;
+
+  // routesFindNeighbor() inserts at neighborHead, and the Chirp producer
+  // serializes that list from head to tail (newest-created first).
+  for (CsrNodeId neighborId : m_neighborCreationOrder)
+    {
+      auto found = m_nwkNeighbors.find (neighborId);
+      if (found == m_nwkNeighbors.end ())
+        {
+          continue;
+        }
+
+      const NwkNeighborEntry &neighbor = found->second;
+      if (neighbor.lastHeardSec < 0.0 ||
+          neighbor.stale ||
+          !neighbor.arlActive)
+        {
+          continue;
+        }
+
+      active.push_back (neighbor.nodeId);
+      if (active.size () == std::numeric_limits<uint8_t>::max ())
+        {
+          break;
+        }
+    }
+
+  return active;
+}
+
 void
 CsrNetLayer::SendRoutingUpdate ()
 {
@@ -7707,13 +7852,6 @@ CsrNetLayer::SendRoutingUpdate ()
             << "] Sending ARL RoutingUpdate"
             << " routingSequence=" << routingSequence
             << std::endl;
-
-  if (m_nodeType == CsrNodeType::Ordinary)
-    {
-      std::cout << "[NWK " << m_nodeId
-                << "] Ordinary node sends no transit route advertisements"
-                << std::endl;
-    }
 
   SendHelloBroadcast (
     CsrArlRouteMsgType::RoutingUpdate,
@@ -8341,11 +8479,6 @@ CsrNetLayer::SnmpReportTimeout ()
 bool
 CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
 {
-  if (m_nodeType == CsrNodeType::Ordinary)
-    {
-      return false;
-    }
-
   if (!re.valid)
     {
       return false;
@@ -8356,10 +8489,8 @@ CsrNetLayer::ShouldAdvertiseRoute (const RouteEntry &re) const
       return false;
     }
 
-  // Legacy ARL advertises only destinations with
-  // routing capability. Ordinary nodes remain valid
-  // local destinations but are not propagated as
-  // multi-hop reachable destinations.
+  // Legacy ARL advertises only destinations with routing capability.  The
+  // sender's own role does not suppress capable routes it has learned.
   if (re.capability == 0)
     {
       return false;
@@ -9927,13 +10058,22 @@ ReportPendingSelectedRouteChanges ()
                 << "] Automatic route propagation disabled;"
                 << " reporting only"
                 << std::endl;
-
-      return;
+    }
+  else
+    {
+      SendGroupedAutomaticRouteChanges (
+        destinations,
+        routingInfoChanged);
     }
 
-  SendGroupedAutomaticRouteChanges (
-    destinations,
-    routingInfoChanged);
+  // routesProcess() consumes sendChirp after route changes and retained
+  // routing messages.  Clear before sending so a transition triggered by the
+  // send path can request a distinct later wake.
+  if (m_pendingDiscoveryChirp)
+    {
+      m_pendingDiscoveryChirp = false;
+      SendDiscoveryChirp ();
+    }
 }
 
 std::vector<CsrNodeId>
@@ -10255,6 +10395,14 @@ CsrNetLayer::NoteOwnedRoutingControlSuccess (
                     << " section=" << unsigned (routingSection)
                     << std::endl;
           m_ownedRoutingControls.erase (it);
+        }
+
+      // As with NeighborCheck completion, HOP invokes this callback before
+      // erasing its reliable owner.  A later same-time retry can therefore
+      // consume the capacity released by this final completion.
+      if (lastOfInfo)
+        {
+          ScheduleOwnedRoutingControlRetry ();
         }
       return;
     }

@@ -4,15 +4,40 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <utility>
 #include <vector>
 
 using namespace ns3;
+
+struct CsrMacSlotParitySmokeAccess
+{
+  static uint32_t
+  GetConcatByteLimit (const CsrMacCore &mac, int rateKbps)
+  {
+    return mac.GetConcatByteLimit (rateKbps);
+  }
+
+  static bool
+  FitsConcatFrame (const CsrMacCore &mac,
+                   Ptr<Packet> frame,
+                   int frameRateKbps,
+                   uint32_t byteCount,
+                   int currentRateKbps)
+  {
+    return mac.FitsConcatFrame (frame,
+                                frameRateKbps,
+                                byteCount,
+                                currentRateKbps);
+  }
+};
 
 namespace
 {
 
 std::vector<uint16_t> g_sequences;
 std::vector<double> g_receiveTimes;
+std::vector<uint8_t> g_observedAggregateDscp;
+Ptr<CsrNetDevice> g_observedSender;
 
 void
 Require (bool condition, const char* message)
@@ -64,6 +89,66 @@ BuildProtectedWindowAck (uint16_t seq)
   return frame;
 }
 
+Ptr<Packet>
+BuildAckWithCompatibilityDscp (uint16_t seq, uint8_t dscp)
+{
+  Ptr<Packet> frame = BuildFrame (seq, true);
+  CsrHeader header;
+  Require (frame->RemoveHeader (header) > 0,
+           "ACK DSCP fixture did not contain a CSR header");
+  header.SetDscp (dscp);
+  frame->AddHeader (header);
+  return frame;
+}
+
+void
+CheckStrictFitBoundaries ()
+{
+  CsrMacCore mac;
+  const std::vector<std::pair<int, uint32_t>> limits {
+    {8, 256},
+    {16, 512},
+    {32, 1024},
+    {64, 2048},
+    {128, 4096}
+  };
+
+  Ptr<Packet> oneByte = Create<Packet> (1);
+  CsrSetOpnetEnvelope (oneByte, CsrOpnetPacketFormat::Mac, 1);
+  for (const auto &[rateKbps, limit] : limits)
+    {
+      Require (CsrMacSlotParitySmokeAccess::GetConcatByteLimit (
+                 mac, rateKbps) == limit,
+               "source rate-to-concatenation limit map changed");
+      Require (CsrMacSlotParitySmokeAccess::FitsConcatFrame (
+                 mac, oneByte, rateKbps, limit - 2, rateKbps),
+               "aggregate below the source byte limit did not fit");
+      Require (!CsrMacSlotParitySmokeAccess::FitsConcatFrame (
+                 mac, oneByte, rateKbps, limit - 1, rateKbps),
+               "aggregate equal to the source byte limit incorrectly fit");
+    }
+
+  // new_pk_fit() uses the slower of the incoming packet and aggregate rate.
+  Require (!CsrMacSlotParitySmokeAccess::FitsConcatFrame (
+             mac, oneByte, 128, 255, 8),
+           "fit check did not use the slower aggregate rate");
+
+  // The supplied source defines no 500/1000-kbit/s packing capacity.  The
+  // explicit compatibility behavior admits one queue head but never a second
+  // segment, avoiding an invented limit or an indefinitely stuck head.
+  for (int unsupportedRate : {500, 1000})
+    {
+      Require (CsrMacSlotParitySmokeAccess::GetConcatByteLimit (
+                 mac, unsupportedRate) == 0,
+               "high-rate compatibility path invented a packing limit");
+      Require (CsrMacSlotParitySmokeAccess::FitsConcatFrame (
+                 mac, oneByte, unsupportedRate, 0, unsupportedRate) &&
+                 !CsrMacSlotParitySmokeAccess::FitsConcatFrame (
+                   mac, oneByte, unsupportedRate, 1, unsupportedRate),
+               "high-rate compatibility path did not isolate the queue head");
+    }
+}
+
 void
 RecordFrame (Ptr<Packet> frame, double, double)
 {
@@ -72,6 +157,11 @@ RecordFrame (Ptr<Packet> frame, double, double)
            "received concatenated segment has no CSR header");
   g_sequences.push_back (header.GetSeq ());
   g_receiveTimes.push_back (Simulator::Now ().GetSeconds ());
+  if (g_observedSender != nullptr)
+    {
+      g_observedAggregateDscp.push_back (
+        g_observedSender->GetMac ().GetLastAggregateDscp ());
+    }
 }
 
 void
@@ -96,6 +186,19 @@ CheckMixedAggregate (Ptr<CsrNetDevice> sender)
                "first five segments did not share one OTA reception time");
     }
 
+  Require (g_observedAggregateDscp.size () == g_sequences.size (),
+           "aggregate DSCP observations did not cover every mixed segment");
+  for (std::size_t i = 0; i < 5; ++i)
+    {
+      Require (g_observedAggregateDscp[i] == 5,
+               "mixed aggregate did not use maximum DATA-only DSCP");
+    }
+  for (std::size_t i = 5; i < g_observedAggregateDscp.size (); ++i)
+    {
+      Require (g_observedAggregateDscp[i] == 0,
+               "ACK-only aggregate contributed DSCP metadata");
+    }
+
   Require (sender->GetMac ().GetTransmittedFrameCount () == 5,
            "mixed traffic did not use five OPNET aggregate transmissions");
   Require (sender->GetMac ().GetQueuedFrameCount () == 0,
@@ -107,6 +210,7 @@ RunMixedAckDataScenario ()
 {
   g_sequences.clear ();
   g_receiveTimes.clear ();
+  g_observedAggregateDscp.clear ();
 
   Ptr<CsrNetDevice> sender = CreateObject<CsrNetDevice> (1);
   Ptr<CsrNetDevice> receiver = CreateObject<CsrNetDevice> (2);
@@ -117,13 +221,19 @@ RunMixedAckDataScenario ()
     [] (int, double, uint32_t) { return 0.0; };
   sender->GetPhy ().SetPerModel (noErrors);
   receiver->GetPhy ().SetPerModel (noErrors);
+  g_observedSender = sender;
 
   // Enqueue DATA first to prove the separate ACK queue is still packed first.
   sender->GetMac ().EnqueueTxFrame (BuildFrame (1, false, 20), 2, 5, false);
   sender->GetMac ().EnqueueTxFrame (BuildFrame (2, false, 20), 2, 5, false);
   sender->GetMac ().EnqueueTxFrame (BuildFrame (3, false, 20), 2, 5, false);
-  sender->GetMac ().EnqueueTxFrame (BuildFrame (100, true), 2, 0, false);
-  sender->GetMac ().EnqueueTxFrame (BuildFrame (101, true), 2, 0, false);
+  // Compatibility CsrHeader can carry DSCP on every frame, whereas br_Ack
+  // has no such contribution to br_OTA.  Give both ACKs values above DATA to
+  // prove the selected aggregate metadata still comes from DATA alone.
+  sender->GetMac ().EnqueueTxFrame (
+    BuildAckWithCompatibilityDscp (100, 7), 2, 7, false);
+  sender->GetMac ().EnqueueTxFrame (
+    BuildAckWithCompatibilityDscp (101, 6), 2, 6, false);
 
   // Unknown ACK receivers require OPNET long preambles, including the four
   // ACK-only retry aggregates after the initial mixed aggregate.
@@ -131,6 +241,7 @@ RunMixedAckDataScenario ()
   Simulator::Stop (Seconds (7.6));
   Simulator::Run ();
   Simulator::Destroy ();
+  g_observedSender = nullptr;
 }
 
 void
@@ -305,6 +416,7 @@ int
 main ()
 {
   Time::SetResolution (Time::NS);
+  CheckStrictFitBoundaries ();
   RunMixedAckDataScenario ();
   RunByteLimitScenario ();
   RunAckWindowByteLimitScenario ();

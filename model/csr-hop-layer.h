@@ -801,6 +801,9 @@ private:
   bool IsDataDacked (CsrNodeId src, uint16_t seq) const;
   bool CheckReceivedSeq (CsrNodeId src, uint16_t seq, bool dataTraffic);
   void MarkDataDack (CsrNodeId src, uint16_t seq);
+  static bool IsWellFormedBareRoutingControlPayload (
+    Ptr<const Packet> payload,
+    CsrNodeId expectedSource);
   static int32_t SeqDiff (uint16_t seq1, uint16_t seq2);
 
   Callback<void, CsrNodeId, CsrNodeId> m_nsdpDecrCb;
@@ -2545,6 +2548,102 @@ CsrHopLayer::HandleProtectedNeighborcast (
   return true;
 }
 
+bool
+CsrHopLayer::IsWellFormedBareRoutingControlPayload (
+  Ptr<const Packet> payload,
+  CsrNodeId expectedSource)
+{
+  // CsrHelloHeader has a 30-byte fixed prefix followed by optional Routing
+  // Info, a counted Chirp-neighbor array, and counted route/path arrays.  A
+  // malformed bare frame must be rejected before PeekHeader() or HOP replay
+  // state is touched: Deserialize() necessarily trusts those wire counts.
+  constexpr std::size_t fixedPrefixSize = 30;
+  constexpr std::size_t arlTypeOffset = 10;
+  constexpr std::size_t routingSectionOffset = 24;
+  constexpr std::size_t routingTotalSectionsOffset = 25;
+  constexpr std::size_t routingOperationOffset = 26;
+  constexpr std::size_t routingInfoSize = 16;
+  constexpr std::size_t routeFixedSize = 12;
+  constexpr std::size_t routePathCountOffset = 11;
+
+  if (payload == nullptr || payload->GetSize () < fixedPrefixSize)
+    {
+      return false;
+    }
+
+  std::vector<uint8_t> body (payload->GetSize ());
+  payload->CopyData (body.data (), body.size ());
+
+  auto canConsume = [&body] (std::size_t offset, std::size_t count) {
+    return offset <= body.size () && count <= body.size () - offset;
+  };
+
+  CsrNodeId payloadSource =
+    (static_cast<CsrNodeId> (body[0]) << 16) |
+    (static_cast<CsrNodeId> (body[1]) << 8) |
+    static_cast<CsrNodeId> (body[2]);
+
+  if (payloadSource != expectedSource ||
+      body[arlTypeOffset] != static_cast<uint8_t> (
+        CsrArlRouteMsgType::RoutingUpdate) ||
+      body[routingTotalSectionsOffset] == 0 ||
+      body[routingSectionOffset] >= body[routingTotalSectionsOffset] ||
+      body[routingOperationOffset] > static_cast<uint8_t> (
+        CsrRoutingOperation::Info))
+    {
+      return false;
+    }
+
+  std::size_t cursor = fixedPrefixSize;
+  if (body[routingOperationOffset] == static_cast<uint8_t> (
+        CsrRoutingOperation::Info))
+    {
+      if (!canConsume (cursor, routingInfoSize))
+        {
+          return false;
+        }
+      cursor += routingInfoSize;
+    }
+
+  if (!canConsume (cursor, 1))
+    {
+      return false;
+    }
+  uint8_t chirpCount = body[cursor++];
+  std::size_t chirpBytes = 3 * static_cast<std::size_t> (chirpCount);
+  if (!canConsume (cursor, chirpBytes))
+    {
+      return false;
+    }
+  cursor += chirpBytes;
+
+  if (!canConsume (cursor, 1))
+    {
+      return false;
+    }
+  uint8_t routeCount = body[cursor++];
+  for (uint8_t routeIndex = 0; routeIndex < routeCount; ++routeIndex)
+    {
+      if (!canConsume (cursor, routeFixedSize))
+        {
+          return false;
+        }
+      uint8_t pathCount = body[cursor + routePathCountOffset];
+      cursor += routeFixedSize;
+      std::size_t pathBytes = 3 * static_cast<std::size_t> (pathCount);
+      if (!canConsume (cursor, pathBytes))
+        {
+          return false;
+        }
+      cursor += pathBytes;
+    }
+
+  CsrHelloHeader routingHeader;
+  return payload->PeekHeader (routingHeader) == cursor &&
+         routingHeader.GetArlRouteMsgType () ==
+           CsrArlRouteMsgType::RoutingUpdate;
+}
+
 void
 CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
 {
@@ -3143,6 +3242,17 @@ CsrHopLayer::ReceiveFromMac (Ptr<Packet> frame, double pathlossDb, double snrDb)
     {
       if (hdr.GetDst () != m_nodeId)
         {
+          return;
+        }
+
+      if (!hdr.HasGroupSecurity () &&
+          !IsWellFormedBareRoutingControlPayload (frame, hdr.GetSrc ()))
+        {
+          std::cout << "[HOP " << m_nodeId
+                    << "] Drop malformed bare RoutingControl"
+                    << " from=" << hdr.GetSrc ()
+                    << " seq=" << hdr.GetSeq ()
+                    << std::endl;
           return;
         }
 

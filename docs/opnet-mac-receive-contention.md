@@ -1,6 +1,6 @@
 # OPNET MAC receive/contention parity
 
-Updated: 2026-09-02
+Updated: 2026-09-05
 
 ## Scope
 
@@ -50,8 +50,10 @@ After Track begins, a later signal cannot capture the receiver during that
 Track epoch. It can be weak enough for the tracked signal to survive, or strong
 enough to corrupt it. If its synchronization preamble remains active through
 the return to Search, `back2search()` schedules a fresh 6.63-ms acquisition and
-`start_track()` explicitly accepts the replacement. During Tx, all overlapping
-receives are missed because the radio is half duplex.
+`start_track()` explicitly accepts the replacement. `back2search()` itself
+does not restore `PK_ACCEPT`; the survivor remains rejected during that
+6.63-ms Search gap, which affects any intervening `br_inoise` pair. During Tx,
+all overlapping receives are missed because the radio is half duplex.
 
 ### Synchronization-threshold stream
 
@@ -109,6 +111,55 @@ on the fourth callback at `+15`, without waiting for queued/in-flight MAC
 control or an extra quiet interval. The independently scheduled 30-second
 DiscoveryStop is only a fallback.
 
+## DSCP queue and slot behavior
+
+The supplied DSCP-era `br_mac.pr.c` keeps ACK and DATA in separate queues.
+ACKs are packed first. DATA is ordered by descending DSCP, while a new packet
+is inserted after all packets with an equal DSCP, preserving FIFO order for a
+tie. Concatenation then consumes DATA strictly from the head and stops at the
+first member that cannot fit; it never skips that head to admit a smaller
+lower-priority packet. The outer OTA DSCP metadata is the maximum DSCP among
+the DATA members only. ACK members do not contribute to that maximum.
+The compatibility runtime has no persistent outer `br_OTA` packet object, so
+`GetLastAggregateDscp()` exposes this selected value as diagnostic state; it
+does not duplicate the value into each inner compatibility segment.
+
+The fine active-node slot-range table is, for active counts zero through 16,
+`15, 18, 21, 25, 31, 37, 44, 52, 63, 75, 89, 106, 127, 151, 180, 214, 255`.
+The supervisor publishes `2 * fixed_application_DSCP`. MAC subtracts that
+value once after selecting the range, but only when the result is strictly
+greater than one. A reduction that would leave zero or one leaves the original
+range unchanged. Pre-DSCP project profiles use a zero reduction.
+`SetSupervisorSlotReduction()` is an explicit/manual integration hook for a
+nonzero value; it is not inferred from per-flow scenario DSCP. The recovered
+source publishes one node-level application DSCP, and the available scenario
+schema does not prove how differing flows at one source collapse to that
+value. Newer DSCP-runtime parity is therefore not claimed until that
+node-level contract is recovered.
+
+With reservation enabled, `get_slot()` draws an ordinal in `[1, slot_range]`
+and scans the 255-entry reservation table from physical slot zero. Its check
+occurs before decrementing the ordinal, so an empty table normally maps an
+ordinal to the same physical slot and slot zero is not selected. A separate
+pre-access iteration guard fires before physical slot 254 is read, however;
+ordinal 254 therefore consumes the fallback random draw rather than directly
+selecting slot 254. That fallback may itself draw 254 (or the source-defective
+index 255). The ns-3 runtime preserves the draw/control flow with safe storage,
+while controlled differential instrumentation can explicitly force slot 254.
+Existing reservations can shift a selected physical slot beyond the nominal
+active-node range before that same exhaustion boundary.
+
+Aggregate preamble selection also retains a source-order quirk rather than an
+order-independent "any unknown means LONG" rule. MAC visits ACK destinations
+first, followed by DATA and each structured destination in stored order. It
+starts `time0` at the current time; an unknown destination resets `time0` to
+the current time, while a known destination lowers it only when its
+`last_rcvd_time` is earlier. Only the final visited destination's neighbor
+lookup causes unconditional LONG when unknown. Otherwise the final `time0`
+is compared, strictly greater-than, with the local-active-node freshness
+window. Consequently, an unknown destination followed by a fresh known one
+can select SHORT; reversing that order selects LONG.
+
 ## Duty-cycle behavior
 
 A deterministic wake phase is available for repeatable tests. A signal that
@@ -150,6 +201,15 @@ pending wait through the corresponding source paths.
 - -11-dB sample mean and 0.25-dB-squared sample variance;
 - exact seed/run/stream replay and isolation from the duty-phase stream; and
 - controlled accept/reject boundaries plus deterministic compatibility mode.
+
+`csr-mac-slot-parity-smoke.cc` additionally pins all 17 fine slot-range
+entries, the supervisor reduction and strict lower-bound guard, descending
+DSCP service with FIFO ties, the ordinal-254 pre-access exhaustion and
+second-draw fallback, and the source countdown/activation order.
+
+`csr-mac-concat-smoke.cc` pins ACK-before-DATA packing, the 16-member cap,
+first-nonfitting-head stop, and every strict `< 256/512/1024/2048/4096` byte
+boundary for the 8/16/32/64/128-kbit/s source rates.
 
 `csr-mac-reservation-lifecycle-smoke.cc` additionally covers:
 
