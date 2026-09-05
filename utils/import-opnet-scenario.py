@@ -58,18 +58,39 @@ MAC_PROFILES = (
     MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE,
 )
 HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16 = "production-pairwise16"
+HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE = "hist-dd3f38e8-bare"
 HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE = "hist-adb97c54-bare"
 HOP_SECURITY_PROFILES = (
     HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+    HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE,
     HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+)
+HIST_DD3F38E8_EXECUTABLE_SHA256 = (
+    "dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0"
 )
 HIST_ADB97C54_EXECUTABLE_SHA256 = (
     "adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af"
 )
 
+HISTORICAL_EXECUTABLE_TUPLES = {
+    HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE: (
+        APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+        MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+        HIST_DD3F38E8_EXECUTABLE_SHA256,
+    ),
+    HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE: (
+        APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP,
+        MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE,
+        HIST_ADB97C54_EXECUTABLE_SHA256,
+    ),
+}
+
 # Backward-compatible names for the original ACK-only CLI/CSV alias.
 ACK_ENVELOPE_PROFILE_PRODUCTION_PAIRWISE16 = (
     HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
+)
+ACK_ENVELOPE_PROFILE_HIST_DD3F38E8_BARE = (
+    HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE
 )
 ACK_ENVELOPE_PROFILE_HIST_ADB97C54_BARE = (
     HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
@@ -398,8 +419,10 @@ def parse_network_model(data: bytes, coordinate_scale: float) -> list[Node]:
     node_ids = [node.node_id for node in nodes]
     if len(node_ids) != len(set(node_ids)):
         raise ImportErrorDetail("network model contains duplicate Node ID values")
-    if any(node_id < 0 or node_id > 0xFFFFFF for node_id in node_ids):
-        raise ImportErrorDetail("network model contains a Node ID wider than 24 bits")
+    if any(node_id < 0 or node_id >= 0xFFFFFF for node_id in node_ids):
+        raise ImportErrorDetail(
+            "network model contains a Node ID outside the concrete 24-bit range"
+        )
     return sorted(nodes, key=lambda node: node.node_id)
 
 
@@ -531,9 +554,11 @@ def parse_flow(specification: str) -> Flow:
         raise argparse.ArgumentTypeError(str(error)) from error
     if (
         flow.source < 0
-        or flow.source > 0xFFFFFF
+        or flow.source >= 0xFFFFFF
         or flow.destination < 0
-        or flow.destination > 0xFFFFFF
+        or flow.destination >= 0xFFFFFF
+        or not math.isfinite(flow.start_s)
+        or not math.isfinite(flow.interval_s)
         or flow.start_s < 0.0
         or flow.interval_s <= 0.0
         or flow.packet_bytes <= 0
@@ -554,7 +579,7 @@ def parse_reservation_slot_override(specification: str) -> tuple[int, int]:
         slot = int(parts[1], 0)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
-    if node_id < 0 or node_id > 0xFFFFFF or slot < 1 or slot > 255:
+    if node_id < 0 or node_id >= 0xFFFFFF or slot < 1 or slot > 255:
         raise argparse.ArgumentTypeError(
             "reservation override requires a 24-bit node and slot 1..255"
         )
@@ -738,19 +763,24 @@ def write_scenario(
         hop_security_profile,
         ack_envelope_profile,
     )
-    if (
-        resolved_hop_security_profile
-        == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
-    ) != (
-        application_profile == APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP
-        and mac_profile == MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE
+    selected_tuple = (application_profile, mac_profile)
+    for profile, (required_application, required_mac, _digest) in (
+        HISTORICAL_EXECUTABLE_TUPLES.items()
     ):
-        raise ImportErrorDetail(
-            "the adb97 executable tuple must select "
-            f"hop_security_profile={HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE}, "
-            f"application_profile={APPLICATION_PROFILE_LEGACY_SEND_ONLY_NO_DSCP}, "
-            f"and mac_profile={MAC_PROFILE_HIST_2014_NEXT_TSLOT_MODULO_PROBE} together"
-        )
+        if (resolved_hop_security_profile == profile) != (
+            selected_tuple == (required_application, required_mac)
+        ):
+            executable_label = (
+                "dd3f38e8"
+                if profile == HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE
+                else "adb97"
+            )
+            raise ImportErrorDetail(
+                f"the {executable_label} executable tuple must select "
+                f"hop_security_profile={profile}, "
+                f"application_profile={required_application}, and "
+                f"mac_profile={required_mac} together"
+            )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=SCENARIO_COLUMNS, lineterminator="\n")
@@ -772,10 +802,9 @@ def write_scenario(
             # the canonical DATA+ACK selector is unambiguous.
             ack_envelope_profile="",
             source_executable_sha256=(
-                HIST_ADB97C54_EXECUTABLE_SHA256
-                if resolved_hop_security_profile
-                == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
-                else ""
+                HISTORICAL_EXECUTABLE_TUPLES.get(
+                    resolved_hop_security_profile, ("", "", "")
+                )[2]
             ),
             reservation_control_start_s=(
                 ""

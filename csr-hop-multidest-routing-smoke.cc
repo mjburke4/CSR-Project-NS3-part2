@@ -34,6 +34,7 @@ uint16_t g_sequenceAt2 = 0;
 uint16_t g_sequenceAt3 = 0;
 uint16_t g_autoAckSequence = 0;
 uint32_t g_linkFailures = 0;
+uint32_t g_bareRoutingDeliveries = 0;
 
 void
 Require (bool condition, const char* message)
@@ -126,6 +127,12 @@ RecordAutomaticAck (Ptr<Packet> frame, double, double)
 }
 
 void
+RecordBareRoutingDelivery (Ptr<Packet>, CsrNodeId, double, double)
+{
+  g_bareRoutingDeliveries++;
+}
+
+void
 RecordSuccess (CsrNodeId neighbor,
                uint32_t routingSequence,
                CsrRoutingOperation operation,
@@ -137,7 +144,7 @@ RecordSuccess (CsrNodeId neighbor,
            "success callback carried wrong routing sequence");
   Require (operation == CsrRoutingOperation::Update,
            "success callback carried wrong routing operation");
-  Require (section == 1 && totalSections == 1,
+  Require (section == 0 && totalSections == 1,
            "success callback carried wrong routing section");
   g_successEvents.push_back ({neighbor, lastOfInfo});
 }
@@ -154,22 +161,25 @@ RecordFailure (std::vector<CsrNodeId> destinations,
            "failure callback carried wrong routing sequence");
   Require (operation == CsrRoutingOperation::Update,
            "failure callback carried wrong routing operation");
-  Require (section == 1 && totalSections == 1,
+  Require (section == 0 && totalSections == 1,
            "failure callback carried wrong routing section");
   g_failureEvents.push_back ({destinations, lastOfInfo});
 }
 
 Ptr<Packet>
-MakeRoutingPayload ()
+MakeRoutingPayload (CsrNodeId source = 1,
+                    uint8_t section = 0,
+                    uint8_t totalSections = 1)
 {
   CsrHelloHeader control;
+  control.SetNodeId (source);
   control.SetArlRouteMsgType (
     CsrArlRouteMsgType::RoutingUpdate);
   control.SetRoutingSequence (77);
   control.SetRoutingOperation (
     CsrRoutingOperation::Update);
-  control.SetRoutingSection (1);
-  control.SetRoutingTotalSections (1);
+  control.SetRoutingSection (section);
+  control.SetRoutingTotalSections (totalSections);
 
   Ptr<Packet> payload = Create<Packet> (4);
   payload->AddHeader (control);
@@ -387,6 +397,121 @@ TestReceiverSelectsItsSequence ()
   Simulator::Destroy ();
 }
 
+Ptr<Packet>
+MakeBareRoutingFrame (Ptr<Packet> payload, uint16_t sequence)
+{
+  CsrHeader header (1, 2, sequence, 7, true, false);
+  header.SetType (CSR_PKT_ROUTING_CONTROL);
+  header.SetDestType (CSR_DEST_UNICAST);
+  header.SetSpeedKey (8);
+  payload->AddHeader (header);
+  return payload;
+}
+
+void
+TestMalformedBareRoutingDoesNotPoisonReplay ()
+{
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (2);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  hop->SetNodeId (2);
+  hop->SetMac (&device->GetMac ());
+  hop->SetRxHelloFromHopCallback (
+    MakeCallback (&RecordBareRoutingDelivery));
+  g_bareRoutingDeliveries = 0;
+
+  hop->ReceiveFromMac (
+    MakeBareRoutingFrame (MakeRoutingPayload (3), 40),
+    0.0,
+    100.0);
+  Require (g_bareRoutingDeliveries == 0 &&
+             device->GetMac ().GetAckQueuedFrameCount () == 0,
+           "bare RoutingControl accepted a mismatched inner source");
+
+  hop->ReceiveFromMac (
+    MakeBareRoutingFrame (MakeRoutingPayload (), 40),
+    0.0,
+    100.0);
+  Require (g_bareRoutingDeliveries == 1 &&
+             device->GetMac ().GetAckQueuedFrameCount () == 1,
+           "mismatched bare RoutingControl poisoned replay state");
+
+  // This payload has a plausible fixed prefix, but omits the mandatory Chirp
+  // and route counts.  It must not reserve sequence 41 in the replay window.
+  std::vector<uint8_t> truncated (30, 0);
+  truncated[10] = static_cast<uint8_t> (
+    CsrArlRouteMsgType::RoutingUpdate);
+  truncated[25] = 1;
+  truncated[26] = static_cast<uint8_t> (
+    CsrRoutingOperation::Update);
+  Ptr<Packet> malformed = Create<Packet> (
+    truncated.data (), truncated.size ());
+  hop->ReceiveFromMac (
+    MakeBareRoutingFrame (malformed, 41),
+    0.0,
+    100.0);
+
+  Require (g_bareRoutingDeliveries == 1 &&
+             device->GetMac ().GetAckQueuedFrameCount () == 1,
+           "malformed bare RoutingControl earned delivery or ACK");
+
+  hop->ReceiveFromMac (
+    MakeBareRoutingFrame (MakeRoutingPayload (), 41),
+    0.0,
+    100.0);
+
+  Require (g_bareRoutingDeliveries == 2 &&
+             device->GetMac ().GetAckQueuedFrameCount () == 2,
+           "malformed bare RoutingControl poisoned replay state");
+
+  hop->ReceiveFromMac (
+    MakeBareRoutingFrame (MakeRoutingPayload (1, 1, 1), 42),
+    0.0,
+    100.0);
+  Require (g_bareRoutingDeliveries == 2 &&
+             device->GetMac ().GetAckQueuedFrameCount () == 2,
+           "out-of-range routing section earned delivery or ACK");
+
+  hop->ReceiveFromMac (
+    MakeBareRoutingFrame (MakeRoutingPayload (), 42),
+    0.0,
+    100.0);
+  Require (g_bareRoutingDeliveries == 3 &&
+             device->GetMac ().GetAckQueuedFrameCount () == 3,
+           "out-of-range routing section poisoned replay state");
+  Simulator::Destroy ();
+}
+
+void
+TestResendCapacitySendsUntracked513thFrame ()
+{
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  hop->SetNodeId (1);
+  hop->SetMac (&device->GetMac ());
+
+  for (uint16_t sequence = 1;
+       sequence <= CsrHopLayer::RESEND_QUEUE_SIZE;
+       ++sequence)
+    {
+      hop->SendData (2, 5, Create<Packet> (1), true);
+      Require (device->GetMac ().CancelAcknowledgedFrames (
+                 2, sequence, 1, 0) == 1,
+               "could not isolate HOP resend-capacity fixture from MAC");
+    }
+
+  Require (CsrHopLayer::RESEND_QUEUE_SIZE == 512 &&
+             hop->GetResendQueueSize () == 512 &&
+             hop->GetResendQueueOverflowCount () == 0,
+           "HOP did not retain its source-exact 512 resend owners");
+
+  hop->SendData (2, 5, Create<Packet> (1), true);
+  Require (hop->GetResendQueueSize () == 512 &&
+             hop->GetResendQueueOverflowCount () == 1 &&
+             device->GetMac ().GetDataQueuedFrameCount () == 1,
+           "HOP did not send the untracked 513th overflow frame");
+  Simulator::Destroy ();
+}
+
 void
 CheckGroupFailure (Ptr<CsrHopLayer> hop)
 {
@@ -465,6 +590,8 @@ main ()
 
   TestPartialAndFinalAck ();
   TestReceiverSelectsItsSequence ();
+  TestMalformedBareRoutingDoesNotPoisonReplay ();
+  TestResendCapacitySendsUntracked513thFrame ();
   TestGroupFailure ();
 
   std::cout << "PASS: OPNET multidestination routing ACK parity test"

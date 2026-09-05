@@ -95,10 +95,39 @@ CheckSlotSelectionProfileRanges (Ptr<CsrNetDevice> device)
   using Profile = CsrMacCore::SlotSelectionProfile;
 
   mac.SetSlotSelectionProfile (Profile::NS3_CURRENT_FINE_FREE_SLOT);
-  Require (mac.GetOpnetSlotRange (0) == 15 &&
-             mac.GetOpnetSlotRange (5) == 37 &&
-             mac.GetOpnetSlotRange (16) == 255,
-           "current fine slot-range map changed");
+  const std::vector<int> fineRanges {
+    15, 18, 21, 25, 31, 37, 44, 52, 63,
+    75, 89, 106, 127, 151, 180, 214, 255
+  };
+  for (uint32_t activeNodes = 0;
+       activeNodes < fineRanges.size ();
+       ++activeNodes)
+    {
+      Require (mac.GetOpnetSlotRange (activeNodes) ==
+                 fineRanges[activeNodes],
+               "current fine slot-range map changed");
+    }
+  Require (mac.GetOpnetSlotRange (17) == 255 &&
+             mac.GetOpnetSlotRange (
+               std::numeric_limits<uint32_t>::max ()) == 255,
+           "fine slot-range overflow bucket changed");
+
+  // br_supervisor publishes twice the configured application DSCP.  br_mac
+  // performs one guarded subtraction after selecting the active-node range.
+  mac.SetSupervisorSlotReduction (10);
+  Require (mac.GetSupervisorSlotReduction () == 10 &&
+             mac.GetOpnetSlotRange (8) == 53,
+           "supervisor DSCP reduction was not applied exactly once");
+  mac.SetSupervisorSlotReduction (61);
+  Require (mac.GetOpnetSlotRange (8) == 2,
+           "supervisor reduction rejected the smallest valid range");
+  mac.SetSupervisorSlotReduction (62);
+  Require (mac.GetOpnetSlotRange (8) == 63,
+           "supervisor reduction did not preserve the strict >1 guard");
+  mac.SetSupervisorSlotReduction (-1);
+  Require (mac.GetOpnetSlotRange (8) == 63,
+           "nonpositive supervisor reduction changed the slot range");
+  mac.SetSupervisorSlotReduction (0);
 
   mac.SetSlotSelectionProfile (Profile::HIST_2014_ZERO_BASED_REBUILD_LIST);
   Require (mac.GetOpnetSlotRange (0) == 31 &&
@@ -179,6 +208,61 @@ CheckCoarseInclusiveNoAvoidDraw (uint64_t run,
            "recovered coarse-inclusive draw or no-avoid behavior changed");
 
   Simulator::Destroy ();
+}
+
+void
+CheckCurrentOrdinal254Exhaustion ()
+{
+  uint64_t selectedRun = 0;
+  int expectedFallback = -1;
+
+  // Find a deterministic ns-3 run whose first draw is source ordinal 254 and
+  // whose second draw is visibly different.  The second draw is the source's
+  // exhaustion fallback; directly reading table slot 254 would return 254
+  // without consuming it.
+  for (uint64_t run = 1; run <= 4096; ++run)
+    {
+      RngSeedManager::SetSeed (1);
+      RngSeedManager::SetRun (run);
+      RngSeedManager::ResetNextStreamIndex ();
+      Ptr<UniformRandomVariable> predictor =
+        CreateObject<UniformRandomVariable> ();
+      int ordinal = predictor->GetInteger (1, 255);
+      int fallback = predictor->GetInteger (1, 255);
+      if (ordinal == 254 && fallback >= 1 && fallback <= 253)
+        {
+          selectedRun = run;
+          expectedFallback = fallback;
+          break;
+        }
+    }
+
+  Require (selectedRun != 0,
+           "could not locate deterministic ordinal-254 fallback vector");
+
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (selectedRun);
+  RngSeedManager::ResetNextStreamIndex ();
+  CsrMacCore mac;
+  mac.SetNodeId (1);
+  mac.SetActiveNodesForPostTx (16);
+  mac.SetSlotSelectionProfile (
+    CsrMacCore::SlotSelectionProfile::NS3_CURRENT_FINE_FREE_SLOT);
+  Require (CsrMacSlotParitySmokeAccess::PickTxSlot (mac, 2) ==
+             expectedFallback,
+           "source ordinal 254 directly read physical slot 254 instead of "
+           "taking the exhaustion fallback");
+
+  // Controlled differential instrumentation is intentionally outside the
+  // random source path and may still request the exact boundary value.
+  mac.SetReservationSlotOverrideForDifferentialRun (254);
+  Require (CsrMacSlotParitySmokeAccess::PickTxSlot (mac, 2) == 254,
+           "controlled reservation-slot override lost boundary slot 254");
+  Simulator::Destroy ();
+
+  RngSeedManager::SetSeed (1);
+  RngSeedManager::SetRun (1);
+  RngSeedManager::ResetNextStreamIndex ();
 }
 
 void
@@ -293,10 +377,13 @@ CheckFirstOpportunity (Ptr<CsrNetDevice> device)
 {
   Require (device->GetMac ().GetTransmittedFrameCount () == 1,
            "first aggregate missed its OPNET slot opportunity");
-  Require (g_sequences.size () == 2 &&
-             g_sequences[0] == 2 && g_sequences[1] == 1,
-           "aggregate did not preserve DSCP queue order");
-  Require (g_txTimes[0] == g_txTimes[1],
+  Require (g_sequences.size () == 3 &&
+             g_sequences[0] == 2 &&
+             g_sequences[1] == 3 &&
+             g_sequences[2] == 1,
+           "aggregate did not preserve descending DSCP and FIFO tie order");
+  Require (g_txTimes[0] == g_txTimes[1] &&
+             g_txTimes[1] == g_txTimes[2],
            "queued DATA frames did not share one OTA transmission");
 
   // The 300-ms holdoff and already-running 13-ms slot clock are independent.
@@ -350,16 +437,20 @@ void
 CheckFinalState (Ptr<CsrNetDevice> device)
 {
   Require (device->GetMac ().GetTransmittedFrameCount () == 1,
-           "MAC did not concatenate both queued frames");
+           "MAC did not concatenate all queued frames");
   Require (device->GetMac ().GetQueuedFrameCount () == 0,
            "MAC queue did not drain after the reserved opportunity");
-  Require (g_sequences.size () == 2 &&
+  Require (g_sequences.size () == 3 &&
              g_sequences[0] == 2 &&
-             g_sequences[1] == 1,
+             g_sequences[1] == 3 &&
+             g_sequences[2] == 1,
            "MAC did not preserve DSCP priority followed by FIFO service");
 
-  Require (g_txTimes[0] == g_txTimes[1],
+  Require (g_txTimes[0] == g_txTimes[1] &&
+             g_txTimes[1] == g_txTimes[2],
            "concatenated frames did not report one shared sent instant");
+  Require (device->GetMac ().GetLastAggregateDscp () == 7,
+           "outer aggregate metadata did not retain the maximum DATA DSCP");
 }
 
 } // namespace
@@ -369,6 +460,7 @@ main ()
 {
   Time::SetResolution (Time::NS);
 
+  CheckCurrentOrdinal254Exhaustion ();
   CheckCoarseInclusiveNoAvoidVectors ();
   CheckDirectHeardActiveNodeProvenance ();
   Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (1);
@@ -389,6 +481,8 @@ main ()
     BuildDataFrame (1, 1), 2, 1, true);
   device->GetMac ().EnqueueTxFrame (
     BuildDataFrame (2, 7), 2, 7, true);
+  device->GetMac ().EnqueueTxFrame (
+    BuildDataFrame (3, 7), 2, 7, true);
 
   Simulator::Schedule (MilliSeconds (45),
                        &CheckReservationMidCountdown,

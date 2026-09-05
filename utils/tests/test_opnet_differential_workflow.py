@@ -131,6 +131,17 @@ class DifferentialWorkflowIsolationTests(unittest.TestCase):
             manifest = json.loads(
                 (output / "run-manifest.json").read_text(encoding="utf-8")
             )
+            self.assertEqual(
+                manifest["evidence_scope"],
+                "diagnostic_event_trace_not_opnet_origin_certification",
+            )
+            self.assertEqual(
+                manifest["opnet_source_instrumentation"]["classification"],
+                "not_supplied_legacy_or_synthetic_trace",
+            )
+            self.assertFalse(
+                manifest["opnet_source_instrumentation"]["certifying"]
+            )
             compare_command = manifest["comparator_command"]
             self.assertEqual(compare_command[:3], [sys.executable, "-B", "-I"])
             self.assertEqual(Path(compare_command[3]), comparator_path)
@@ -142,6 +153,184 @@ class DifferentialWorkflowIsolationTests(unittest.TestCase):
             self.assertTrue(state["dont_write_bytecode"])
             self.assertEqual(list(tools.rglob("*.pyc")), [])
             self.assertEqual(list(tools.rglob("__pycache__")), [])
+
+    def test_managed_output_cannot_alias_an_input(self) -> None:
+        workflow = load_uncached_module(
+            "csr_opnet_differential_workflow_collision_test", SCRIPT
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenario = root / "scenario.csv"
+            scenario.write_text("fixture\n", encoding="utf-8")
+            opnet_trace = root / "opnet.csv"
+            opnet_trace.write_text("time_s,event,node\n", encoding="utf-8")
+            runner = root / "runner"
+            runner.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            os.chmod(runner, 0o755)
+            output = root / "run"
+            output.mkdir()
+            os.link(scenario, output / "ns3-trace.csv")
+            argv = [
+                str(SCRIPT),
+                "--scenario",
+                str(scenario),
+                "--runner",
+                str(runner),
+                "--opnet-trace",
+                str(opnet_trace),
+                "--output-dir",
+                str(output),
+            ]
+            original = scenario.read_bytes()
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(
+                    SystemExit, "managed output .* aliases scenario input"
+                ):
+                    workflow.main()
+            self.assertEqual(scenario.read_bytes(), original)
+
+    def test_arbitrary_opnet_manifest_is_rejected_as_non_provenance(self) -> None:
+        workflow = load_uncached_module(
+            "csr_opnet_differential_workflow_manifest_test", SCRIPT
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenario = root / "scenario.csv"
+            scenario.write_text("fixture\n", encoding="utf-8")
+            opnet_trace = root / "opnet.csv"
+            opnet_trace.write_text("time_s,event,node\n", encoding="utf-8")
+            runner = root / "runner"
+            runner.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            os.chmod(runner, 0o755)
+            arbitrary = root / "arbitrary.json"
+            arbitrary.write_text("{}\n", encoding="utf-8")
+            output = root / "run"
+            argv = [
+                str(SCRIPT),
+                "--scenario",
+                str(scenario),
+                "--runner",
+                str(runner),
+                "--opnet-trace",
+                str(opnet_trace),
+                "--opnet-manifest",
+                str(arbitrary),
+                "--output-dir",
+                str(output),
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(SystemExit, "metadata has the wrong shape"):
+                    workflow.main()
+            self.assertFalse(output.exists())
+
+    def test_runner_cannot_inject_future_managed_symlink(self) -> None:
+        workflow = load_uncached_module(
+            "csr_opnet_differential_workflow_runner_injection_test", SCRIPT
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenario = root / "scenario.csv"
+            scenario.write_text("protected scenario\n", encoding="utf-8")
+            opnet_trace = root / "opnet.csv"
+            opnet_trace.write_text("time_s,event,node\n1,tx,1\n", encoding="utf-8")
+            runner = root / "runner"
+            runner.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    from pathlib import Path
+                    import sys
+                    options = dict(
+                        argument[2:].split("=", 1)
+                        for argument in sys.argv[1:]
+                        if argument.startswith("--") and "=" in argument
+                    )
+                    trace = Path(options["trace"])
+                    trace.write_text("time_s,event,node\\n1,tx,1\\n", encoding="utf-8")
+                    trace.with_name("differential-report.json").symlink_to(
+                        Path(options["scenario"])
+                    )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(runner, 0o755)
+            output = root / "run"
+            argv = [
+                str(SCRIPT),
+                "--scenario",
+                str(scenario),
+                "--runner",
+                str(runner),
+                "--opnet-trace",
+                str(opnet_trace),
+                "--output-dir",
+                str(output),
+            ]
+            before = scenario.read_bytes()
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(SystemExit, "single-link regular file"):
+                    workflow.main()
+            self.assertEqual(scenario.read_bytes(), before)
+
+    def test_comparator_cannot_inject_managed_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            workflow_path = tools / SCRIPT.name
+            shutil.copy2(SCRIPT, workflow_path)
+            comparator_path = tools / COMPARATOR.name
+            comparator_path.write_text(
+                textwrap.dedent(
+                    """\
+                    from pathlib import Path
+                    import sys
+                    report = Path(sys.argv[sys.argv.index("--report") + 1])
+                    report.symlink_to(Path(sys.argv[1]))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            workflow = load_uncached_module(
+                "csr_opnet_differential_workflow_comparator_injection_test",
+                workflow_path,
+            )
+            scenario = root / "scenario.csv"
+            scenario.write_text("protected scenario\n", encoding="utf-8")
+            opnet_trace = root / "opnet.csv"
+            opnet_trace.write_text("time_s,event,node\n1,tx,1\n", encoding="utf-8")
+            runner = root / "runner"
+            runner.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/bin/sh
+                    for argument in "$@"; do
+                        case "$argument" in --trace=*) trace=${argument#--trace=} ;; esac
+                    done
+                    printf 'time_s,event,node\\n1,tx,1\\n' > "$trace"
+                    """
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(runner, 0o755)
+            output = root / "run"
+            argv = [
+                str(workflow_path),
+                "--scenario",
+                str(scenario),
+                "--runner",
+                str(runner),
+                "--opnet-trace",
+                str(opnet_trace),
+                "--output-dir",
+                str(output),
+            ]
+            before = opnet_trace.read_bytes()
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(SystemExit, "single-link regular file"):
+                    workflow.main()
+            self.assertEqual(opnet_trace.read_bytes(), before)
 
 
 if __name__ == "__main__":

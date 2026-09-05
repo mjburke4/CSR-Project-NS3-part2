@@ -282,8 +282,13 @@ TestInactivePruneAndAllOrNoneGate ()
            "retry did not prune the inactive residual before admission");
 
   g_blockNeighbor3 = false;
-  harness.nwk->SetRoutingControlBufferFullCallbackForTest (
-    MakeCallback (&BufferFullForTest));
+  // A reliable NeighborCheck completion frees a HOP resend slot.  NWK must
+  // revisit a previously buffer-blocked routing owner in a later same-time
+  // event even though the buffer callback itself did not change.
+  harness.nwk->NoteNeighborCheckSuccess (
+    NEIGHBOR_3,
+    CsrNeighborCheckType::Message,
+    0);
   DrainSameTime ();
 
   Require (g_observations.size () == 2 &&
@@ -291,6 +296,45 @@ TestInactivePruneAndAllOrNoneGate ()
                std::vector<CsrNodeId> ({NEIGHBOR_3}) &&
              g_observations[1].bytes == identity.bytes,
            "unblocked retry did not send the entire retained residual");
+  Simulator::Destroy ();
+}
+
+void
+TestFinalAckCapacityWake ()
+{
+  Harness harness = MakeCleanHarness ();
+  Observation first = StartOneGroupedOwner (harness);
+
+  g_blockNeighbor3 = true;
+  harness.nwk->SetRoutingControlBufferFullCallbackForTest (
+    MakeCallback (&BufferFullForTest));
+  ReportFailure (harness, first, first.targets);
+  DrainSameTime ();
+  Require (g_observations.size () == 1 &&
+             harness.nwk->IsFirstOwnedRoutingControlReadyForTest (),
+           "setup did not retain one blocked ready owner");
+
+  // Create a distinct in-flight owner while the first remains blocked.
+  harness.nwk->SetNodeType (CsrNodeType::Ordinary);
+  DrainSameTime ();
+  Require (g_observations.size () == 2,
+           "second selected-route change did not create an in-flight owner");
+  Observation second = g_observations[1];
+
+  g_blockNeighbor3 = false;
+  for (std::size_t index = 0; index < second.targets.size (); ++index)
+    {
+      ReportAck (harness,
+                 second,
+                 second.targets[index],
+                 index + 1 == second.targets.size ());
+    }
+  DrainSameTime ();
+
+  Require (g_observations.size () == 3 &&
+             g_observations[2].targets == first.targets &&
+             g_observations[2].bytes == first.bytes,
+           "final ACK did not wake the older buffer-blocked owner same-time");
   Simulator::Destroy ();
 }
 
@@ -456,6 +500,7 @@ main ()
 {
   TestRepeatedResidualReduction ();
   TestInactivePruneAndAllOrNoneGate ();
+  TestFinalAckCapacityWake ();
   TestRealHopTimeoutOrdering ();
   std::cout << "PASS: NWK-owned residual routing retry" << std::endl;
   return 0;

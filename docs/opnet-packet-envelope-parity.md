@@ -1,6 +1,6 @@
 # OPNET packet and control-envelope parity
 
-Updated: 2026-09-01
+Updated: 2026-09-05
 
 ## Scope
 
@@ -120,6 +120,15 @@ DATA frame: `41 + 217 = 258` and `46 + 222 = 268`. The earlier 30-byte
 cumulative approximation (`30 + 222 = 252`) incorrectly admitted that DATA
 segment, so its apparently closer aggregate result was a compensating error.
 
+The recovered hidden-node executable lineage has the same bare HOP envelope
+boundary. Its 592-byte logical DATA body is wrapped by eight-byte `br_Hop` and
+17-byte `br_Mac` envelopes, producing a 617-byte MAC payload. Its cumulative
+ACK/DACK remains the bare 41-byte form. The two together sum to 658 bytes;
+they cannot concatenate under the source's strict 8-kbit/s `< 256`-byte
+packing rule. Both `hist-adb97c54-bare` and the separately hash-bound
+`hist-dd3f38e8-bare` profile use this arithmetic; their distinct profile names
+preserve executable provenance rather than implying different packet widths.
+
 This boundary is now executable rather than documentary only. The canonical
 atomic `hop_security_profile` value `production-pairwise16` remains the
 default and retains Pairwise16 ordinary DATA plus 30/46-byte ACK accounting.
@@ -174,7 +183,10 @@ silently choosing one source for both purposes.
 - packet-tag copying and aggregate summation;
 - complete DATA, bare and Pairwise16 ACK/DACK, routed-SNMP, HELLO/Discover,
   NeighborCheck, ARL routing-section, KeyRequest, and KeyUpdate
-  compatibility-envelope inference.
+  compatibility-envelope inference;
+- the archived hidden-node 617-byte DATA and 41-byte cumulative ACK/DACK
+  boundary; and
+- literal 16-bit OTA Speed plus low-16-bit Length serialization semantics.
 
 The exact serializer now also drives source-derived OTA duration: the preamble,
 SOF, speed, and length fields use the S0 chip duration from `br_txdel.ps.c`,

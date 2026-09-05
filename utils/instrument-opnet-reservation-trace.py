@@ -11,11 +11,36 @@ from pathlib import Path
 
 
 SCHEMA = "csr-opnet-instrumentation-v1"
-EXPECTED_SOURCES = {
+TRACE_SCHEMA = "csr-differential-trace-v1"
+PATCHED_SOURCES = {
     "br_app.pr.c": "0e3dfeefc90da99b78f1b6305ccffa765de4b35710414bd85aa9fc30d8bb6dde",
     "br_mac.pr.c": "d1bc9f7d57da4cc490a835e19b26eac47dc0088629ecd15abfaaa5a0734be27a",
     "br_ecc.ps.c": "fbc5d5fb63c08eb3a5b2afec0baacf7c59182cf07382ed5fd3a61bd61f53d83c",
 }
+AIRTIME_REFERENCE_SOURCES = {
+    "br_support.h": "9855b95029a2e15190976ef5ae926d028a98ef91db5d7567597c5f01cc7f37ce",
+    "br_txdel.ps.c": "6b9ae9213aea8546b97069df5fe5315e8a7c49203d7d27c3d6e559e452a49463",
+}
+EXPECTED_SOURCES = {**PATCHED_SOURCES, **AIRTIME_REFERENCE_SOURCES}
+EXPECTED_PATCHED_OUTPUT_SHA256 = {
+    "br_app.pr.c": "1678d9f1c81d8692ab28728feb5ea2c7913e3578c350633a7e5991e6e302ceee",
+    "br_mac.pr.c": "726dd449acf7b9670ea941bbaf6115569db6ddf547bc19437f1685c3c09712ae",
+    "br_ecc.ps.c": "4d92630cffa8da10a14d02238eb9259dc8d5cb2dd6ffd68ad397ac37432df861",
+}
+EXPECTED_HEADER_TEMPLATE_SHA256 = (
+    "60aac760949eb895304ef1457d8623253ddfb22245b0683fee1bea6b589692e6"
+)
+GENERATED_OUTPUTS = tuple(PATCHED_SOURCES) + ("csr-opnet-trace.h",)
+MANIFEST_NAME = "opnet-instrumentation-manifest.json"
+GENERATOR_NAME = "instrument-opnet-reservation-trace.py"
+BEHAVIORAL_CONTROL = (
+    "A test hook loads the selected slot/counter at transmit preparation, "
+    "controls future reservation draws, and aligns the first countdown "
+    "tick to a common 100-ms epoch after any still-pending source "
+    "holdoff. Idle prep_tx holdoff and Search-state holdoff reuse, "
+    "countdown steps, transmit, receive, collision, BER, and ECC logic "
+    "remain in the recovered sources."
+)
 
 
 class InstrumentationError(ValueError):
@@ -24,6 +49,30 @@ class InstrumentationError(ValueError):
 
 def digest_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def paths_overlap(first: Path, second: Path) -> bool:
+    """Return whether resolved directory paths are equal or nested."""
+
+    try:
+        first = first.resolve(strict=False)
+        second = second.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise InstrumentationError(f"cannot resolve directory identity: {error}") from error
+    return first == second or first in second.parents or second in first.parents
+
+
+def paths_alias(first: Path, second: Path) -> bool:
+    """Return whether two existing or prospective paths address one object."""
+
+    try:
+        if first.resolve(strict=False) == second.resolve(strict=False):
+            return True
+        return first.samefile(second)
+    except FileNotFoundError:
+        return False
+    except (OSError, RuntimeError) as error:
+        raise InstrumentationError(f"cannot resolve file identity: {error}") from error
 
 
 def resolve_source(source_dir: Path, name: str) -> Path:
@@ -212,7 +261,10 @@ def patch_mac(text: str) -> str:
         "\t// Send packet to transmitter\n\top_pk_send(pkptr, MAC_TO_TX_STRM);",
         "\t// Send packet to transmitter\n"
         "\tcsr_opnet_trace_tx_start(op_sim_time(), my_node_id, dest, seq_num, "
-        "payload_speed, (int)f1/8, txslot_counter);\n"
+        "payload_speed, (int)f1/8,\n"
+        "\t\tstrcmp(pk_format, \"br_OTA_LongPream\") == 0 ? \"long\" :\n"
+        "\t\t(strcmp(pk_format, \"br_OTA_ShortPream\") == 0 ? \"short\" : "
+        "\"unknown\"), txslot_counter);\n"
         "\top_pk_send(pkptr, MAC_TO_TX_STRM);",
         "br_mac tx_start",
     )
@@ -292,34 +344,77 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    arguments = build_parser().parse_args()
+def instrument(arguments: argparse.Namespace) -> dict[str, object]:
+    """Build one fail-closed instrumentation bundle and return its manifest."""
+
     slots = dict(arguments.force_reservation_slot)
     if len(slots) != len(arguments.force_reservation_slot):
-        raise SystemExit("error: a forced reservation node was repeated")
+        raise InstrumentationError("a forced reservation node was repeated")
     if not math.isfinite(arguments.activation_time) or arguments.activation_time < 0.0:
-        raise SystemExit("error: --activation-time must be finite and nonnegative")
-    arguments.output_dir.mkdir(parents=True, exist_ok=True)
-    output_names = tuple(EXPECTED_SOURCES) + ("csr-opnet-trace.h",)
-    existing = [name for name in output_names if (arguments.output_dir / name).exists()]
+        raise InstrumentationError(
+            "--activation-time must be finite and nonnegative"
+        )
+    if not arguments.source_dir.is_dir():
+        raise InstrumentationError("source directory does not exist")
+    if arguments.output_dir.exists() and not arguments.output_dir.is_dir():
+        raise InstrumentationError("output path exists and is not a directory")
+    if paths_overlap(arguments.source_dir, arguments.output_dir):
+        raise InstrumentationError(
+            "source and output directories must be disjoint and non-overlapping"
+        )
+
+    output_names = GENERATED_OUTPUTS + (MANIFEST_NAME,)
+    existing = [
+        name
+        for name in output_names
+        if (arguments.output_dir / name).exists()
+        or (arguments.output_dir / name).is_symlink()
+    ]
     if existing and not arguments.overwrite:
-        raise SystemExit(
-            "error: output files already exist; pass --overwrite: " + ", ".join(existing)
+        raise InstrumentationError(
+            "output files already exist; pass --overwrite: " + ", ".join(existing)
         )
 
     source_bytes: dict[str, bytes] = {}
+    source_paths: dict[str, Path] = {}
     for name, expected in EXPECTED_SOURCES.items():
+        path = resolve_source(arguments.source_dir, name)
         try:
-            path = resolve_source(arguments.source_dir, name)
-        except InstrumentationError as error:
-            raise SystemExit(f"error: {error}") from error
-        data = path.read_bytes()
+            data = path.read_bytes()
+        except OSError as error:
+            raise InstrumentationError(f"cannot read {path}: {error}") from error
         actual = digest_bytes(data)
         if actual != expected:
-            raise SystemExit(
-                f"error: {name} SHA-256 {actual} does not match recovered source {expected}"
+            raise InstrumentationError(
+                f"{name} SHA-256 {actual} does not match recovered source {expected}"
             )
         source_bytes[name] = data
+        source_paths[name] = path
+
+    header_path = Path(__file__).with_name("opnet") / "csr-opnet-trace.h"
+    protected_inputs = {**source_paths, "csr-opnet-trace.h template": header_path}
+    output_paths = {
+        name: arguments.output_dir / name for name in output_names
+    }
+    for name in output_names:
+        output_path = output_paths[name]
+        if output_path.is_symlink():
+            raise InstrumentationError(
+                f"output {name} is a symbolic link; refusing --overwrite"
+            )
+        if output_path.exists() and not output_path.is_file():
+            raise InstrumentationError(f"output {name} is not a regular file")
+        for source_name, source_path in protected_inputs.items():
+            if paths_alias(output_path, source_path):
+                raise InstrumentationError(
+                    f"output {name} aliases recovered source {source_name}"
+                )
+    for index, first_name in enumerate(output_names):
+        for second_name in output_names[index + 1 :]:
+            if paths_alias(output_paths[first_name], output_paths[second_name]):
+                raise InstrumentationError(
+                    f"outputs {first_name} and {second_name} alias one another"
+                )
 
     try:
         outputs = {
@@ -334,10 +429,18 @@ def main() -> None:
             ),
         }
     except (UnicodeDecodeError, InstrumentationError) as error:
-        raise SystemExit(f"error: {error}") from error
+        raise InstrumentationError(str(error)) from error
 
-    header_path = Path(__file__).with_name("opnet") / "csr-opnet-trace.h"
-    header = header_path.read_text(encoding="utf-8")
+    try:
+        header_bytes = header_path.read_bytes()
+        header = header_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise InstrumentationError(f"cannot read header template: {error}") from error
+    header_digest = digest_bytes(header_bytes)
+    if header_digest != EXPECTED_HEADER_TEMPLATE_SHA256:
+        raise InstrumentationError(
+            f"header template SHA-256 {header_digest} is not trusted"
+        )
     cases = "\n".join(
         f"        case {node}: return {slot};" for node, slot in sorted(slots.items())
     )
@@ -355,34 +458,73 @@ def main() -> None:
     )
     outputs["csr-opnet-trace.h"] = header
 
-    manifest_sources: dict[str, object] = {}
-    for name, text in outputs.items():
-        encoded = text.encode("utf-8")
-        (arguments.output_dir / name).write_bytes(encoded)
-        manifest_sources[name] = {
-            "output_sha256": digest_bytes(encoded),
-            "original_sha256": EXPECTED_SOURCES.get(name),
+    encoded_outputs = {
+        name: text.encode("utf-8") for name, text in outputs.items()
+    }
+    for name, expected_digest in EXPECTED_PATCHED_OUTPUT_SHA256.items():
+        actual_digest = digest_bytes(encoded_outputs[name])
+        if actual_digest != expected_digest:
+            raise InstrumentationError(
+                f"generated {name} SHA-256 {actual_digest} is not trusted"
+            )
+    manifest_sources: dict[str, object] = {
+        name: {
+            "output_sha256": (
+                digest_bytes(encoded_outputs[name])
+                if name in encoded_outputs
+                else None
+            ),
+            "original_sha256": expected,
         }
+        for name, expected in EXPECTED_SOURCES.items()
+    }
+    manifest_sources["csr-opnet-trace.h"] = {
+        "output_sha256": digest_bytes(encoded_outputs["csr-opnet-trace.h"]),
+        "original_sha256": header_digest,
+    }
+    generator_path = Path(__file__).resolve()
+    for name, text in outputs.items():
+        if name not in GENERATED_OUTPUTS:
+            raise InstrumentationError(f"unexpected generated output {name}")
+    try:
+        generator_digest = digest_bytes(generator_path.read_bytes())
+    except OSError as error:
+        raise InstrumentationError(f"cannot hash generator: {error}") from error
     manifest = {
         "schema": SCHEMA,
-        "trace_schema": "csr-differential-trace-v1",
+        "trace_schema": TRACE_SCHEMA,
+        "generator": {
+            "name": generator_path.name,
+            "sha256": generator_digest,
+        },
         "forced_reservation_slots": {str(node): slot for node, slot in sorted(slots.items())},
         "activation_time_s": arguments.activation_time,
-        "behavioral_control": (
-            "A test hook loads the selected slot/counter at transmit preparation, "
-            "controls future reservation draws, and aligns the first countdown "
-            "tick to a common 100-ms epoch after any still-pending source "
-            "holdoff. Idle prep_tx holdoff and Search-state holdoff reuse, "
-            "countdown steps, transmit, receive, collision, BER, and ECC logic "
-            "remain in the recovered sources."
-        ),
+        "behavioral_control": BEHAVIORAL_CONTROL,
         "sources": manifest_sources,
     }
-    manifest_path = arguments.output_dir / "opnet-instrumentation-manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    print(f"instrumented {len(EXPECTED_SOURCES)} OPNET sources in {arguments.output_dir}")
+    manifest_bytes = (
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+    try:
+        arguments.output_dir.mkdir(parents=True, exist_ok=True)
+        for name, encoded in encoded_outputs.items():
+            (arguments.output_dir / name).write_bytes(encoded)
+        manifest_path = arguments.output_dir / MANIFEST_NAME
+        manifest_path.write_bytes(manifest_bytes)
+    except OSError as error:
+        raise InstrumentationError(f"cannot write instrumentation bundle: {error}") from error
+    return manifest
+
+
+def main() -> None:
+    arguments = build_parser().parse_args()
+    try:
+        instrument(arguments)
+    except InstrumentationError as error:
+        raise SystemExit(f"error: {error}") from error
+    manifest_path = arguments.output_dir / MANIFEST_NAME
+    print(f"instrumented {len(PATCHED_SOURCES)} OPNET sources in {arguments.output_dir}")
     print(f"provenance manifest: {manifest_path}")
 
 

@@ -1,6 +1,6 @@
 # OPNET aggregate comparison
 
-Updated: 2026-09-02
+Updated: 2026-09-05
 
 ## Purpose and evidence boundary
 
@@ -30,6 +30,17 @@ Every workflow run also retains `app-admission-diagnostics.csv`. Its per-flow
 counters must exactly partition generator attempts into admitted packets and
 one source-ordered gate reason before the workflow proceeds.
 
+The workflow revalidates immutable input/tool identity and the output
+directory's device/inode at every cross-stage boundary. Managed artifacts must
+appear only in their owning stage and must be single-link regular files that do
+not alias protected inputs. Parent-written logs and manifests use guarded
+atomic replacement; injected symlinks, hardlinks, special files, unexpected
+future outputs, and path-resolution errors stop the run. The ns-3 aggregation
+provenance must bind both the aggregate SHA-256 and the canonical
+`output.path`. These checks protect the evidence chain between subprocesses;
+they do not claim kernel-level exclusion of a concurrent path swap inside a
+child executable's own file-open interval.
+
 ## Canonical CSV contract
 
 Every row describes one sample from one aggregate time series. The six core
@@ -58,6 +69,11 @@ exactly. A statistic expressed in seconds is therefore never numerically
 compared with a statistic expressed in milliseconds, nor is a bucket sum
 compared with a sample mean. Unknown values remain empty rather than being
 guessed.
+
+Scenario node IDs and concrete flow endpoints are limited to
+`0x000000..0xFFFFFE`; `0xFFFFFF` is the CSR broadcast sentinel and is never a
+concrete topology identity. Explicit flow start and interval values must be
+finite, with nonnegative start and positive interval.
 
 ### Nested latency-result layout
 
@@ -202,7 +218,7 @@ if extraction is partial, vector time axes are inconsistent, scenario name,
 seed, or full duration differs, exact sequence correlation is lost, the runner
 fails, or the comparator finds a selected difference.
 
-“Exact sequence correlation” includes one source-exact exception: a duplicate
+"Exact sequence correlation" includes one source-exact exception: a duplicate
 delivery may reuse the original send timestamp only when compact `hop_feedback`
 rows prove that the same relay and ingress peer accepted the same incoming HOP
 sequence and application tag after an earlier DACK. The retry's later feedback
@@ -210,6 +226,13 @@ may be ACK or DACK as congestion changes; each feedback consumes a prior,
 unconsumed matching relay enqueue (allowing intervening statistic samples),
 and ACK closes that lineage. Every unproved duplicate remains an unmatched
 delivery and stops the workflow.
+
+A current run with zero repeated-feedback proofs is the strict form: all three
+duplicate counts and the lineage list must be empty. The historical
+source-proved duplicate ledger remains accepted for reproducibility only when
+every count partitions exactly and every extra delivery consumes one complete,
+trace-bound lineage budget. A zero-count summary carrying historical lineage
+records, or a nonzero summary without them, fails closed.
 
 Manifest success is `selected_comparison_passed`, never a claim of whole-model
 OPNET parity. `evidence_scope` is
@@ -279,7 +302,7 @@ named scenario as the same evidence.
 | `CSR_Validation-2_Nodes_Latency` | `*-DES-1.ov` | `c9ebc87410b68780abac187a5164939cd95ffe5ba4a5a7e393012117d4235493` |
 |  | `*.pb.m` | `a43c81806e6216491cad831482d509481239934b5f3d8980df4b588fb6d9ff94` |
 
-## Measured exact-tolerance results
+## Retained pre-reconstruction exact-tolerance results
 
 The four completed full-duration core-statistic comparisons align all 800
 selected points in each case, with no missing or extra timestamps. They do not
@@ -322,6 +345,50 @@ phase. The two-node and hidden-node headline means are now close without a
 tolerance adjustment. Multihop remains materially high in traffic and low in
 delay, so the four recovered HOP/MAC queue vectors were compared next rather
 than changing slot policy again.
+
+The hidden-node reconstruction is independently bound to
+`legacy-send-to-from-no-dscp`,
+`hist-2015-fine-one-based-table-no-avoid`, and
+`hist-dd3f38e8-bare`, with executable SHA-256
+`dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0`.
+That bare profile produces 617-byte OTA DATA from the configured 600-byte
+application packet and 41-byte ACK/DACK. Multihop remains bound to the adb97
+tuple and 217-/41-byte wire forms. The binding follows executable evidence;
+the tools do not infer either tuple from a scenario name or topology.
+
+### Reconstructed worktree results (2026-09-05)
+
+The full-duration hidden-node and multihop workflows were rerun from this
+reconstruction with their exact hash-bound tuples and no noncertifying
+overrides. Both workflows completed extraction, ns-3 execution, and strict
+aggregation successfully. Their only nonzero stage status is the expected
+zero-tolerance aggregate comparator result:
+
+| Scenario | Statistic | OPNET mean | ns-3 mean | ns-3 residual |
+| --- | --- | ---: | ---: | ---: |
+| `blue_radio_campus-hidden_nodes_symmetrical` | Traffic sent | 12.1707333 packet/s | 13.3092167 packet/s | +9.3543% |
+|  | Traffic received | 11.4369500 packet/s | 12.6972833 packet/s | +11.0198% |
+|  | End-to-end delay | 9.1797597 s | 8.1754843 s | -10.9401% |
+|  | Application packet size | 4,736 bits | 4,736 bits | Exact in all 100 buckets |
+| `blue_radio_campus-multihop` | Traffic sent | 2.0120000 packet/s | 2.0561667 packet/s | +2.1952% |
+|  | Traffic received | 1.9016667 packet/s | 1.9596667 packet/s | +3.0500% |
+|  | End-to-end delay | 112.7480075 s | 95.6824538 s | -15.1360% |
+|  | Application packet size | 1,536 bits | 1,536 bits | Exact in 95 measured buckets; 5 no-sample buckets |
+
+Hidden-node aligns all 800 bucket identities and compares all 800 numeric
+values; 700 differ at exact tolerance. All 761,837 deliveries match exact
+application sequences and packet sizes, with 36,716 sends lacking an in-window
+delivery and no unmatched delivery. Multihop also aligns all 800 identities,
+compares 780 numeric values, preserves the 20 authoritative no-sample values,
+and reports 625 exact-tolerance differences. It validates 11,757 exact-sequence
+deliveries plus one fully source-proved repeated-DACK delivery, with 580 sends
+lacking an in-window delivery and no unmatched or size-mismatched delivery.
+
+These results support the bounded general-parity claim: scenario identity,
+time axes, packet sizes, and delivery lineage are exact, while the three
+headline aggregate means remain within a largest absolute residual of 15.136%.
+They do not establish exact bucket values, chronological event/RNG identity,
+or PHY/ECC numeric calibration.
 
 ### Multihop queue-residence diagnostic
 
@@ -428,7 +495,7 @@ stops changing by 389.955 seconds. Those timestamps are historical ns-3
 diagnostics, not OPNET event truth; the recovered PB/OV selection contains no
 route events.
 
-The current route-convergence rerun removes that startup admission lag. At
+The retained route-convergence checkpoint removes that startup admission lag. At
 88.548912442 seconds, node 8 selects the direct route to destination 7 with
 next hop 7, cost 7,450, path `7`, and reason `candidate update`. At
 88.848492442 seconds, node 7 admits neighbor 8 and selects the direct route to
@@ -454,7 +521,7 @@ state, and the correlated `(src,dst,sequence)` identity wherever the modeled
 packet carries it. Enabling the ledger does not change modeled bytes, queue
 order, route selection, random draws, or event scheduling.
 
-The current route-convergence 6,000-second trace has 3,271,308 events and
+That retained route-convergence 6,000-second trace has 3,271,308 events and
 SHA-256
 `64bf81c8b2155cd10e3688b468219c6d7d018dee73097c3cb0a45456339231f2`.
 Its 1,710,000 application decisions reconcile exactly to the compact
@@ -484,7 +551,7 @@ zero route-context mismatches. The incomplete inventory is 201 open in NWK,
 471 final `no_ack`, 34 open resend, 24 completed ACK, 3 completed DACK, and 1
 packet with no NWK observation.
 
-The current rerun's aggregate trace has SHA-256
+That retained rerun's aggregate trace has SHA-256
 `64bf81c8b2155cd10e3688b468219c6d7d018dee73097c3cb0a45456339231f2`,
 and its generated ns-3 aggregate CSV has SHA-256
 `059b326efa52f1526823d6dfac124b9c1c7e9ec8e642544a31e8f44b2037cfa3`.
@@ -513,7 +580,7 @@ handle, matching the two OPNET processes.
 At the earlier resend/generic-wake checkpoint, compared with its
 DACK-ordering predecessor, that correction left packet counts and the eight
 core aggregate series unchanged while adding the source-required NWK scans.
-This is historical checkpoint evidence; the current route-convergence rerun
+This is historical checkpoint evidence; the retained route-convergence rerun
 supersedes its admission, hold, packet-outcome, and aggregate counts above.
 
 The retained pre-fix trace has SHA-256
@@ -526,7 +593,7 @@ ACKs and pre-count 16 DACKs.  ACK-marked duplicates do not enqueue again;
 DACK-marked retries remain eligible for a fresh NWK enqueue and ACK/DACK
 decision because the legacy duplicate test consults only the ACK register.
 
-A subsequent current-code 6,000-second trace at commit `05b6064` (SHA-256
+A subsequent commit-pinned 6,000-second trace at commit `05b6064` (SHA-256
 `0582f1928c93cae9eeebf0a06c573535944e2ed293e9ae53be5e0aeeefd7a3fd`)
 contained 9,400 sends and 8,680 delivery rows for 8,678 unique identities. The
 two repeated identities were `8->1/10446` at 2136.682911086 and
@@ -538,7 +605,7 @@ to source-exact duplicates. It remains noncertifying regression evidence. New
 compact traces retain only the needed feedback rows and still fail closed when
 the complete lineage is absent.
 
-The fresh instrumented rerun produced trace SHA-256
+The retained instrumented rerun produced trace SHA-256
 `263e954e3ba1054787c5a32e7386f619d38ee789276c68d0900585ef3b0211f8`.
 Strict aggregation passed with 8,678 exact-sequence matches plus two
 `source_exact_dack_retry_duplicate` matches, zero unmatched delivery rows, and
@@ -551,7 +618,7 @@ differed, with 20 missing delay-bucket values skipped. Across the 100 buckets,
 ns-3 averaged 1.566667 sent packets/s and 1.446667 received packets/s versus
 OPNET's 2.012000 and 1.901667; across the 95 observed delay buckets, ns-3
 averaged 192.361188 seconds versus OPNET's 112.748007 seconds. This is a
-current-code historical-aggregate checkpoint, not packet-level OPNET evidence.
+commit-pinned historical-aggregate checkpoint, not packet-level OPNET evidence.
 It is also diagnostic rather than build-certified: this manifest hashes the
 runner executable but not its dynamically loaded ns-3/CSR shared libraries or
 the already-running workflow wrapper. A later harness-hardening commit should
@@ -583,7 +650,7 @@ attempt before packet creation:
 | `blue_radio_campus-hidden_nodes_symmetrical` | 149,250,000 | 763,700 | 0 | 0 | 0 | 0 | 148,486,300 |
 | `blue_radio_campus-multihop` | 1,710,000 | 14,740 | 1,500 | 4,117 | 189 | 0 | 1,689,454 |
 
-The current route-convergence multihop row is 1,710,000 attempts, 14,551
+The retained route-convergence multihop row is 1,710,000 attempts, 14,551
 admissions, zero discovery blocks, zero empty-topology blocks, zero
 gateway-route blocks, zero dynamic-destination blocks, and 1,695,449 NSDP
 blocks. It is intentionally kept separate rather than rewriting the provenance

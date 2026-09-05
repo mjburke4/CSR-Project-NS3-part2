@@ -264,6 +264,19 @@ CheckOtaFormats ()
   RequireRoundTrip (CsrOpnetPacketFormat::OtaLongPreamble,
                     fields,
                     payload);
+
+  // OTA Speed and Length are both 16-bit fields.  In particular, 1000 is a
+  // literal 16-bit OPNET value (not the compact ns-3 compatibility code), and
+  // an oversized source integer retains only its low 16 bits on the wire.
+  fields.speed = 1000;
+  fields.length = static_cast<uint16_t> (0x12345u);
+  shortBytes = Serialize (
+    CsrOpnetPacketFormat::OtaShortPreamble, fields, payload);
+  RequireBytes (
+    std::vector<uint8_t> (shortBytes.begin () + 15,
+                          shortBytes.begin () + 19),
+    {0x03, 0xe8, 0x23, 0x45},
+    "OTA Speed/Length did not preserve 16-bit field semantics");
 }
 
 void
@@ -469,6 +482,38 @@ CheckCompatibilityInference ()
            "KeyUpdate did not add its exact 51-byte record");
 }
 
+void
+CheckArchivedHiddenEnvelopeSizes ()
+{
+  // Both recovered bare-HOP executable lineages carry the 592-byte logical
+  // DATA body behind br_Hop and br_Mac without Pairwise16.  The resulting
+  // source envelope is 592 + 8 + 17 = 617 bytes.
+  Ptr<Packet> hiddenData = Create<Packet> (592);
+  CsrHeader dataHeader (1, 2, 0xff, 0, true, false);
+  dataHeader.SetType (CSR_PKT_DATA);
+  dataHeader.SetDestType (CSR_DEST_UNICAST);
+  hiddenData->AddHeader (dataHeader);
+  Require (CsrAnnotateOpnetEnvelope (hiddenData),
+           "archived hidden DATA envelope was not recognized");
+  Require (CsrGetOpnetWireSize (hiddenData) == 617,
+           "592-byte hidden DATA body did not become a 617-byte bare envelope");
+
+  Ptr<Packet> cumulativeAck = Create<Packet> ();
+  CsrHeader ackHeader (2, 1, 0xff, 0, false, true);
+  ackHeader.SetType (CSR_PKT_ACK);
+  ackHeader.SetDestType (CSR_DEST_UNICAST);
+  ackHeader.SetHasAckWindow (true);
+  ackHeader.SetAckBitmap (1);
+  ackHeader.SetDackBitmap (0);
+  cumulativeAck->AddHeader (ackHeader);
+  Require (CsrAnnotateOpnetEnvelope (cumulativeAck),
+           "archived cumulative ACK envelope was not recognized");
+  Require (CsrGetOpnetWireSize (cumulativeAck) == 41,
+           "archived cumulative ACK/DACK envelope was not 41 bytes");
+  Require (CsrGetOpnetAggregateWireSize ({hiddenData, cumulativeAck}) == 658,
+           "archived hidden DATA plus ACK envelope sum changed");
+}
+
 } // namespace
 
 int
@@ -481,6 +526,7 @@ main ()
   CheckOtaFormats ();
   CheckEnvelopeTags ();
   CheckCompatibilityInference ();
+  CheckArchivedHiddenEnvelopeSizes ();
 
   std::cout << "PASS: exact OPNET packet/control-envelope parity"
             << std::endl;

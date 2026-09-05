@@ -1,4 +1,5 @@
 #include "ns3/core-module.h"
+#include "ns3/csr-arl-routing-message.h"
 #include "ns3/csr-common.h"
 #include "ns3/csr-hop-layer.h"
 #include "ns3/csr-net-device.h"
@@ -48,6 +49,25 @@ MakePlainHello (CsrNodeId source)
   return packet;
 }
 
+Ptr<Packet>
+MakeDiscoveryHello (CsrNodeId source, uint32_t sequence)
+{
+  CsrHelloHeader hello;
+  hello.SetNodeId (source);
+  hello.SetHelloSeq (static_cast<uint16_t> (sequence));
+  hello.SetNodeType (CsrNodeType::Routable);
+  hello.SetSpeedKey (8);
+  hello.SetRxPowerDbmX10 (-1050);
+  hello.SetActiveNodes (1);
+  hello.SetArlRouteMsgType (CsrArlRouteMsgType::Discover);
+  hello.SetDiscoverType (CsrDiscoverType::Broadcast);
+  hello.SetDiscoverySequence (sequence);
+
+  Ptr<Packet> packet = Create<Packet> ();
+  packet->AddHeader (hello);
+  return packet;
+}
+
 void
 Expect (bool condition, const char *message)
 {
@@ -55,6 +75,84 @@ Expect (bool condition, const char *message)
     {
       g_failures.emplace_back (message);
     }
+}
+
+Ptr<Packet>
+MakeArlPathUpdate (CsrNodeId source,
+                   CsrNodeId destination,
+                   CsrNodeId pathOnlyNode,
+                   uint32_t sequence)
+{
+  CsrArlRoutingMessage::Builder builder;
+  std::string error;
+  NS_ABORT_MSG_IF (!builder.AddUpdate (
+                     destination,
+                     static_cast<uint8_t> (CsrNodeType::Routable),
+                     1,
+                     9,
+                     {pathOnlyNode},
+                     &error),
+                   "could not build ARL path-only fixture: " << error);
+
+  std::vector<std::vector<uint8_t>> sections;
+  NS_ABORT_MSG_IF (!builder.BuildSections (sequence, sections, &error) ||
+                     sections.size () != 1,
+                   "ARL path-only fixture did not build one section: "
+                     << error);
+
+  CsrArlRoutingMessage::Section section;
+  NS_ABORT_MSG_IF (!CsrArlRoutingMessage::DecodeSection (
+                     sections.front (), section, &error),
+                   "could not decode ARL path-only fixture: " << error);
+
+  Ptr<Packet> packet = Create<Packet> (
+    sections.front ().data (), sections.front ().size ());
+  CsrHelloHeader hello;
+  hello.SetNodeId (source);
+  hello.SetHelloSeq (static_cast<uint16_t> (sequence));
+  hello.SetNodeType (CsrNodeType::Routable);
+  hello.SetSpeedKey (8);
+  hello.SetRxPowerDbmX10 (-1050);
+  hello.SetActiveNodes (1);
+  hello.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
+  hello.SetRoutingSequence (section.sequence);
+  hello.SetRoutingSection (section.section);
+  hello.SetRoutingTotalSections (section.totalSections);
+  hello.SetRoutingOperation (CsrRoutingOperation::Update);
+  packet->AddHeader (hello);
+  return packet;
+}
+
+Ptr<Packet>
+MakeCompatibilityPathUpdate (CsrNodeId source,
+                             CsrNodeId destination,
+                             CsrNodeId pathOnlyNode,
+                             uint32_t sequence)
+{
+  CsrHelloHeader hello;
+  hello.SetNodeId (source);
+  hello.SetHelloSeq (static_cast<uint16_t> (sequence));
+  hello.SetNodeType (CsrNodeType::Routable);
+  hello.SetSpeedKey (8);
+  hello.SetRxPowerDbmX10 (-1050);
+  hello.SetActiveNodes (1);
+  hello.SetArlRouteMsgType (CsrArlRouteMsgType::RoutingUpdate);
+  hello.SetRoutingSequence (sequence);
+  hello.SetRoutingSection (0);
+  hello.SetRoutingTotalSections (1);
+  hello.SetRoutingOperation (CsrRoutingOperation::Update);
+  NS_ABORT_MSG_IF (!hello.AddAdvertisedRoute (
+                     destination,
+                     1,
+                     9,
+                     0,
+                     static_cast<uint8_t> (CsrNodeType::Routable),
+                     {pathOnlyNode}),
+                   "could not build compatibility path-only fixture");
+
+  Ptr<Packet> packet = Create<Packet> ();
+  packet->AddHeader (hello);
+  return packet;
 }
 
 void
@@ -358,6 +456,162 @@ RunReverseOnlyDestinationCase ()
   Simulator::Destroy ();
 }
 
+void
+RunDiscoverySequenceAndChirpOrderCase ()
+{
+  constexpr CsrNodeId localNode = 10;
+  constexpr CsrNodeId olderNeighbor = 2;
+  constexpr CsrNodeId middleNeighbor = 7;
+  constexpr CsrNodeId newerNeighbor = 4;
+
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  nwk->SetNodeId (localNode);
+  nwk->SetArlNeighborAdmissionEnabled (false);
+  nwk->SetDiscoveryResponseEnabled (false);
+
+  nwk->ProcessHello (
+    MakeDiscoveryHello (olderNeighbor, 1),
+    olderNeighbor,
+    70.0,
+    20.0);
+
+  uint32_t retainedSequence = 0;
+  Expect (nwk->GetNeighborDiscoverySequenceForTest (
+            olderNeighbor,
+            retainedSequence) &&
+            retainedSequence == 1,
+          "initial Discover sequence was not retained");
+
+  // routesCompareSequence() deliberately treats the exact unsigned
+  // half-range as non-newer in both directions.  Avoid relying on a signed
+  // narrowing conversion for this source-visible boundary.
+  nwk->ProcessHello (
+    MakeDiscoveryHello (olderNeighbor, 0x80000001u),
+    olderNeighbor,
+    70.0,
+    20.0);
+  Expect (nwk->GetNeighborDiscoverySequenceForTest (
+            olderNeighbor,
+            retainedSequence) &&
+            retainedSequence == 1,
+          "exact-half-range Discover replaced the retained sequence");
+
+  nwk->ProcessHello (
+    MakePlainHello (middleNeighbor),
+    middleNeighbor,
+    70.0,
+    20.0);
+  nwk->ProcessHello (
+    MakePlainHello (newerNeighbor),
+    newerNeighbor,
+    70.0,
+    20.0);
+
+  Expect (nwk->GetActiveChirpNeighborsForTest () ==
+            std::vector<CsrNodeId> ({newerNeighbor,
+                                     middleNeighbor,
+                                     olderNeighbor}),
+          "Chirp neighbors were not serialized newest-created first");
+
+  Simulator::Destroy ();
+}
+
+void
+RunPathOnlyNeighborCreationCase (bool arlByteStream)
+{
+  constexpr CsrNodeId localNode = 10;
+  constexpr CsrNodeId reporter = 20;
+  constexpr CsrNodeId middleNeighbor = 21;
+  constexpr CsrNodeId pathOnlyNode = 22;
+  constexpr CsrNodeId advertisedDestination = 23;
+
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  nwk->SetNodeId (localNode);
+  nwk->SetArlNeighborAdmissionEnabled (false);
+  nwk->SetAutomaticRoutePropagationEnabled (false);
+
+  nwk->ProcessHello (
+    MakePlainHello (reporter), reporter, 70.0, 20.0);
+  nwk->ProcessHello (
+    arlByteStream
+      ? MakeArlPathUpdate (
+          reporter, advertisedDestination, pathOnlyNode, 10)
+      : MakeCompatibilityPathUpdate (
+          reporter, advertisedDestination, pathOnlyNode, 10),
+    reporter,
+    70.0,
+    20.0);
+  nwk->ProcessHello (
+    MakePlainHello (middleNeighbor), middleNeighbor, 70.0, 20.0);
+
+  // A path identifier is only a hop-list value in routes.c; it must not call
+  // routesFindNeighbor().  Its first direct HELLO therefore creates it now at
+  // neighborHead, ahead of the neighbor heard immediately before it.
+  nwk->ProcessHello (
+    MakePlainHello (pathOnlyNode), pathOnlyNode, 70.0, 20.0);
+
+  Expect (nwk->GetActiveChirpNeighborsForTest () ==
+            std::vector<CsrNodeId> ({pathOnlyNode,
+                                     middleNeighbor,
+                                     reporter}),
+          arlByteStream
+            ? "ARL path mention pre-created a Chirp neighbor"
+            : "compatibility path mention pre-created a Chirp neighbor");
+
+  Simulator::Destroy ();
+}
+
+void
+RunActiveToInactiveChirpCase ()
+{
+  constexpr CsrNodeId localNode = 10;
+  constexpr CsrNodeId olderNeighbor = 2;
+  constexpr CsrNodeId newerNeighbor = 3;
+
+  Ptr<CsrNetDevice> device = CreateObject<CsrNetDevice> (localNode);
+  Ptr<CsrHopLayer> hop = CreateObject<CsrHopLayer> ();
+  Ptr<CsrNetLayer> nwk = CreateObject<CsrNetLayer> ();
+  ConnectStack (device, hop, nwk, localNode);
+  nwk->SetArlNeighborAdmissionEnabled (false);
+  nwk->SetAutomaticRoutePropagationEnabled (false);
+
+  nwk->ProcessHello (
+    MakePlainHello (olderNeighbor), olderNeighbor, 70.0, 20.0);
+  nwk->ProcessHello (
+    MakePlainHello (newerNeighbor), newerNeighbor, 70.0, 20.0);
+  Simulator::Run ();
+  Expect (nwk->IsArlNeighborActive (olderNeighbor) &&
+            nwk->IsArlNeighborActive (newerNeighbor),
+          "security-reset Chirp fixture neighbors were not actually active");
+
+  const uint32_t chirpsBefore = nwk->GetDiscoveryChirpCountForTest ();
+  const uint64_t transmissionsBefore =
+    device->GetMac ().GetTransmittedFrameCount ();
+  nwk->NoteSecurityCountChangeForTest (olderNeighbor);
+  nwk->NoteSecurityCountChangeForTest (newerNeighbor);
+  nwk->NoteSecurityCountChangeForTest (olderNeighbor);
+
+  Expect (!nwk->IsArlNeighborActive (olderNeighbor) &&
+            !nwk->IsArlNeighborActive (newerNeighbor) &&
+            nwk->GetDiscoveryChirpCountForTest () == chirpsBefore,
+          "active-to-inactive transition sent Chirp synchronously");
+
+  Simulator::Schedule (NanoSeconds (1), [] {
+    Simulator::Stop ();
+  });
+  Simulator::Run ();
+
+  Expect (nwk->GetDiscoveryChirpCountForTest () == chirpsBefore + 1,
+          "security-count active-to-inactive transition did not wake one Chirp");
+  Expect (nwk->GetActiveChirpNeighborsForTest ().empty (),
+          "inactive neighbor remained in the emitted Chirp population");
+  Expect (device->GetMac ().GetQueuedFrameCount () != 0 ||
+            device->GetMac ().GetTransmittedFrameCount () > transmissionsBefore,
+          "scheduled Chirp was not handed to HOP/MAC");
+
+  Simulator::Destroy ();
+}
+
 } // namespace
 
 int
@@ -368,6 +622,10 @@ main ()
   RunCadenceAndCompletionCase ();
   RunNewestDestinationFirstCase ();
   RunReverseOnlyDestinationCase ();
+  RunDiscoverySequenceAndChirpOrderCase ();
+  RunPathOnlyNeighborCreationCase (true);
+  RunPathOnlyNeighborCreationCase (false);
+  RunActiveToInactiveChirpCase ();
 
   if (!g_failures.empty ())
     {

@@ -148,6 +148,14 @@ authoritative OPNET-to-ns-3 RNG-stream mapping is available, so the current
 runner does not claim percentage-mixture parity. It never substitutes the
 fixed-DSCP assumption into either historical no-DSCP profile.
 
+Project-directory labels such as `prior_to_dscp_slot_range_change` and
+`started_dscp` are useful chronology hints, but neither label occurs in the
+hash-bound archive used here. They therefore do not select behavior. The
+hidden-node and multihop imports are classified as pre-DSCP because their exact
+archived executables contain no application DSCP assignment/probability draw,
+while the separately supplied newer `br_app.pr.c` does. This distinction keeps
+DSCP from being used to explain a residual produced by either historical run.
+
 ### Executable-bound MAC profiles
 
 The run row's `mac_profile` records the exact `get_slot()` family selected by
@@ -266,13 +274,14 @@ python3 utils/import-opnet-scenario.py \
 The run row's `hop_security_profile` is one atomic ordinary-DATA and ACK/DACK
 selector. It prevents either half of the HOP wire contract from being silently
 mixed into an archived-executable aggregate comparison. The importer writes
-the selection and, for the archived profile, the full
+the selection and, for each archived profile, the full
 `source_executable_sha256`; the aggregate workflow records both plus an
 explicit DATA/ACK behavior projection.
 
 | HOP-security profile | Evidence binding | Exact behavior |
 | --- | --- | --- |
 | `production-pairwise16` | Supplied production `packetTypes.c` maps AppData/AppDataNoAck and common `AckMsg` to Pairwise16 | A 192-byte network packet is 222 bytes on the OPNET wire; exact ACK is 30 bytes and cumulative ACK/DACK is 46 bytes. Authentication precedes state changes. |
+| `hist-dd3f38e8-bare` | Archived campus hidden-node executable SHA-256 `dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0` | Ordinary DATA and cumulative ACK/DACK are bare. A configured 600-byte application packet becomes a 592-byte network packet and a 617-byte OTA DATA frame; ACK/DACK is 41 bytes. |
 | `hist-adb97c54-bare` | Archived campus-multihop executable SHA-256 `adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af` | `br_Network -> br_Hop -> br_Mac` is direct and bare, producing 217 bytes for a 192-byte network packet. All five compiled ACK callers select both cumulative registers, producing bare 41-byte ACK/DACK. The 25-byte exact form is receive compatibility, not an observed archived transmit path. |
 
 Select the historical boundary explicitly when importing that executable's
@@ -288,13 +297,29 @@ python3 utils/import-opnet-scenario.py \
   --hop-security-profile hist-adb97c54-bare
 ```
 
+The hidden-node executable uses a distinct provenance name even though the
+runner projects the same bare wire behavior:
+
+```bash
+python3 utils/import-opnet-scenario.py \
+  historical-campus.zip imported-hidden.csv \
+  --scenario blue_radio_campus-hidden_nodes_symmetrical.nt.m \
+  --infer-gateway-flows \
+  --application-profile legacy-send-to-from-no-dscp \
+  --mac-profile hist-2015-fine-one-based-table-no-avoid \
+  --hop-security-profile hist-dd3f38e8-bare
+```
+
 Omitting `--hop-security-profile` selects `production-pairwise16`. The exact
-archived application/MAC tuple and historical HOP profile must be selected
-together. Older CSVs may use `ack_envelope_profile` as a deprecated input
-alias, but alias-only or missing-profile runs are diagnostic and cannot become
-a final certificate. An alias-resolved historical run still requires the full
-adb97 digest. Conflicting fields, any effective historical selection without
-that digest, and any effective production selection claiming it fail closed.
+archived application/MAC/HOP tuple and its executable digest must be selected
+together: the dd3 hidden-node tuple and adb multihop tuple cannot be crossed.
+This is an executable provenance constraint, not a scenario-name, node-count,
+or topology heuristic. Older CSVs may use `ack_envelope_profile` as a deprecated
+input alias, but alias-only or missing-profile runs are diagnostic and cannot
+become a final certificate. An alias-resolved historical run still requires
+the full matching digest. Conflicting fields, any effective historical
+selection without its digest, and any effective production selection claiming
+one fail closed.
 
 `--infer-ring-flows` remains a deterministic smoke-test surrogate. It is not
 source-exact for these runs because the OPNET application obtains destinations
@@ -710,6 +735,19 @@ python3 utils/run-opnet-differential.py \
   --output-dir differential-run
 ```
 
+This generic event workflow is deliberately diagnostic, not an OPNET-origin
+certificate. `--opnet-manifest` is optional so legacy and synthetic traces can
+still exercise the comparator. When supplied, it must be an exact
+`csr-opnet-instrumentation-v1` manifest: the workflow validates its schema,
+generator and source digests, generated-file locations and hashes, activation
+contract, and trace schema. That establishes a self-consistent source bundle,
+but the exported CSV has no cryptographic run identifier tying it to that
+bundle, so the manifest records `trace_origin_bound=false` and
+`certifying=false`. When omitted, the manifest classifies the trace as
+`not_supplied_legacy_or_synthetic_trace`. Event-order certification belongs to
+the reservation/collision validator, whose licensed-run evidence contract
+binds the trace and execution manifest explicitly.
+
 The output directory contains:
 
 - the raw ns-3 event trace and console log;
@@ -717,6 +755,16 @@ The output directory contains:
 - `differential-report.json`, with counts and bounded detailed differences;
 - `run-manifest.json`, with input hashes, executable path, commands, and exit
   statuses.
+
+The workflow treats all inputs and tools as immutable across stages. It also
+checks the output-directory identity and the exact set of managed artifacts
+before and after each subprocess and before every parent write. Symlinks,
+hardlinks, special files, aliases to protected inputs, and artifacts created
+ahead of their owning stage fail closed. This prevents a child runner or
+comparator from redirecting a later write through a managed-output path. A
+hostile process that can exchange a regular path concurrently inside the C++
+runner's own file-open interval remains outside this user-space evidence
+boundary.
 
 Focused repository fixtures exercise binary promoted-attribute decoding,
 shifted/mobile schemas, DES parsing, gateway-flow inference, alias
@@ -753,6 +801,10 @@ compact exactly correlated aggregate trace, derives source-equivalent bucket
 series, and compares only exact statistic/unit/aggregation identities. A
 successful manifest says `selected_comparison_passed` within the historical
 aggregate evidence scope; it does not claim event-order or whole-model parity.
+The ns-3 aggregation provenance must name the canonical aggregate output path
+as well as its SHA-256. The same immutable-input and staged managed-output
+checks described above surround the extractor, runner, aggregator, and
+comparator; path-resolution errors fail closed.
 The recovered application packet-size statistic is
 `configured_bytes * 8 - 64` bits. The runner reproduces that rule at packet
 creation: a configured 600-byte flow becomes a 592-byte total network packet,

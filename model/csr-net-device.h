@@ -334,6 +334,7 @@ public:
 
 private:
   friend class CsrMacCore;
+  friend struct CsrPhyFrontEndSmokeAccess;
 
   struct RxSignal
   {
@@ -358,6 +359,7 @@ private:
     double rxPowerDbm {0.0};
     double snrDb {0.0};
     double currentInterferenceWatts {0.0};
+    std::map<uint64_t, double> additiveInterferenceWatts; ///< Noise contribution by signal ID.
     double peakNoiseWatts {0.0};
     double intervalStartSec {0.0};
     double jsrDb {-std::numeric_limits<double>::infinity ()};
@@ -1218,21 +1220,9 @@ CsrNetDevice::ReturnToSearchAfterReceive ()
   // SLEEP after exactly NO_SIG_SRH_TIME (7.8 ms).  A subsequent acquisition
   // cancels that event when it enters Track.
   // A preamble admitted during Track is rejected for that Track epoch, but it
-  // stays in the source SYNC table.  On back2search(), a surviving SYNC gets a
-  // fresh acquisition and start_track() may explicitly accept it again.
-  double now = Simulator::Now ().GetSeconds ();
-  for (auto &[id, signal] : m_rxSignals)
-    {
-      (void) id;
-      if (signal.rejectedDuringTrack &&
-          signal.syncEligible &&
-          signal.preambleActive &&
-          signal.endSec > now)
-        {
-          signal.rejected = false;
-          signal.rejectedDuringTrack = false;
-        }
-    }
+  // stays in the source SYNC table.  back2search() does not change its
+  // PK_ACCEPT value.  It becomes an acquisition candidate again, and only
+  // start_track() explicitly restores PK_ACCEPT=true on the selected signal.
 
   m_mac.SetReceiveState (CsrMacCore::State::SEARCH);
   ScheduleAcquisition ();
@@ -1275,6 +1265,13 @@ CsrNetDevice::ReturnRejectedReceiveToSearch ()
 void
 CsrNetDevice::UpdateSignalNoise (RxSignal &signal)
 {
+  signal.currentInterferenceWatts = 0.0;
+  for (const auto &[interfererId, powerWatts] :
+       signal.additiveInterferenceWatts)
+    {
+      (void) interfererId;
+      signal.currentInterferenceWatts += powerWatts;
+    }
   double totalNoiseWatts = signal.frontEnd.backgroundNoiseWatts +
     signal.currentInterferenceWatts;
   signal.peakNoiseWatts = std::max (signal.peakNoiseWatts,
@@ -1410,6 +1407,10 @@ CsrNetDevice::RefreshHighRateInterference ()
         {
           continue;
         }
+      if (desired.rejected)
+        {
+          continue;
+        }
       for (auto jammerIt = m_rxSignals.begin ();
            jammerIt != m_rxSignals.end ();
            ++jammerIt)
@@ -1439,27 +1440,66 @@ CsrNetDevice::ApplyInterferencePair (RxSignal &first,
 
   first.collisionCount++;
   second.collisionCount++;
+  // Apply br_inoise's USE_PK_ACCEPT_TDA branch.  The arriving signal (first)
+  // has just been reset to accepted by br_power; a previous signal may have
+  // been rejected by mark_sync(), clear_sync(), or start_track().
+  bool firstAccepted = !first.rejected;
+  bool secondAccepted = !second.rejected;
   if (first.rateKbps == second.rateKbps)
     {
       m_rxSameSpeed = true;
-      const RxSignal &stronger = first.rxPowerDbm > second.rxPowerDbm
-        ? first
-        : second;
-      const RxSignal &weaker = first.rxPowerDbm > second.rxPowerDbm
-        ? second
-        : first;
-      m_rxJsrDb = weaker.rxPowerDbm - stronger.rxPowerDbm;
-      m_rxTimeOffsetSeconds = weaker.startSec - stronger.startSec;
-      RecordSameRateInterference (first, second);
-      RecordSameRateInterference (second, first);
+      if (firstAccepted && secondAccepted)
+        {
+          // A tie takes the source's else branch: the previous packet is the
+          // desired signal and the arriving packet is its jammer.
+          const RxSignal &desired = first.rxPowerDbm > second.rxPowerDbm
+            ? first
+            : second;
+          const RxSignal &jammer = first.rxPowerDbm > second.rxPowerDbm
+            ? second
+            : first;
+          m_rxJsrDb = jammer.rxPowerDbm - desired.rxPowerDbm;
+          m_rxTimeOffsetSeconds = jammer.startSec - desired.startSec;
+        }
+      else if (firstAccepted)
+        {
+          m_rxJsrDb = second.rxPowerDbm - first.rxPowerDbm;
+          m_rxTimeOffsetSeconds = second.startSec - first.startSec;
+        }
+      else if (secondAccepted)
+        {
+          m_rxJsrDb = first.rxPowerDbm - second.rxPowerDbm;
+          m_rxTimeOffsetSeconds = first.startSec - second.startSec;
+        }
+
+      // The high-rate extension has no recovered JSR tables, but its
+      // documented jammer-as-noise fallback still follows the same source
+      // PK_ACCEPT orientation.
+      if (firstAccepted)
+        {
+          RecordSameRateInterference (first, second);
+        }
+      if (secondAccepted)
+        {
+          RecordSameRateInterference (second, first);
+        }
       return;
     }
 
   m_rxSameSpeed = false;
-  first.currentInterferenceWatts +=
-    second.frontEnd.receivedPowerWatts;
-  second.currentInterferenceWatts +=
-    first.frontEnd.receivedPowerWatts;
+  // Different-speed power is added only to packets whose PK_ACCEPT is true.
+  // Retain the contributor identity so its END_RX removes exactly the power
+  // that this pair added, including asymmetric one-accepted cases.
+  if (firstAccepted)
+    {
+      first.additiveInterferenceWatts[second.id] =
+        second.frontEnd.receivedPowerWatts;
+    }
+  if (secondAccepted)
+    {
+      second.additiveInterferenceWatts[first.id] =
+        first.frontEnd.receivedPowerWatts;
+    }
   UpdateSignalNoise (first);
   UpdateSignalNoise (second);
 }
@@ -1469,14 +1509,11 @@ CsrNetDevice::RemoveEndedInterference (const RxSignal &ended)
 {
   for (auto &[signalId, signal] : m_rxSignals)
     {
-      if (signalId == ended.id || signal.rateKbps == ended.rateKbps)
+      if (signalId == ended.id)
         {
           continue;
         }
-      signal.currentInterferenceWatts = std::max (
-        0.0,
-        signal.currentInterferenceWatts -
-          ended.frontEnd.receivedPowerWatts);
+      signal.additiveInterferenceWatts.erase (ended.id);
       UpdateSignalNoise (signal);
     }
 }
@@ -1556,18 +1593,40 @@ CsrNetDevice::BeginReceiveSignal (RxSignal signal)
   NS_ASSERT_MSG (inserted, "duplicate CSR receive signal identifier");
   RxSignal &incoming = it->second;
 
+  std::vector<RxSignal *> previousSignals;
+  previousSignals.reserve (m_rxSignals.size () - 1);
   for (auto &[otherId, other] : m_rxSignals)
     {
       if (otherId != incoming.id)
         {
-          ApplyInterferencePair (incoming, other);
+          previousSignals.push_back (&other);
         }
+    }
+  std::sort (previousSignals.begin (),
+             previousSignals.end (),
+             [] (const RxSignal *left, const RxSignal *right) {
+               return left->arrivalOrder < right->arrivalOrder;
+             });
+  for (RxSignal *previous : previousSignals)
+    {
+      // br_inoise receives each pre-existing packet in pipeline order.  Its
+      // channel-wide same_speed/JSR/offset values are overwritten on every
+      // pair, so preserve prior arrival order instead of std::map signal-ID
+      // order.
+      ApplyInterferencePair (incoming, *previous);
     }
   StartAllSignalIntervals (now);
   if (incoming.frontEnd.channelMatched)
     {
       double syncThresholdDb = DrawSyncSnrThresholdDb ();
       incoming.syncEligible = incoming.snrDb >= syncThresholdDb;
+      if (!incoming.syncEligible)
+        {
+          // mark_sync() writes PK_ACCEPT=false for a below-threshold SYNC.
+          // Keep that state for any later br_inoise pair while this packet is
+          // still physically present in the receiver pipeline.
+          incoming.rejected = true;
+        }
       m_syncDecisionTrace (incoming.txId,
                            incoming.sequence,
                            incoming.snrDb,
@@ -1649,6 +1708,14 @@ CsrNetDevice::EndReceivePreamble (uint64_t signalId)
 
   it->second.preambleActive = false;
 
+  // clear_sync() rejects an expired preamble whenever the MAC is outside
+  // Track.  The packet can remain in the receiver pipeline after that point,
+  // so a later overlap must observe PK_ACCEPT=false.
+  if (m_mac.GetState () != CsrMacCore::State::TRACK)
+    {
+      it->second.rejected = true;
+    }
+
   // clear_sync() cancels the outstanding RX_SIG_FOUND event whenever any
   // preamble expires.  Preserve that ordering, including the multi-signal
   // behavior of the supplied process model.
@@ -1674,7 +1741,7 @@ CsrNetDevice::AcquireSignal ()
       (void) id;
       if (signal.syncEligible &&
           signal.preambleActive &&
-          !signal.rejected)
+          (!signal.rejected || signal.rejectedDuringTrack))
         {
           candidates.push_back (&signal);
         }
@@ -1706,30 +1773,54 @@ CsrNetDevice::AcquireSignal ()
         }
     }
 
+  // Snapshot the receiver-global br_inoise state through the exact
+  // start_track() boundary.  The JSR/offset overwrite below applies only to
+  // the following interval; it must not be retroactively attached to time
+  // elapsed while the receiver was still in Search.
+  CloseAllSignalIntervals (now);
+
+  // start_track() explicitly accepts the chosen packet, including a surviving
+  // preamble that the preceding Track epoch rejected.
+  selected->rejected = false;
+  selected->rejectedDuringTrack = false;
   selected->tracked = true;
   selected->missedByState = false;
   m_trackedSignalId = selected->id;
 
+  RxSignal *strongestRejected = nullptr;
   double strongestSameRateJammerDbm =
     -std::numeric_limits<double>::infinity ();
-  for (auto &[id, other] : m_rxSignals)
+  for (RxSignal *other : candidates)
     {
-      if (id == selected->id || other.endSec <= now)
+      if (other == selected)
         {
           continue;
         }
-      if (other.syncEligible && other.preambleActive)
+      other->rejected = true;
+      other->rejectedDuringTrack = true;
+      if (strongestRejected == nullptr ||
+          other->rxPowerDbm > strongestRejected->rxPowerDbm)
         {
-          other.rejected = true;
-          other.rejectedDuringTrack = true;
+          strongestRejected = other;
         }
-      if (other.rateKbps == selected->rateKbps &&
-          other.frontEnd.channelMatched)
+      if (other->rateKbps == selected->rateKbps &&
+          other->frontEnd.channelMatched)
         {
           strongestSameRateJammerDbm = std::max (
             strongestSameRateJammerDbm,
-            other.rxPowerDbm);
+            other->rxPowerDbm);
         }
+    }
+
+  if (strongestRejected != nullptr)
+    {
+      // start_track() overwrites the receiver channel's singleton JSR and
+      // offset with the chosen signal and strongest rejected candidate.  It
+      // does this without a speed check; same_speed remains whatever the last
+      // br_inoise pair stored.
+      m_rxJsrDb = strongestRejected->rxPowerDbm - selected->rxPowerDbm;
+      m_rxTimeOffsetSeconds =
+        strongestRejected->startSec - selected->startSec;
     }
 
   if (std::isfinite (strongestSameRateJammerDbm))
@@ -1744,6 +1835,8 @@ CsrNetDevice::AcquireSignal ()
           selected->collided = true;
         }
     }
+
+  StartAllSignalIntervals (now);
 
   if (m_sleepEvent.IsPending ())
     {
@@ -2740,9 +2833,15 @@ CsrMacCore::SelectAggregatePreamble (
       return ChoosePreambleForDest (selected.front ().dest);
     }
 
-  // OPNET keeps the earliest last_rcvd_time while it packs ACKs and then DATA.
-  // Destination structures are walked member by member, so any stale or
-  // unknown receiver represented anywhere in the aggregate requires LONG.
+  // Preserve the supplied send_pk() walk and its observable variable reuse.
+  // ACKs are already before DATA in selected, and structured destinations are
+  // visited in stored order.  An unknown destination resets time0 to now; a
+  // later known destination may lower it again.  Only the final ngbr_ptr
+  // value causes the unconditional-long branch, so this is deliberately not
+  // the order-independent "any unknown means LONG" policy.
+  double now = Simulator::Now ().GetSeconds ();
+  double time0 = now;
+  bool finalDestinationKnown = false;
   for (const auto &entry : selected)
     {
       CsrHeader header;
@@ -2750,19 +2849,43 @@ CsrMacCore::SelectAggregatePreamble (
         {
           for (CsrNodeId destination : header.EnumerateDestinations ())
             {
-              if (ChoosePreambleForDest (destination) == PREAMBLE_LONG)
+              auto neighbor = m_neighbors.find (destination);
+              finalDestinationKnown = neighbor != m_neighbors.end ();
+              if (!finalDestinationKnown)
                 {
-                  return PREAMBLE_LONG;
+                  time0 = now;
+                }
+              else if (neighbor->second.lastHeardSec < time0)
+                {
+                  time0 = neighbor->second.lastHeardSec;
                 }
             }
         }
-      else if (ChoosePreambleForDest (entry.dest) == PREAMBLE_LONG)
+      else
         {
-          return PREAMBLE_LONG;
+          auto neighbor = m_neighbors.find (entry.dest);
+          finalDestinationKnown = neighbor != m_neighbors.end ();
+          if (!finalDestinationKnown)
+            {
+              time0 = now;
+            }
+          else if (neighbor->second.lastHeardSec < time0)
+            {
+              time0 = neighbor->second.lastHeardSec;
+            }
         }
     }
 
-  return PREAMBLE_SHORT;
+  if (!finalDestinationKnown)
+    {
+      return PREAMBLE_LONG;
+    }
+
+  double freshnessSeconds =
+    15.0 + 1.5 * static_cast<double> (m_activeNodesForPostTx) + 0.5;
+  return now - time0 > freshnessSeconds
+    ? PREAMBLE_LONG
+    : PREAMBLE_SHORT;
 }
 
 void
@@ -2821,6 +2944,7 @@ CsrMacCore::DoTx ()
                                entry.dest,
                                false,
                                true,
+                               0,
                                i,
                                rate,
                                SelectQueuedFrameTxPower (entry.frame)});
@@ -2852,6 +2976,7 @@ CsrMacCore::DoTx ()
                                entry.dest,
                                entry.ackable,
                                false,
+                               entry.dscp,
                                i,
                                rate,
                                SelectQueuedFrameTxPower (entry.frame)});
@@ -2887,6 +3012,7 @@ CsrMacCore::DoTx ()
                            false,
                            true,
                            0,
+                           0,
                            aggregateRateKbps,
                            SelectQueuedFrameTxPower (entry.frame)});
     }
@@ -2901,6 +3027,7 @@ CsrMacCore::DoTx ()
                            entry.dest,
                            entry.ackable,
                            false,
+                           entry.dscp,
                            0,
                            aggregateRateKbps,
                            SelectQueuedFrameTxPower (entry.frame)});
@@ -2951,6 +3078,17 @@ CsrMacCore::DoTx ()
     }
 
   CsrNodeId dest = selected.front ().dest;
+
+  // The br_OTA DSCP field is metadata: it is the maximum across DATA
+  // segments only.  ACK queue entries are packed first but do not contribute.
+  m_lastAggregateDscp = 0;
+  for (const auto &entry : selected)
+    {
+      if (!entry.fromAckQueue)
+        {
+          m_lastAggregateDscp = std::max (m_lastAggregateDscp, entry.dscp);
+        }
+    }
 
   int powerSelectionRateKbps = selected.front ().rateKbps;
   double aggregateTxPowerDbm = selected.front ().txPowerDbm;

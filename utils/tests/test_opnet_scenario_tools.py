@@ -60,7 +60,9 @@ def promoted(attribute_id: int, value: bytes) -> bytes:
 
 
 def synthetic_network(
-    include_node_type: bool = True, include_mobile_fields: bool = False
+    include_node_type: bool = True,
+    include_mobile_fields: bool = False,
+    node_id: int = 7,
 ) -> bytes:
     names = [
         "name",
@@ -117,7 +119,7 @@ def synthetic_network(
         "model": string_value("br_node_v1"),
         "x position": double_value(1.2),
         "y position": double_value(-0.5),
-        "Node ID": integer_value(7),
+        "Node ID": integer_value(node_id),
         "Min Power": double_value(-36.0),
         "Max Power": double_value(33.0),
         "Link Margin": double_value(12.0),
@@ -211,6 +213,36 @@ class ScenarioImporterTests(unittest.TestCase):
                 IMPORTER.import_scenario(arguments)
             self.assertFalse(output.exists())
         self.assertIn(f"1..{maximum}", IMPORTER.build_parser().format_help())
+
+    def test_broadcast_id_is_not_a_concrete_node_or_flow_endpoint(self) -> None:
+        with self.assertRaisesRegex(
+            IMPORTER.ImportErrorDetail, "outside the concrete 24-bit range"
+        ):
+            IMPORTER.parse_network_model(
+                synthetic_network(node_id=0xFFFFFF), 1.0
+            )
+        for specification in (
+            "0xffffff:1:0:1:16:0",
+            "1:0xffffff:0:1:16:0",
+        ):
+            with self.subTest(flow=specification), self.assertRaisesRegex(
+                argparse.ArgumentTypeError, "out-of-range"
+            ):
+                IMPORTER.parse_flow(specification)
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "24-bit node"):
+            IMPORTER.parse_reservation_slot_override("0xffffff:1")
+
+    def test_explicit_flow_timing_must_be_finite(self) -> None:
+        for start, interval in (
+            ("nan", "1"),
+            ("inf", "1"),
+            ("0", "nan"),
+            ("0", "inf"),
+        ):
+            with self.subTest(start=start, interval=interval), self.assertRaisesRegex(
+                argparse.ArgumentTypeError, "out-of-range"
+            ):
+                IMPORTER.parse_flow(f"1:2:{start}:{interval}:16:0")
 
     def test_reservation_slot_override(self) -> None:
         self.assertEqual(
@@ -687,8 +719,97 @@ class ScenarioImporterTests(unittest.TestCase):
         for profile in IMPORTER.HOP_SECURITY_PROFILES:
             self.assertIn(profile, help_text)
 
+    def test_hidden_era_profile_is_distinct_and_exactly_tuple_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scenario.nt.m"
+            output = root / "scenario.csv"
+            source.write_bytes(synthetic_network())
+            arguments = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--infer-gateway-flows",
+                    "--application-profile",
+                    IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+                    "--mac-profile",
+                    IMPORTER.MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+                    "--hop-security-profile",
+                    IMPORTER.HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE,
+                ]
+            )
+            IMPORTER.import_scenario(arguments)
+            with output.open(encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+            run_row = next(row for row in rows if row["record"] == "run")
+            self.assertEqual(
+                run_row["hop_security_profile"],
+                IMPORTER.HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE,
+            )
+            self.assertEqual(
+                run_row["source_executable_sha256"],
+                IMPORTER.HIST_DD3F38E8_EXECUTABLE_SHA256,
+            )
+            (flow_row,) = [row for row in rows if row["record"] == "flow"]
+            self.assertEqual(flow_row["flow_dscp"], "0")
+            self.assertEqual(
+                flow_row["flow_destination_mode"],
+                IMPORTER.FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
+            )
+
+            incompatible = IMPORTER.build_parser().parse_args(
+                [
+                    str(source),
+                    str(output),
+                    "--infer-gateway-flows",
+                    "--application-profile",
+                    IMPORTER.APPLICATION_PROFILE_LEGACY_SEND_TO_FROM_NO_DSCP,
+                    "--mac-profile",
+                    IMPORTER.MAC_PROFILE_HIST_2015_FINE_ONE_BASED_TABLE_NO_AVOID,
+                    "--hop-security-profile",
+                    IMPORTER.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
+                ]
+            )
+            with self.assertRaisesRegex(
+                IMPORTER.ImportErrorDetail, "dd3f38e8 executable tuple must select"
+            ):
+                IMPORTER.import_scenario(incompatible)
+
 
 class TraceComparatorTests(unittest.TestCase):
+    def test_cli_outputs_cannot_alias_inputs_or_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            opnet = root / "opnet.csv"
+            ns3 = root / "ns3.csv"
+            opnet.write_text("time_s,event\n", encoding="utf-8")
+            ns3.write_text("time_s,event\n", encoding="utf-8")
+            alias = root / "report.json"
+            os.link(opnet, alias)
+            arguments = COMPARATOR.build_parser().parse_args(
+                [str(opnet), str(ns3), "--report", str(alias)]
+            )
+            with self.assertRaisesRegex(
+                COMPARATOR.TraceError, "must not alias OPNET trace input"
+            ):
+                COMPARATOR._validate_cli_paths(arguments)
+
+            report = root / "new-report.json"
+            arguments = COMPARATOR.build_parser().parse_args(
+                [
+                    str(opnet),
+                    str(ns3),
+                    "--report",
+                    str(report),
+                    "--normalized-opnet",
+                    str(report),
+                ]
+            )
+            with self.assertRaisesRegex(
+                COMPARATOR.TraceError, "outputs must be distinct"
+            ):
+                COMPARATOR._validate_cli_paths(arguments)
+
     def write_trace(self, path: Path, rows: list[dict[str, object]]) -> None:
         with path.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(

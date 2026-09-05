@@ -18,8 +18,10 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 from typing import Any, Iterable
 
 
@@ -42,19 +44,39 @@ MAC_PROFILES = {
     "unspecified",
 }
 HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16 = "production-pairwise16"
+HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE = "hist-dd3f38e8-bare"
 HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE = "hist-adb97c54-bare"
 HOP_SECURITY_PROFILES = {
     HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16,
+    HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE,
     HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE,
     "unspecified",
 }
+HIST_DD3F38E8_EXECUTABLE_SHA256 = (
+    "dd3f38e8d33700b61f9e360a737ba34e56cb75b2570eb2960a02de381ed0fff0"
+)
 HIST_ADB97C54_EXECUTABLE_SHA256 = (
     "adb97c54f7566439f1404e972d3d777a3bca613e2a965bf12f03353fb009d9af"
 )
+HISTORICAL_EXECUTABLE_TUPLES = {
+    HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE: (
+        "legacy-send-to-from-no-dscp",
+        "hist-2015-fine-one-based-table-no-avoid",
+        HIST_DD3F38E8_EXECUTABLE_SHA256,
+    ),
+    HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE: (
+        "legacy-send-only-no-dscp",
+        "hist-2014-next-tslot-modulo-probe",
+        HIST_ADB97C54_EXECUTABLE_SHA256,
+    ),
+}
 
 # Backward-compatible test/import names for the deprecated CSV alias.
 ACK_ENVELOPE_PROFILE_PRODUCTION_PAIRWISE16 = (
     HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
+)
+ACK_ENVELOPE_PROFILE_HIST_DD3F38E8_BARE = (
+    HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE
 )
 ACK_ENVELOPE_PROFILE_HIST_ADB97C54_BARE = (
     HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
@@ -65,7 +87,7 @@ ACK_ENVELOPE_PROFILES = HOP_SECURITY_PROFILES
 def _hop_security_behavior(profile: str) -> dict[str, str]:
     if profile == HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16:
         return {"ordinary_data": "pairwise16", "ack_dack": "pairwise16"}
-    if profile == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE:
+    if profile in HISTORICAL_EXECUTABLE_TUPLES:
         return {"ordinary_data": "bare", "ack_dack": "bare"}
     raise WorkflowError(f"unsupported effective HOP security profile {profile!r}")
 
@@ -101,6 +123,13 @@ ARTIFACT_PATHS = {
 MANIFEST_NAME = "aggregate-run-manifest.json"
 EVIDENCE_SCOPE = "historical_bucket_aggregates_not_event_parity"
 NS3_RNG_SEED_MAX = 4294944442
+NODE_TYPES = {"ordinary", "routable", "gateway"}
+FLOW_DESTINATION_FIXED = "fixed"
+FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR = "random_route_or_neighbor"
+FLOW_DESTINATION_MODES = {
+    FLOW_DESTINATION_FIXED,
+    FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR,
+}
 
 
 class WorkflowError(ValueError):
@@ -132,6 +161,21 @@ def file_record(path: Path) -> dict[str, Any]:
     }
 
 
+def _validate_immutable_file_records(
+    paths: dict[str, Path],
+    expected: dict[str, dict[str, Any]],
+    *,
+    stage: str,
+) -> None:
+    """Fail if a source or executable changes after its recorded preflight."""
+
+    for label, path in paths.items():
+        if not path.is_file() or file_record(path) != expected.get(label):
+            raise WorkflowError(
+                f"{label} identity changed after preflight", stage=stage
+            )
+
+
 def _finite_nonnegative(raw: str) -> float:
     try:
         value = float(raw)
@@ -160,8 +204,19 @@ def _number(value: float) -> str:
     return format(value, ".17g")
 
 
+def _scenario_uint(path: Path, row_number: int, field: str, raw: str) -> int:
+    """Parse one canonical unsigned integer without accepting signs/fractions."""
+
+    text = raw.strip()
+    if not re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", text):
+        raise WorkflowError(
+            f"{path}:{row_number}: {field} is not an unsigned integer"
+        )
+    return int(text, 0)
+
+
 def load_scenario_run(path: Path) -> dict[str, Any]:
-    """Read the one canonical run row needed before invoking the C++ runner."""
+    """Validate the canonical run/topology/flow ledger before invoking ns-3."""
 
     try:
         stream = path.open("r", encoding="utf-8-sig", newline="")
@@ -180,6 +235,15 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
             "source_sha256",
             "duration_s",
             "seed",
+            "node_id",
+            "name",
+            "node_type",
+            "flow_src",
+            "flow_dst",
+            "flow_start_s",
+            "flow_interval_s",
+            "flow_packet_bytes",
+            "flow_dscp",
         }
         missing = sorted(required - set(reader.fieldnames))
         if missing:
@@ -187,7 +251,8 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
                 f"{path}: scenario CSV is missing columns: {', '.join(missing)}"
             )
         run_rows: list[tuple[int, dict[str, str]]] = []
-        flow_count = 0
+        node_rows: list[tuple[int, dict[str, str]]] = []
+        flow_rows: list[tuple[int, dict[str, str]]] = []
         for row_number, row in enumerate(reader, start=2):
             if None in row or any(value is None for value in row.values()):
                 raise WorkflowError(f"{path}:{row_number}: malformed CSV row")
@@ -196,10 +261,17 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
                     f"{path}:{row_number}: unsupported scenario schema "
                     f"{row['schema'].strip()!r}"
                 )
-            if row["record"].strip() == "run":
+            record = row["record"].strip()
+            if record == "run":
                 run_rows.append((row_number, row))
-            elif row["record"].strip() == "flow":
-                flow_count += 1
+            elif record == "node":
+                node_rows.append((row_number, row))
+            elif record == "flow":
+                flow_rows.append((row_number, row))
+            else:
+                raise WorkflowError(
+                    f"{path}:{row_number}: unknown scenario record {record!r}"
+                )
         if len(run_rows) != 1:
             raise WorkflowError(
                 f"{path}: expected exactly one run row, found {len(run_rows)}"
@@ -208,6 +280,8 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
         scenario = row["scenario"].strip()
         if not scenario:
             raise WorkflowError(f"{path}:{row_number}: scenario is empty")
+        if not node_rows:
+            raise WorkflowError(f"{path}: scenario CSV has no node rows")
         application_profile = (
             row.get("application_profile", "").strip() or "unspecified"
         )
@@ -261,24 +335,28 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
         source_executable_sha256 = row.get(
             "source_executable_sha256", ""
         ).strip().lower()
+        allowed_historical_digests = {
+            binding[2] for binding in HISTORICAL_EXECUTABLE_TUPLES.values()
+        }
         if (
             source_executable_sha256
-            and source_executable_sha256 != HIST_ADB97C54_EXECUTABLE_SHA256
+            and source_executable_sha256 not in allowed_historical_digests
         ):
             raise WorkflowError(
                 f"{path}:{row_number}: source_executable_sha256 is not the "
-                "adb97 executable digest"
+                "digest of a supported historical executable"
             )
-        if (
+        historical_binding = HISTORICAL_EXECUTABLE_TUPLES.get(
             effective_hop_security_profile
-            == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
-            and source_executable_sha256
-            != HIST_ADB97C54_EXECUTABLE_SHA256
-        ):
-            raise WorkflowError(
-                f"{path}:{row_number}: effective hist-adb97c54-bare requires "
-                "its full source_executable_sha256"
-            )
+        )
+        if historical_binding is not None:
+            required_application, required_mac, required_digest = historical_binding
+            if source_executable_sha256 != required_digest:
+                raise WorkflowError(
+                    f"{path}:{row_number}: effective "
+                    f"{effective_hop_security_profile} requires its full "
+                    "source_executable_sha256"
+                )
         if (
             effective_hop_security_profile
             == HOP_SECURITY_PROFILE_PRODUCTION_PAIRWISE16
@@ -289,24 +367,25 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
                 "an archived source executable"
             )
 
-        selected_adb97_profile = (
-            effective_hop_security_profile
-            == HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
-        )
-        selected_adb97_application_and_mac = (
-            application_profile == "legacy-send-only-no-dscp"
-            and mac_profile == "hist-2014-next-tslot-modulo-probe"
-        )
-        if (
-            selected_adb97_profile != selected_adb97_application_and_mac
+        selected_tuple = (application_profile, mac_profile)
+        for profile, (required_application, required_mac, _digest) in (
+            HISTORICAL_EXECUTABLE_TUPLES.items()
         ):
-            raise WorkflowError(
-                f"{path}:{row_number}: "
-                "the adb97 executable tuple must select "
-                "hop_security_profile='hist-adb97c54-bare', "
-                "application_profile='legacy-send-only-no-dscp', and "
-                "mac_profile='hist-2014-next-tslot-modulo-probe' together"
-            )
+            if (effective_hop_security_profile == profile) != (
+                selected_tuple == (required_application, required_mac)
+            ):
+                executable_label = (
+                    "dd3f38e8"
+                    if profile == HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE
+                    else "adb97"
+                )
+                raise WorkflowError(
+                    f"{path}:{row_number}: the {executable_label} executable "
+                    "tuple must "
+                    f"select hop_security_profile={profile!r}, "
+                    f"application_profile={required_application!r}, and "
+                    f"mac_profile={required_mac!r} together"
+                )
         source_sha256 = row["source_sha256"].strip().lower()
         if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
             raise WorkflowError(
@@ -338,6 +417,169 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
                 f"{path}:{row_number}: seed must be a finite integer in "
                 f"1..{NS3_RNG_SEED_MAX}"
             )
+
+        nodes: list[dict[str, Any]] = []
+        node_ids: set[int] = set()
+        node_names: set[str] = set()
+        for topology_row_number, topology_row in node_rows:
+            node_id = _scenario_uint(
+                path,
+                topology_row_number,
+                "node_id",
+                topology_row["node_id"],
+            )
+            if node_id >= 0xFFFFFF:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: node_id is not a concrete "
+                    "24-bit address"
+                )
+            if node_id in node_ids:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: duplicate node_id {node_id}"
+                )
+            name = topology_row["name"].strip()
+            if not name:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: node name is empty"
+                )
+            if name in node_names:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: duplicate node name {name!r}"
+                )
+            node_type = topology_row["node_type"].strip()
+            if node_type not in NODE_TYPES:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: unsupported node_type "
+                    f"{node_type!r}"
+                )
+            node_ids.add(node_id)
+            node_names.add(name)
+            nodes.append({"node_id": node_id, "name": name, "node_type": node_type})
+
+        flows: list[dict[str, Any]] = []
+        for topology_row_number, topology_row in flow_rows:
+            source = _scenario_uint(
+                path, topology_row_number, "flow_src", topology_row["flow_src"]
+            )
+            destination = _scenario_uint(
+                path, topology_row_number, "flow_dst", topology_row["flow_dst"]
+            )
+            if source >= 0xFFFFFF or destination >= 0xFFFFFF:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: flow endpoint is not a "
+                    "concrete 24-bit address"
+                )
+            if source not in node_ids or destination not in node_ids:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: flow references an unknown node"
+                )
+            destination_mode = (
+                topology_row.get("flow_destination_mode", "").strip()
+                or FLOW_DESTINATION_FIXED
+            )
+            if destination_mode not in FLOW_DESTINATION_MODES:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: unsupported "
+                    f"flow_destination_mode {destination_mode!r}"
+                )
+            if (
+                destination_mode == FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR
+                and source != destination
+            ):
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: random_route_or_neighbor "
+                    "flow must use its source as flow_dst"
+                )
+            packet_bytes = _scenario_uint(
+                path,
+                topology_row_number,
+                "flow_packet_bytes",
+                topology_row["flow_packet_bytes"],
+            )
+            dscp = _scenario_uint(
+                path,
+                topology_row_number,
+                "flow_dscp",
+                topology_row["flow_dscp"],
+            )
+            if packet_bytes == 0 or packet_bytes > 0xFFFFFFFF:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: flow_packet_bytes is out of range"
+                )
+            if dscp > 7:
+                raise WorkflowError(
+                    f"{path}:{topology_row_number}: flow_dscp must be in 0..7"
+                )
+            for field, positive in (
+                ("flow_start_s", False),
+                ("flow_interval_s", True),
+            ):
+                try:
+                    value = float(topology_row[field])
+                except ValueError as error:
+                    raise WorkflowError(
+                        f"{path}:{topology_row_number}: {field} is not numeric"
+                    ) from error
+                if (
+                    not math.isfinite(value)
+                    or value < 0.0
+                    or (positive and value == 0.0)
+                ):
+                    raise WorkflowError(
+                        f"{path}:{topology_row_number}: {field} is out of range"
+                    )
+            flows.append(
+                {
+                    "source": source,
+                    "destination": destination,
+                    "destination_mode": destination_mode,
+                    "packet_bytes": packet_bytes,
+                    "dscp": dscp,
+                }
+            )
+
+        if application_profile in {
+            "legacy-send-only-no-dscp",
+            "legacy-send-to-from-no-dscp",
+        }:
+            gateway_ids = [
+                node["node_id"] for node in nodes if node["node_type"] == "gateway"
+            ]
+            if len(gateway_ids) != 1:
+                raise WorkflowError(
+                    f"{path}: legacy application profile requires exactly one gateway"
+                )
+            gateway = gateway_ids[0]
+            dynamic_count = 0
+            for flow in flows:
+                if flow["dscp"] != 0:
+                    raise WorkflowError(
+                        f"{path}: legacy no-DSCP application profile requires "
+                        "flow_dscp=0"
+                    )
+                if (
+                    flow["destination_mode"]
+                    == FLOW_DESTINATION_RANDOM_ROUTE_OR_NEIGHBOR
+                ):
+                    dynamic_count += 1
+                    valid = flow["source"] == gateway
+                else:
+                    valid = (
+                        flow["source"] != gateway
+                        and flow["destination"] == gateway
+                    )
+                if not valid:
+                    raise WorkflowError(
+                        f"{path}: legacy application flow topology is invalid"
+                    )
+            expected_dynamic = int(
+                application_profile == "legacy-send-to-from-no-dscp"
+            )
+            if dynamic_count != expected_dynamic:
+                raise WorkflowError(
+                    f"{path}: legacy application profile has the wrong "
+                    "gateway-origin flow count"
+                )
         return {
             "scenario": scenario,
             "application_profile": application_profile,
@@ -352,7 +594,20 @@ def load_scenario_run(path: Path) -> dict[str, Any]:
             "source_sha256": source_sha256,
             "duration_s": duration_s,
             "seed": int(seed_value),
-            "flow_count": flow_count,
+            "topology": {
+                "node_count": len(nodes),
+                "node_ids": sorted(node_ids),
+                "gateway_ids": sorted(
+                    node["node_id"]
+                    for node in nodes
+                    if node["node_type"] == "gateway"
+                ),
+                "nodes": nodes,
+                "flow_count": len(flows),
+                "flows": flows,
+            },
+            "flow_count": len(flows),
+            "flows": flows,
         }
 
 
@@ -360,7 +615,7 @@ def validate_app_admission_diagnostics(
     path: Path,
     scenario: str,
     application_profile: str,
-    expected_flow_count: int,
+    expected_flows: list[dict[str, Any]],
 ) -> dict[str, int]:
     """Validate compact per-flow gate counters emitted by the runner."""
 
@@ -369,6 +624,9 @@ def validate_app_admission_diagnostics(
         "scenario",
         "application_profile",
         "flow_index",
+        "source",
+        "configured_destination",
+        "destination_mode",
         "attempts",
         "admitted",
         "blocked_discovery",
@@ -399,10 +657,10 @@ def validate_app_admission_diagnostics(
             )
         rows = list(reader)
 
-    if len(rows) != expected_flow_count:
+    if len(rows) != len(expected_flows):
         raise WorkflowError(
             "application admission diagnostics flow count does not match the "
-            f"scenario: expected {expected_flow_count}, found {len(rows)}",
+            f"scenario: expected {len(expected_flows)}, found {len(rows)}",
             stage="run_ns3",
         )
     totals = {
@@ -456,6 +714,33 @@ def validate_app_admission_diagnostics(
                 stage="run_ns3",
             )
         seen_indexes.add(flow_index)
+        if flow_index >= len(expected_flows):
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has an "
+                "out-of-range flow_index",
+                stage="run_ns3",
+            )
+        expected_flow = expected_flows[flow_index]
+        try:
+            actual_source = int(row["source"], 10)
+            actual_destination = int(row["configured_destination"], 10)
+        except ValueError as error:
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} has a "
+                "non-integer flow endpoint",
+                stage="run_ns3",
+            ) from error
+        if (
+            actual_source != expected_flow["source"]
+            or actual_destination != expected_flow["destination"]
+            or row["destination_mode"].strip()
+            != expected_flow["destination_mode"]
+        ):
+            raise WorkflowError(
+                f"application admission diagnostics row {row_number} does not "
+                "match the canonical flow topology",
+                stage="run_ns3",
+            )
         if any(value < 0 for value in counts.values()):
             raise WorkflowError(
                 f"application admission diagnostics row {row_number} has a "
@@ -490,7 +775,7 @@ def validate_app_admission_diagnostics(
         for field, value in counts.items():
             totals[field] += value
 
-    if seen_indexes != set(range(expected_flow_count)):
+    if seen_indexes != set(range(len(expected_flows))):
         raise WorkflowError(
             "application admission diagnostics flow_index values are not "
             "contiguous from zero",
@@ -878,6 +1163,7 @@ def _load_and_validate_ns3_provenance(
         input_record.get("path") != str(trace.resolve())
         or input_record.get("sha256") != digest(trace)
         or input_record.get("size_bytes") != trace.stat().st_size
+        or output_record.get("path") != str(aggregates.resolve())
         or output_record.get("sha256") != digest(aggregates)
         or output_record.get("size_bytes") != aggregates.stat().st_size
     ):
@@ -1099,50 +1385,84 @@ def _load_and_validate_ns3_provenance(
 def run_stage(
     name: str,
     command: list[str],
-    log_path: Path,
     stages: dict[str, Any],
-) -> int:
-    """Run one subprocess and retain merged stdout/stderr as evidence."""
+) -> tuple[int, str]:
+    """Run one subprocess; its caller validates outputs before writing the log."""
 
     record = {
         "command": command,
         "exit_code": None,
-        "log": log_path.name,
+        "log": None,
     }
     stages[name] = record
     try:
-        with log_path.open("w", encoding="utf-8") as log:
-            completed = subprocess.run(
-                command,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-            )
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
     except OSError as error:
-        log_path.write_text(f"error: {error}\n", encoding="utf-8")
         record["launch_error"] = str(error)
         raise WorkflowError(str(error), stage=name) from error
     record["exit_code"] = completed.returncode
-    return completed.returncode
+    return completed.returncode, completed.stdout
 
 
 def _artifact_records(output_dir: Path) -> dict[str, Any]:
     records: dict[str, Any] = {}
     for identity, filename in ARTIFACT_PATHS.items():
         path = output_dir / filename
-        records[identity] = None if not path.is_file() else {
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            records[identity] = None
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise WorkflowError(
+                f"managed artifact {filename!r} is not a single-link regular file",
+                stage="finalize",
+            )
+        records[identity] = {
             "path": filename,
             "sha256": digest(path),
-            "size_bytes": path.stat().st_size,
+            "size_bytes": metadata.st_size,
         }
     return records
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically replace a parent-written artifact without following links."""
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        metadata = os.lstat(path)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise WorkflowError(
+                f"atomic output {path.name!r} is not a regular file",
+                stage="finalize",
+            )
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _write_manifest(output_dir: Path, manifest: dict[str, Any]) -> None:
     manifest["artifacts"] = _artifact_records(output_dir)
-    (output_dir / MANIFEST_NAME).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    _atomic_write_text(
+        output_dir / MANIFEST_NAME,
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
     )
 
 
@@ -1150,21 +1470,91 @@ def _managed_filenames() -> tuple[str, ...]:
     return (*ARTIFACT_PATHS.values(), MANIFEST_NAME)
 
 
+def _paths_alias(first: Path, second: Path) -> bool:
+    """Recognize lexical, symlink, and existing hard-link aliases."""
+
+    try:
+        if first.resolve(strict=False) == second.resolve(strict=False):
+            return True
+    except (OSError, RuntimeError) as error:
+        raise WorkflowError(
+            f"cannot resolve path identity for {first} and {second}: {error}"
+        ) from error
+    try:
+        return os.path.samefile(first, second)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise WorkflowError(
+            f"cannot compare path identity for {first} and {second}: {error}"
+        ) from error
+
+
+def _output_directory_identity(output_dir: Path) -> tuple[int, int]:
+    metadata = os.lstat(output_dir)
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise WorkflowError("--output-dir changed identity or is not a real directory")
+    return metadata.st_dev, metadata.st_ino
+
+
+def _validate_managed_outputs(
+    output_dir: Path,
+    expected_directory_identity: tuple[int, int],
+    protected: dict[str, Path],
+    *,
+    allowed_present: set[str],
+    required_present: set[str],
+    stage: str,
+) -> None:
+    """Reject cross-stage symlink/hardlink injection before reads or writes."""
+
+    if _output_directory_identity(output_dir) != expected_directory_identity:
+        raise WorkflowError(
+            "--output-dir changed identity during the workflow", stage=stage
+        )
+    observed: set[str] = set()
+    for name in _managed_filenames():
+        path = output_dir / name
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise WorkflowError(
+                f"managed output {name!r} is not a single-link regular file",
+                stage=stage,
+            )
+        observed.add(name)
+        for label, protected_path in protected.items():
+            if _paths_alias(path, protected_path):
+                raise WorkflowError(
+                    f"managed output {name!r} aliases {label} input",
+                    stage=stage,
+                )
+    unexpected = sorted(observed - allowed_present)
+    missing = sorted(required_present - observed)
+    if unexpected:
+        raise WorkflowError(
+            f"unexpected managed outputs appeared: {unexpected}", stage=stage
+        )
+    if missing:
+        raise WorkflowError(
+            f"required managed outputs are absent: {missing}", stage=stage
+        )
+
+
 def _check_output_collisions(
     output_dir: Path, source_paths: dict[str, Path]
 ) -> None:
     """Reject an input/tool that would be replaced as a workflow artifact."""
 
-    targets = {
-        (output_dir / filename).resolve(): filename
-        for filename in _managed_filenames()
-    }
+    targets = [(output_dir / filename, filename) for filename in _managed_filenames()]
     for label, path in source_paths.items():
-        target_name = targets.get(path.resolve())
-        if target_name is not None:
-            raise WorkflowError(
-                f"{label} input collides with managed output target {target_name!r}"
-            )
+        for target, target_name in targets:
+            if _paths_alias(path, target):
+                raise WorkflowError(
+                    f"{label} input collides with managed output target {target_name!r}"
+                )
 
 
 def _classify_output_directory(output_dir: Path) -> str:
@@ -1375,6 +1765,14 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         scenario_run = load_scenario_run(arguments.scenario)
+        immutable_paths = {**inputs, **tools}
+        immutable_records = {
+            **manifest["inputs"],
+            **manifest["tools"],
+        }
+        _validate_immutable_file_records(
+            immutable_paths, immutable_records, stage="preflight"
+        )
         if (
             arguments.stop is not None
             and arguments.stop != scenario_run["duration_s"]
@@ -1396,8 +1794,32 @@ def main(argv: list[str] | None = None) -> int:
         _check_output_collisions(arguments.output_dir, {**inputs, **tools})
         output_classification = _classify_output_directory(arguments.output_dir)
         _prepare_output_directory(arguments.output_dir, output_classification)
-        output_ready = True
+        output_identity = _output_directory_identity(arguments.output_dir)
+
+        def boundary(
+            allowed_present: set[str],
+            required_present: set[str],
+            *,
+            stage: str,
+        ) -> None:
+            _validate_immutable_file_records(
+                immutable_paths, immutable_records, stage=stage
+            )
+            _validate_managed_outputs(
+                arguments.output_dir,
+                output_identity,
+                immutable_paths,
+                allowed_present=allowed_present,
+                required_present=required_present,
+                stage=stage,
+            )
+
+        present: set[str] = set()
+        boundary(present, present, stage="preflight")
         _write_manifest(arguments.output_dir, manifest)
+        present.add(MANIFEST_NAME)
+        boundary(present, present, stage="preflight")
+        output_ready = True
 
         opnet_extract_json = arguments.output_dir / ARTIFACT_PATHS[
             "opnet_extract_manifest"
@@ -1418,11 +1840,26 @@ def main(argv: list[str] | None = None) -> int:
         extract_command.extend(
             ("--probe-definition", str(arguments.probe_definition))
         )
-        extract_code = run_stage(
-            "extract_opnet",
-            extract_command,
-            arguments.output_dir / ARTIFACT_PATHS["opnet_extract_log"],
-            stages,
+        boundary(present, present, stage="extract_opnet")
+        extract_code, extract_log_text = run_stage(
+            "extract_opnet", extract_command, stages
+        )
+        extract_outputs = {opnet_extract_json.name, opnet_aggregates.name}
+        extract_allowed = present | extract_outputs
+        boundary(
+            extract_allowed,
+            present | (extract_outputs if extract_code == 0 else set()),
+            stage="extract_opnet",
+        )
+        extract_log = arguments.output_dir / ARTIFACT_PATHS["opnet_extract_log"]
+        _atomic_write_text(extract_log, extract_log_text)
+        stages["extract_opnet"]["log"] = extract_log.name
+        boundary(
+            extract_allowed | {extract_log.name},
+            present
+            | {extract_log.name}
+            | (extract_outputs if extract_code == 0 else set()),
+            stage="extract_opnet",
         )
         if extract_code != 0:
             raise WorkflowError(
@@ -1430,6 +1867,7 @@ def main(argv: list[str] | None = None) -> int:
                 stage="extract_opnet",
                 exit_code=extract_code,
             )
+        present |= extract_outputs | {extract_log.name}
         try:
             extract = json.loads(opnet_extract_json.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -1501,6 +1939,7 @@ def main(argv: list[str] | None = None) -> int:
                     "duration_s": scenario_run["duration_s"],
                     "seed": scenario_run["seed"],
                     "source_sha256": scenario_run["source_sha256"],
+                    "topology": scenario_run["topology"],
                 },
                 "opnet_execution": opnet_identity,
             },
@@ -1537,6 +1976,7 @@ def main(argv: list[str] | None = None) -> int:
                 "source_executable_sha256": scenario_run[
                     "source_executable_sha256"
                 ],
+                "topology": scenario_run["topology"],
                 "aggregate_trace_only": True,
                 "quiet_model_logs": True,
                 "app_admission_diagnostics_schema": (
@@ -1567,11 +2007,26 @@ def main(argv: list[str] | None = None) -> int:
             "--aggregateTraceOnly=1",
             "--quietModelLogs=1",
         ]
-        runner_code = run_stage(
-            "run_ns3",
-            runner_command,
-            arguments.output_dir / ARTIFACT_PATHS["ns3_run_log"],
-            stages,
+        boundary(present, present, stage="run_ns3")
+        runner_code, runner_log_text = run_stage(
+            "run_ns3", runner_command, stages
+        )
+        runner_outputs = {ns3_trace.name, app_diagnostics.name}
+        runner_allowed = present | runner_outputs
+        boundary(
+            runner_allowed,
+            present | (runner_outputs if runner_code == 0 else set()),
+            stage="run_ns3",
+        )
+        runner_log = arguments.output_dir / ARTIFACT_PATHS["ns3_run_log"]
+        _atomic_write_text(runner_log, runner_log_text)
+        stages["run_ns3"]["log"] = runner_log.name
+        boundary(
+            runner_allowed | {runner_log.name},
+            present
+            | {runner_log.name}
+            | (runner_outputs if runner_code == 0 else set()),
+            stage="run_ns3",
         )
         if runner_code != 0:
             raise WorkflowError(
@@ -1579,19 +2034,13 @@ def main(argv: list[str] | None = None) -> int:
                 stage="run_ns3",
                 exit_code=runner_code,
             )
-        if not ns3_trace.is_file():
-            raise WorkflowError("ns-3 runner produced no trace", stage="run_ns3")
-        if not app_diagnostics.is_file():
-            raise WorkflowError(
-                "ns-3 runner produced no application admission diagnostics",
-                stage="run_ns3",
-            )
+        present |= runner_outputs | {runner_log.name}
         stages["run_ns3"]["application_admission_totals"] = (
             validate_app_admission_diagnostics(
                 app_diagnostics,
                 scenario_run["scenario"],
                 scenario_run["application_profile"],
-                scenario_run["flow_count"],
+                scenario_run["flows"],
             )
         )
 
@@ -1618,11 +2067,28 @@ def main(argv: list[str] | None = None) -> int:
             "--provenance",
             str(ns3_provenance),
         ]
-        aggregate_code = run_stage(
-            "aggregate_ns3",
-            aggregate_command,
-            arguments.output_dir / ARTIFACT_PATHS["ns3_aggregate_log"],
-            stages,
+        boundary(present, present, stage="aggregate_ns3")
+        aggregate_code, aggregate_log_text = run_stage(
+            "aggregate_ns3", aggregate_command, stages
+        )
+        aggregate_outputs = {ns3_aggregates.name, ns3_provenance.name}
+        aggregate_allowed = present | aggregate_outputs
+        boundary(
+            aggregate_allowed,
+            present | (aggregate_outputs if aggregate_code == 0 else set()),
+            stage="aggregate_ns3",
+        )
+        aggregate_log = arguments.output_dir / ARTIFACT_PATHS[
+            "ns3_aggregate_log"
+        ]
+        _atomic_write_text(aggregate_log, aggregate_log_text)
+        stages["aggregate_ns3"]["log"] = aggregate_log.name
+        boundary(
+            aggregate_allowed | {aggregate_log.name},
+            present
+            | {aggregate_log.name}
+            | (aggregate_outputs if aggregate_code == 0 else set()),
+            stage="aggregate_ns3",
         )
         if aggregate_code != 0:
             raise WorkflowError(
@@ -1630,6 +2096,7 @@ def main(argv: list[str] | None = None) -> int:
                 stage="aggregate_ns3",
                 exit_code=aggregate_code,
             )
+        present |= aggregate_outputs | {aggregate_log.name}
         exact_matching = _load_and_validate_ns3_provenance(
             ns3_provenance,
             ns3_trace,
@@ -1680,12 +2147,22 @@ def main(argv: list[str] | None = None) -> int:
         ]
         for statistic in selected:
             compare_command.extend(("--statistic", statistic))
-        compare_code = run_stage(
-            "compare",
-            compare_command,
-            arguments.output_dir / ARTIFACT_PATHS["comparison_log"],
-            stages,
+        boundary(present, present, stage="compare")
+        compare_code, compare_log_text = run_stage(
+            "compare", compare_command, stages
         )
+        comparison_outputs = {report.name, normalized.name}
+        comparison_allowed = present | comparison_outputs
+        boundary(
+            comparison_allowed,
+            present | comparison_outputs,
+            stage="compare",
+        )
+        comparison_log = arguments.output_dir / ARTIFACT_PATHS["comparison_log"]
+        _atomic_write_text(comparison_log, compare_log_text)
+        stages["compare"]["log"] = comparison_log.name
+        present |= comparison_outputs | {comparison_log.name}
+        boundary(present, present, stage="finalize")
         manifest["status"] = (
             "selected_comparison_passed"
             if compare_code == 0
@@ -1698,7 +2175,9 @@ def main(argv: list[str] | None = None) -> int:
                 "exit_code": compare_code,
             }
         if output_ready:
+            boundary(present, present, stage="finalize")
             _write_manifest(arguments.output_dir, manifest)
+            boundary(present, present, stage="finalize")
         return compare_code
     except WorkflowError as error:
         manifest["status"] = "failed"
@@ -1708,7 +2187,21 @@ def main(argv: list[str] | None = None) -> int:
             "exit_code": error.exit_code,
         }
         if output_ready:
-            _write_manifest(arguments.output_dir, manifest)
+            try:
+                failure_allowed = set(_managed_filenames())
+                boundary(
+                    failure_allowed, {MANIFEST_NAME}, stage="finalize"
+                )
+                _write_manifest(arguments.output_dir, manifest)
+                boundary(
+                    failure_allowed, {MANIFEST_NAME}, stage="finalize"
+                )
+            except (OSError, WorkflowError) as manifest_error:
+                print(
+                    f"error: failure manifest could not be safely updated: "
+                    f"{manifest_error}",
+                    file=sys.stderr,
+                )
         print(f"error: {error}", file=sys.stderr)
         return error.exit_code
     except OSError as error:
@@ -1719,7 +2212,21 @@ def main(argv: list[str] | None = None) -> int:
             "exit_code": 2,
         }
         if output_ready:
-            _write_manifest(arguments.output_dir, manifest)
+            try:
+                failure_allowed = set(_managed_filenames())
+                boundary(
+                    failure_allowed, {MANIFEST_NAME}, stage="finalize"
+                )
+                _write_manifest(arguments.output_dir, manifest)
+                boundary(
+                    failure_allowed, {MANIFEST_NAME}, stage="finalize"
+                )
+            except (OSError, WorkflowError) as manifest_error:
+                print(
+                    f"error: failure manifest could not be safely updated: "
+                    f"{manifest_error}",
+                    file=sys.stderr,
+                )
         print(f"error: {error}", file=sys.stderr)
         return 2
 

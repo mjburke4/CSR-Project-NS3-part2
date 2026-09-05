@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import csv
+import contextlib
 import copy
 import hashlib
 import importlib.util
 import json
+import io
 import os
 from pathlib import Path
 import shutil
@@ -91,12 +93,14 @@ def write_scenario(
     source_executable_sha256: str | None = None,
 ) -> None:
     if source_executable_sha256 is None:
-        source_executable_sha256 = (
-            WORKFLOW.HIST_ADB97C54_EXECUTABLE_SHA256
-            if hop_security_profile
-            == WORKFLOW.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE
-            else ""
-        )
+        source_executable_sha256 = {
+            WORKFLOW.HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE: (
+                WORKFLOW.HIST_DD3F38E8_EXECUTABLE_SHA256
+            ),
+            WORKFLOW.HOP_SECURITY_PROFILE_HIST_ADB97C54_BARE: (
+                WORKFLOW.HIST_ADB97C54_EXECUTABLE_SHA256
+            ),
+        }.get(hop_security_profile, "")
     rows = [
         {
             "record": "run",
@@ -157,6 +161,20 @@ def write_scenario(
             "flow_dscp": "0",
         },
     ]
+    if application_profile == "legacy-send-to-from-no-dscp":
+        rows.append(
+            {
+                "record": "flow",
+                "schema": WORKFLOW.SCENARIO_SCHEMA,
+                "flow_src": "1",
+                "flow_dst": "1",
+                "flow_destination_mode": "random_route_or_neighbor",
+                "flow_start_s": "1",
+                "flow_interval_s": "600",
+                "flow_packet_bytes": "16",
+                "flow_dscp": "0",
+            }
+        )
     if mac_profile is not None:
         rows[0]["mac_profile"] = mac_profile
     if hop_security_profile is not None:
@@ -319,6 +337,31 @@ def load_uncached_module(name: str, path: Path):
     return module
 
 
+def copied_workflow_with_tool(
+    root: Path, tool_name: str, replacement: str
+):
+    """Load an isolated workflow whose selected child utility is adversarial."""
+
+    tools = root / "tools"
+    tools.mkdir()
+    workflow_path = tools / SCRIPT.name
+    shutil.copy2(SCRIPT, workflow_path)
+    for name in (
+        "extract-opnet-ov.py",
+        "aggregate-ns3-trace.py",
+        "compare-opnet-ns3-aggregates.py",
+    ):
+        destination = tools / name
+        if name == tool_name:
+            destination.write_text(replacement, encoding="utf-8")
+        else:
+            shutil.copy2(ROOT / "utils" / name, destination)
+    return load_uncached_module(
+        f"csr_opnet_adversarial_{tool_name.replace('-', '_').replace('.', '_')}",
+        workflow_path,
+    )
+
+
 class AggregateWorkflowTests(unittest.TestCase):
     def prepare(
         self,
@@ -449,6 +492,33 @@ class AggregateWorkflowTests(unittest.TestCase):
                     "duration_s": 60000.0,
                     "seed": 128,
                     "source_sha256": "0" * 64,
+                    "topology": {
+                        "node_count": 2,
+                        "node_ids": [1, 2],
+                        "gateway_ids": [1],
+                        "nodes": [
+                            {
+                                "node_id": 1,
+                                "name": "gateway",
+                                "node_type": "gateway",
+                            },
+                            {
+                                "node_id": 2,
+                                "name": "ordinary",
+                                "node_type": "ordinary",
+                            },
+                        ],
+                        "flow_count": 1,
+                        "flows": [
+                            {
+                                "source": 2,
+                                "destination": 1,
+                                "destination_mode": "fixed",
+                                "packet_bytes": 16,
+                                "dscp": 0,
+                            }
+                        ],
+                    },
                 },
             )
             opnet_identity = configuration["identities"]["opnet_execution"]
@@ -489,6 +559,33 @@ class AggregateWorkflowTests(unittest.TestCase):
                     "gateway_discovery": False,
                     "opnet_app_gating": False,
                     "quiet_model_logs": True,
+                    "topology": {
+                        "node_count": 2,
+                        "node_ids": [1, 2],
+                        "gateway_ids": [1],
+                        "nodes": [
+                            {
+                                "node_id": 1,
+                                "name": "gateway",
+                                "node_type": "gateway",
+                            },
+                            {
+                                "node_id": 2,
+                                "name": "ordinary",
+                                "node_type": "ordinary",
+                            },
+                        ],
+                        "flow_count": 1,
+                        "flows": [
+                            {
+                                "source": 2,
+                                "destination": 1,
+                                "destination_mode": "fixed",
+                                "packet_bytes": 16,
+                                "dscp": 0,
+                            }
+                        ],
+                    },
                 },
             )
             self.assertTrue(
@@ -989,6 +1086,126 @@ class AggregateWorkflowTests(unittest.TestCase):
             self.assertEqual(scenario.read_bytes(), before)
             self.assertFalse((output / WORKFLOW.MANIFEST_NAME).exists())
 
+    def test_hardlinked_input_collision_is_rejected_before_output_handling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scenario, ov, _pb, runner = self.prepare(root)
+            output = root / "run"
+            output.mkdir()
+            target = output / "ns3-trace.csv"
+            os.link(scenario, target)
+            before = scenario.read_bytes()
+            completed = subprocess.run(
+                self.command(scenario, ov, runner, output),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("collides with managed output target", completed.stderr)
+            self.assertEqual(scenario.read_bytes(), before)
+            self.assertEqual(target.read_bytes(), before)
+            self.assertFalse((output / WORKFLOW.MANIFEST_NAME).exists())
+
+    def test_runner_cannot_inject_future_managed_symlinks(self) -> None:
+        targets = (
+            "ns3-run.log",
+            "ns3-aggregates.csv",
+            "ns3-aggregate.log",
+            "aggregate-report.json",
+            "aggregate-normalized.csv",
+            "aggregate-compare.log",
+        )
+        for target_name in targets:
+            with self.subTest(target=target_name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                scenario, ov, _pb, runner = self.prepare(root)
+                runner.write_text(
+                    textwrap.dedent(
+                        f"""\
+                        #!/usr/bin/env python3
+                        from pathlib import Path
+                        import sys
+                        options = dict(
+                            argument[2:].split("=", 1)
+                            for argument in sys.argv[1:]
+                            if argument.startswith("--") and "=" in argument
+                        )
+                        Path(options["trace"]).with_name({target_name!r}).symlink_to(
+                            Path(options["scenario"])
+                        )
+                        """
+                    ),
+                    encoding="utf-8",
+                )
+                os.chmod(runner, 0o755)
+                output = root / "run"
+                before = scenario.read_bytes()
+                completed = subprocess.run(
+                    self.command(scenario, ov, runner, output),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn("single-link regular file", completed.stderr)
+                self.assertEqual(scenario.read_bytes(), before)
+                self.assertNotIn("aggregate_ns3", completed.stderr)
+
+    def test_aggregator_cannot_inject_future_comparison_symlink(self) -> None:
+        malicious = textwrap.dedent(
+            """\
+            from pathlib import Path
+            import sys
+            output = Path(sys.argv[2])
+            output.with_name("aggregate-report.json").symlink_to(Path(sys.argv[1]))
+            """
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflow = copied_workflow_with_tool(
+                root, "aggregate-ns3-trace.py", malicious
+            )
+            scenario, ov, _pb, runner = self.prepare(root)
+            output = root / "run"
+            before = scenario.read_bytes()
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                result = workflow.main(
+                    self.command(scenario, ov, runner, output)[2:]
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("single-link regular file", error.getvalue())
+            self.assertEqual(scenario.read_bytes(), before)
+
+    def test_comparator_cannot_inject_report_symlink(self) -> None:
+        malicious = textwrap.dedent(
+            """\
+            from pathlib import Path
+            import sys
+            report = Path(sys.argv[sys.argv.index("--report") + 1])
+            report.symlink_to(Path(sys.argv[1]))
+            """
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflow = copied_workflow_with_tool(
+                root, "compare-opnet-ns3-aggregates.py", malicious
+            )
+            scenario, ov, _pb, runner = self.prepare(root)
+            output = root / "run"
+            before = scenario.read_bytes()
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                result = workflow.main(
+                    self.command(scenario, ov, runner, output)[2:]
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("single-link regular file", error.getvalue())
+            self.assertEqual(scenario.read_bytes(), before)
+
     def test_owned_rerun_replaces_only_managed_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1086,6 +1303,7 @@ class AggregateWorkflowTests(unittest.TestCase):
                     "size_bytes": trace.stat().st_size,
                 },
                 "output": {
+                    "path": str(aggregates.resolve()),
                     "sha256": WORKFLOW.digest(aggregates),
                     "size_bytes": aggregates.stat().st_size,
                 },
@@ -1152,6 +1370,21 @@ class AggregateWorkflowTests(unittest.TestCase):
                 ],
                 1,
             )
+
+            wrong_output_path = copy.deepcopy(provenance)
+            wrong_output_path["output"]["path"] = str(
+                (root / "different.csv").resolve()
+            )
+            provenance_path.write_text(
+                json.dumps(wrong_output_path), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "does not match generated artifacts"
+            ):
+                WORKFLOW._load_and_validate_ns3_provenance(
+                    provenance_path, trace, aggregates, "fixture"
+                )
+            provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
 
             valid_provenance = copy.deepcopy(provenance)
             malformed_cases = {}
@@ -1338,6 +1571,77 @@ class AggregateWorkflowTests(unittest.TestCase):
                         WORKFLOW.load_scenario_run(path)["mac_profile"], profile
                     )
 
+    def test_scenario_topology_is_validated_before_runner_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scenario.csv"
+            write_scenario(path)
+            with path.open(encoding="utf-8", newline="") as stream:
+                reader = csv.DictReader(stream)
+                columns = reader.fieldnames
+                rows = list(reader)
+            self.assertIsNotNone(columns)
+            rows[2]["node_id"] = "1"
+            with path.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.DictWriter(
+                    stream, fieldnames=columns, lineterminator="\n"
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            with self.assertRaisesRegex(WORKFLOW.WorkflowError, "duplicate node_id"):
+                WORKFLOW.load_scenario_run(path)
+
+            write_scenario(path)
+            with path.open(encoding="utf-8", newline="") as stream:
+                reader = csv.DictReader(stream)
+                columns = reader.fieldnames
+                rows = list(reader)
+            rows[-1]["flow_dst"] = "99"
+            with path.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.DictWriter(
+                    stream, fieldnames=columns, lineterminator="\n"
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "flow references an unknown node"
+            ):
+                WORKFLOW.load_scenario_run(path)
+
+    def test_broadcast_id_is_rejected_as_node_or_flow_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scenario.csv"
+            for field in ("node_id", "flow_src", "flow_dst"):
+                with self.subTest(field=field):
+                    write_scenario(path)
+                    with path.open(encoding="utf-8", newline="") as stream:
+                        reader = csv.DictReader(stream)
+                        columns = reader.fieldnames
+                        rows = list(reader)
+                    target = next(
+                        row
+                        for row in rows
+                        if row["record"] == ("node" if field == "node_id" else "flow")
+                    )
+                    target[field] = str(0xFFFFFF)
+                    with path.open("w", encoding="utf-8", newline="") as stream:
+                        writer = csv.DictWriter(
+                            stream, fieldnames=columns, lineterminator="\n"
+                        )
+                        writer.writeheader()
+                        writer.writerows(rows)
+                    with self.assertRaisesRegex(
+                        WORKFLOW.WorkflowError, "concrete 24-bit address"
+                    ):
+                        WORKFLOW.load_scenario_run(path)
+
+    def test_path_alias_resolution_errors_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            loop = root / "loop"
+            loop.symlink_to(loop)
+            with self.assertRaisesRegex(WORKFLOW.WorkflowError, "resolve path identity"):
+                WORKFLOW._paths_alias(loop, root / "other")
+
     def test_hop_security_profile_is_atomic_and_version_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "scenario.csv"
@@ -1376,6 +1680,39 @@ class AggregateWorkflowTests(unittest.TestCase):
                 loaded["hop_security_behavior"],
                 {"ordinary_data": "bare", "ack_dack": "bare"},
             )
+
+            write_scenario(
+                path,
+                application_profile="legacy-send-to-from-no-dscp",
+                mac_profile="hist-2015-fine-one-based-table-no-avoid",
+                hop_security_profile=(
+                    WORKFLOW.HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE
+                ),
+            )
+            loaded = WORKFLOW.load_scenario_run(path)
+            self.assertEqual(
+                loaded["hop_security_profile"],
+                WORKFLOW.HOP_SECURITY_PROFILE_HIST_DD3F38E8_BARE,
+            )
+            self.assertEqual(
+                loaded["source_executable_sha256"],
+                WORKFLOW.HIST_DD3F38E8_EXECUTABLE_SHA256,
+            )
+            self.assertEqual(
+                loaded["hop_security_behavior"],
+                {"ordinary_data": "bare", "ack_dack": "bare"},
+            )
+
+            write_scenario(
+                path,
+                application_profile="legacy-send-to-from-no-dscp",
+                mac_profile="hist-2015-fine-one-based-table-no-avoid",
+                hop_security_profile="production-pairwise16",
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "dd3f38e8 executable tuple must select"
+            ):
+                WORKFLOW.load_scenario_run(path)
 
             write_scenario(
                 path,
@@ -1550,19 +1887,57 @@ class AggregateWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "app.csv"
             path.write_text(
-                "schema,scenario,application_profile,flow_index,attempts,"
+                "schema,scenario,application_profile,flow_index,source,"
+                "configured_destination,destination_mode,attempts,"
                 "admitted,blocked_discovery,blocked_topology,"
                 "blocked_gateway_route,blocked_destination,blocked_nsdp,"
                 "first_admitted_s,last_admitted_s\n"
                 "csr-app-admission-diagnostics-v1,fixture,current-send-only,"
-                "0,2,1,0,0,0,0,0,1,1\n",
+                "0,2,1,fixed,2,1,0,0,0,0,0,1,1\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(
                 WORKFLOW.WorkflowError, "do not partition attempts"
             ):
                 WORKFLOW.validate_app_admission_diagnostics(
-                    path, "fixture", "current-send-only", 1
+                    path,
+                    "fixture",
+                    "current-send-only",
+                    [
+                        {
+                            "source": 2,
+                            "destination": 1,
+                            "destination_mode": "fixed",
+                        }
+                    ],
+                )
+
+    def test_application_diagnostics_must_match_canonical_flow_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "app.csv"
+            path.write_text(
+                "schema,scenario,application_profile,flow_index,source,"
+                "configured_destination,destination_mode,attempts,admitted,"
+                "blocked_discovery,blocked_topology,blocked_gateway_route,"
+                "blocked_destination,blocked_nsdp,first_admitted_s,last_admitted_s\n"
+                "csr-app-admission-diagnostics-v1,fixture,current-send-only,"
+                "0,3,1,fixed,1,1,0,0,0,0,0,1,1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                WORKFLOW.WorkflowError, "canonical flow topology"
+            ):
+                WORKFLOW.validate_app_admission_diagnostics(
+                    path,
+                    "fixture",
+                    "current-send-only",
+                    [
+                        {
+                            "source": 2,
+                            "destination": 1,
+                            "destination_mode": "fixed",
+                        }
+                    ],
                 )
 
     def test_inconsistent_vector_axes_are_rejected(self) -> None:

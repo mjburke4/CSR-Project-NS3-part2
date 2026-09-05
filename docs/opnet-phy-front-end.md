@@ -1,6 +1,6 @@
 # OPNET PHY front-end parity
 
-Updated: 2026-08-27
+Updated: 2026-09-05
 
 ## Scope
 
@@ -87,12 +87,25 @@ signals are handled by payload rate:
 
 | Overlap | Runtime treatment | Downstream use |
 | --- | --- | --- |
-| Different rate | Add the other received power in watts to `NOISE_ACCUM`; track peak total noise and minimum SNR | Interval SNR and standard payload BER |
-| Same spread rate (8-128 kbit/s) | Do not add power to noise; retain strongest jammer-to-signal ratio and signed start-time offset | Exact `csr_*dBJSR_*ChipOff` table lookup |
+| Different rate | Add the other received power in watts to `NOISE_ACCUM` only on each side whose `PK_ACCEPT` is true; track peak total noise and minimum SNR | Interval SNR and standard payload BER |
+| Same spread rate (8-128 kbit/s) | Do not add power to noise; overwrite the receiver-global jammer-to-signal ratio and signed start-time offset for each collision pair | Exact `csr_*dBJSR_*ChipOff` table lookup |
 | Extended high-rate differential mode (500-kbit/s DPSK or 1000-kbit/s DQPSK) | Retain each tracked signal's signed jammer/desired ratio and derive its payload-noise contribution | Rate-specific analytical DPSK or recovered `dqpsk` lookup at the interference-adjusted payload SNR |
 
 This preserves the otherwise surprising split in `br_inoise`: a same-rate
 jammer can corrupt a frame without changing the SNR reported by `br_snr`.
+It also preserves the enabled `USE_PK_ACCEPT_TDA` branch. A signal rejected by
+`mark_sync()`, `clear_sync()`, or `start_track()` still increments both
+collision counters, but different-rate noise is added only to the accepted
+packet, and same-rate JSR is oriented around whichever packet remains
+accepted. Each additive contribution is removed by identity at its `END_RX`.
+The shared `same_speed`, JSR, and offset values follow prior-signal arrival
+order because each later pair overwrites them. At `start_track()`, JSR and
+offset are overwritten once more using the selected signal and the strongest
+rejected active preamble, without changing `same_speed` and without a rate
+check, exactly as in the process source. The runtime closes the current BER
+interval immediately before that overwrite and starts a new one immediately
+after it, so the selected/jammer values cannot be applied retroactively to
+the Search interval.
 The high-rate differential adjustment is payload-local because the supplied
 archive contains no 500/1000-kbit/s JSR/offset collision tables; the S0 header
 remains on its collision-table path. The 500-kbit/s payload evaluates the
@@ -135,6 +148,9 @@ receiver-drop vectors rather than these per-packet PHY intermediates.
 - receiver-bandwidth noise scaling;
 - live different-rate additive interference;
 - live same-rate JSR and time-offset metadata;
+- `PK_ACCEPT`-asymmetric additive noise and JSR orientation, exact contributor
+  removal, collision singleton overwrite order, and the `start_track()`
+  strongest-rejected overwrite plus its exact BER-interval boundary;
 - runtime channel-mismatch rejection.
 
 ## Remaining PHY boundary

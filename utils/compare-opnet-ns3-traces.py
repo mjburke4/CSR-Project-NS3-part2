@@ -628,9 +628,53 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _paths_alias(first: Path, second: Path) -> bool:
+    """Match lexical/symlink aliases and existing hard links."""
+
+    try:
+        if first.resolve(strict=False) == second.resolve(strict=False):
+            return True
+        return first.samefile(second)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise TraceError(f"cannot compare paths {first} and {second}: {error}") from error
+
+
+def _validate_cli_paths(arguments: argparse.Namespace) -> None:
+    """Protect both input traces and keep all requested outputs distinct."""
+
+    inputs = (
+        ("OPNET trace", arguments.opnet_trace),
+        ("ns-3 trace", arguments.ns3_trace),
+    )
+    outputs = tuple(
+        (label, path)
+        for label, path in (
+            ("report", arguments.report),
+            ("normalized OPNET trace", arguments.normalized_opnet),
+            ("normalized ns-3 trace", arguments.normalized_ns3),
+        )
+        if path is not None
+    )
+    for output_label, output in outputs:
+        for input_label, input_path in inputs:
+            if _paths_alias(output, input_path):
+                raise TraceError(
+                    f"{output_label} output must not alias {input_label} input"
+                )
+    for index, (first_label, first) in enumerate(outputs):
+        for second_label, second in outputs[index + 1 :]:
+            if _paths_alias(first, second):
+                raise TraceError(
+                    f"{first_label} and {second_label} outputs must be distinct"
+                )
+
+
 def main() -> None:
     arguments = build_parser().parse_args()
     try:
+        _validate_cli_paths(arguments)
         included_events: set[str] = set()
         for raw_event in arguments.event:
             event = re.sub(

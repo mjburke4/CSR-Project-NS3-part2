@@ -1,6 +1,6 @@
 # OPNET PHY BER, ECC, and closure parity
 
-Updated: 2026-08-28
+Updated: 2026-09-05
 
 ## Scope
 
@@ -159,8 +159,15 @@ JSR uses the asymmetric source boundaries at -10.5, -7.5, -4.5, and -1.5 dB.
 For 8-128-kbit/s collision tables, signed timing is reduced modulo the
 applicable payload interval and rounded to the nearest one-microsecond
 half-chip; the endpoint wraps to zero. Receiver `same_speed`, JSR, and timing
-state intentionally retain the source's shared, last-collision semantics. The
-high-rate payload fallback does not quantize or use that time offset. Instead,
+state intentionally retain the source's shared, last-collision semantics.
+Prior collision pairs are processed in arrival order. The enabled
+`USE_PK_ACCEPT_TDA` path orients same-rate JSR around the accepted packet, and
+`start_track()` then overwrites JSR/offset with the selected signal versus the
+strongest rejected active preamble while leaving `same_speed` untouched. The
+overwrite is an explicit BER-interval boundary: the preceding Search interval
+retains the last `br_inoise` snapshot and only the following interval observes
+the `start_track()` values. The high-rate payload fallback does not quantize
+or use that time offset. Instead,
 the tracked signal's signed jammer/desired ratio supplies jammer power because
 the archive has no corresponding DPSK/DQPSK collision family. Active high-rate
 jammers are recomputed at every boundary, so positive JSR is preserved when a
